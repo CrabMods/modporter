@@ -141,9 +141,9 @@ For the full success gate, prefer:
 | Target | Provider | Notes |
 |--------|----------|-------|
 | ConstructionWand | `git` | Required baseline target |
-| InstantWorldMirror | `git` | Public benchmark target from `crabsatellite/InstantWorldMirror` branch `1.20.1` |
-| HotBath | `git` | Public benchmark target from `crabsatellite/hotBath` branch `1.20.1`; publishes a temporary benchmark jar for dependents |
-| ShowerCore | `git` | Public benchmark target from `crabsatellite/ShowerCore` branch `1.20.1`; depends on `hotbath`, whose dependency jar is staged automatically |
+| InstantWorldMirror | `git` | Public benchmark target from `CrabMods/InstantWorldMirror` branch `1.20.1` |
+| HotBath | `git` | Public benchmark target from `CrabMods/hotBath` branch `1.20.1`; publishes a temporary benchmark jar for dependents |
+| ShowerCore | `git` | Public benchmark target from `CrabMods/ShowerCore` branch `1.20.1`; depends on `hotbath`, whose dependency jar is staged automatically |
 | Sakura Mod | `git` | Public benchmark target from upstream `0999312/Sakura_mod` branch `1.20.1` with broad API coverage |
 | Twilight Forest | `git` | Public large-mod target from official `TeamTwilight/twilightforest` branch `1.20.1`; compare failures against their official `1.21.1` branch |
 | The Aether | `git` | Public large-mod target from official `The-Aether-Team/The-Aether` branch `1.20.1-develop` |

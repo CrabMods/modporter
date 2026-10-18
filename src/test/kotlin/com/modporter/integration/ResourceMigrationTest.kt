@@ -143,7 +143,7 @@ class ResourceMigrationTest {
         ResourceMigrationPass(db, addToolCredit = true).apply(creditedProject)
         val creditedContent = creditedProject.resolve("src/main/resources/META-INF/neoforge.mods.toml").readText()
 
-        assertTrue(creditedContent.contains("credits=\"Ported with ModPorter: https://github.com/crabsatellite/modporter\""), creditedContent)
+        assertTrue(creditedContent.contains("credits=\"Ported with ModPorter: https://github.com/CrabMods/modporter\""), creditedContent)
         assertFalse(creditedContent.contains("Ported with ModPorter to NeoForge 1.21.1"), creditedContent)
     }
 
@@ -166,7 +166,7 @@ class ResourceMigrationTest {
         ResourceMigrationPass(MappingDatabase.loadDefault(), addToolCredit = true).apply(projectDir)
 
         val content = metaInf.resolve("neoforge.mods.toml").readText()
-        assertTrue(content.contains("credits=\"Original helpers; Ported with ModPorter: https://github.com/crabsatellite/modporter\""), content)
+        assertTrue(content.contains("credits=\"Original helpers; Ported with ModPorter: https://github.com/CrabMods/modporter\""), content)
         assertTrue(content.contains("authors=\"Original Author\""), content)
     }
 

@@ -12,7 +12,7 @@ data class PipelineOptions(
     val resolveDeps: Boolean = true,
     val addToolCredit: Boolean = false,
     val toolCreditName: String = "ModPorter",
-    val toolCreditUrl: String = "https://github.com/crabsatellite/modporter"
+    val toolCreditUrl: String = "https://github.com/CrabMods/modporter"
 )
 
 /**

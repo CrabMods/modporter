@@ -16,9 +16,9 @@ As of `v0.3.0`, the strict real-mod gate has been locally verified for the publi
 | Target | Provider | Source | Resolved Git commit | Strict gate status |
 |--------|----------|--------|---------------------|--------------------|
 | ConstructionWand | Git | `Theta-Dev/ConstructionWand`, `1.20` | `bc64f11a7d799e921995821878a031bcfde4e22a` | PASS |
-| InstantWorldMirror | Git | `crabsatellite/InstantWorldMirror`, `1.20.1` | `5283fd1e20769aafc0a28225288f4be12d417680` | PASS |
-| HotBath | Git | `crabsatellite/hotBath`, `1.20.1` | `6b2d0925cf04d58fc6dc21e687ef98324ac6d8cc` | PASS |
-| ShowerCore | Git | `crabsatellite/ShowerCore`, `1.20.1` with `hotbath` dependency | `0b25a6d04ca7daa6dbdfb25d94434a8e7f8edaee` | PASS |
+| InstantWorldMirror | Git | `CrabMods/InstantWorldMirror`, `1.20.1` | `5283fd1e20769aafc0a28225288f4be12d417680` | PASS |
+| HotBath | Git | `CrabMods/hotBath`, `1.20.1` | `6b2d0925cf04d58fc6dc21e687ef98324ac6d8cc` | PASS |
+| ShowerCore | Git | `CrabMods/ShowerCore`, `1.20.1` with `hotbath` dependency | `0b25a6d04ca7daa6dbdfb25d94434a8e7f8edaee` | PASS |
 | Sakura Mod | Git | `0999312/Sakura_mod`, `1.20.1` | `0201301e5aa371d7f0816b1d786ca89e99936912` | PASS |
 | Twilight Forest | Git | `TeamTwilight/twilightforest`, `1.20.1` | `1bc3a4c21213bc443967e92125613cb9ef47891e` | PASS |
 | The Aether | Git | `The-Aether-Team/The-Aether`, `1.20.1-develop` | `2f0be3a51bae2f434fbf5b5c0aecc56b50f921b7` | PASS |
@@ -49,7 +49,7 @@ java -jar build/libs/modporter-*-all.jar port \
   --add-tool-credit
 ```
 
-`--add-tool-credit` appends a concise `Ported with ModPorter: https://github.com/crabsatellite/modporter` entry to supported `credits` metadata. It preserves existing credits and does not modify author metadata.
+`--add-tool-credit` appends a concise `Ported with ModPorter: https://github.com/CrabMods/modporter` entry to supported `credits` metadata. It preserves existing credits and does not modify author metadata.
 
 ## Pipeline
 

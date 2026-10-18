@@ -114,7 +114,7 @@ class ResourceMigrationPass(
     private val mappingDb: MappingDatabase,
     private val addToolCredit: Boolean = false,
     private val toolCreditName: String = "ModPorter",
-    private val toolCreditUrl: String = "https://github.com/crabsatellite/modporter"
+    private val toolCreditUrl: String = "https://github.com/CrabMods/modporter"
 ) : Pass {
     override val name = "Resource Migration"
     override val order = 5

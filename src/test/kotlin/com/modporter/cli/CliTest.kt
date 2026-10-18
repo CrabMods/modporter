@@ -273,7 +273,7 @@ class CliTest {
         ))
 
         val metadata = outDir.resolve("src/main/resources/META-INF/neoforge.mods.toml").readText()
-        assertTrue(metadata.contains("credits=\"Ported with ModPorter: https://github.com/crabsatellite/modporter\""), metadata)
+        assertTrue(metadata.contains("credits=\"Ported with ModPorter: https://github.com/CrabMods/modporter\""), metadata)
         assertTrue(metadata.contains("authors=\"Original Author\""), metadata)
     }
 
