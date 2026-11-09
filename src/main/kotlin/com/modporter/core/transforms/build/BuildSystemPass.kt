@@ -11256,7 +11256,7 @@ public final class LazyOptional<T> {
     }
 
     public static <T> LazyOptional<T> empty() {
-        return new LazyOptional<>(() -> null);
+        return new LazyOptional<>(null);
     }
 
     @SuppressWarnings("unchecked")
@@ -11286,7 +11286,7 @@ public final class LazyOptional<T> {
     }
 
     public T orElse(T other) {
-        if (!valid) {
+        if (!valid || supplier == null) {
             return other;
         }
         if (!resolved) {
@@ -11322,7 +11322,7 @@ public final class LazyOptional<T> {
     }
 
     public boolean isPresent() {
-        return orElse(null) != null;
+        return supplier != null && valid;
     }
 
     public void addListener(Consumer<LazyOptional<T>> listener) {
@@ -11334,13 +11334,24 @@ public final class LazyOptional<T> {
         listeners.remove(listener);
     }
 
-    public void invalidate() {
-        if (!valid) return;
+    boolean isValid() {
+        return valid;
+    }
+
+    Runnable invalidateDeferred() {
+        if (!valid) return null;
         valid = false;
         value = null;
         resolved = true;
-        listeners.forEach(listener -> listener.accept(this));
+        java.util.List<Consumer<LazyOptional<T>>> pending =
+            new java.util.ArrayList<>(listeners);
         listeners.clear();
+        return () -> pending.forEach(listener -> listener.accept(this));
+    }
+
+    public void invalidate() {
+        Runnable notification = invalidateDeferred();
+        if (notification != null) notification.run();
     }
 }
 """.trimIndent()

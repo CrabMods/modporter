@@ -330,8 +330,7 @@ class LegacyBlockEntityCapabilityQueriesTest {
         )
         assertTrue(
             boundary.contains(
-                "return LazyOptional.of(() -> nativeCapability(" +
-                    "blockEntity, capability, side));"
+                "return nativeValue == null ? LazyOptional.empty() : LazyOptional.ofNullable(nativeValue);"
             ),
             boundary
         )

@@ -38,6 +38,9 @@ class LazyOptionalLifecycleTest {
                     value.addListener(listener);
                     value.addListener(removed);
                     value.removeListener(removed);
+                    if (calls.get() != 0) throw new AssertionError("listener registration resolved supplier");
+                    if (!"stored".equals(value.orElse(null)) || calls.get() != 1)
+                        throw new AssertionError("explicit read did not resolve exactly once");
                     value.invalidate();
                     value.invalidate();
                     if (calls.get() != 1 || notices.get() != 1) throw new AssertionError("supplier or notification multiplicity");

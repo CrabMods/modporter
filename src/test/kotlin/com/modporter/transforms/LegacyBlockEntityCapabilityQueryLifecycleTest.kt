@@ -62,6 +62,34 @@ class LegacyBlockEntityCapabilityQueryLifecycleTest {
             """
         )
         writeJava(
+            "net/minecraft/core/BlockPos.java",
+            """
+            package net.minecraft.core;
+            public final class BlockPos {
+                private final long value;
+                public BlockPos(long value) { this.value = value; }
+                public long asLong() { return value; }
+                @Override public boolean equals(Object other) {
+                    return other instanceof BlockPos pos && value == pos.value;
+                }
+                @Override public int hashCode() { return Long.hashCode(value); }
+            }
+            """
+        )
+        writeJava(
+            "net/minecraft/world/level/ChunkPos.java",
+            """
+            package net.minecraft.world.level;
+            import net.minecraft.core.BlockPos;
+            public final class ChunkPos {
+                private final long value;
+                public ChunkPos(long value) { this.value = value; }
+                public long toLong() { return value; }
+                public static long asLong(BlockPos pos) { return pos.asLong(); }
+            }
+            """
+        )
+        writeJava(
             "net/minecraft/world/level/Level.java",
             """
             package net.minecraft.world.level;
@@ -70,6 +98,9 @@ class LegacyBlockEntityCapabilityQueryLifecycleTest {
             import net.minecraft.world.level.block.entity.BlockEntity;
 
             public class Level {
+                private BlockEntity blockEntity;
+                public void place(BlockEntity blockEntity) { this.blockEntity = blockEntity; }
+                public BlockEntity getBlockEntity(Object pos) { return blockEntity; }
                 public <T> T getCapability(
                     Object capability,
                     Object pos,
@@ -87,21 +118,28 @@ class LegacyBlockEntityCapabilityQueryLifecycleTest {
             """
             package net.minecraft.world.level.block.entity;
 
+            import net.minecraft.core.BlockPos;
             import net.minecraft.world.level.Level;
 
             public class BlockEntity {
                 private final Level level = new Level();
+                private final BlockPos pos = new BlockPos(0);
+                public BlockEntity() { level.place(this); }
 
                 public Level getLevel() {
                     return level;
                 }
 
-                public Object getBlockPos() {
-                    return this;
+                public BlockPos getBlockPos() {
+                    return pos;
                 }
 
                 public Object getBlockState() {
                     return this;
+                }
+
+                public boolean isRemoved() {
+                    return false;
                 }
 
                 public void invalidateCapabilities() {
