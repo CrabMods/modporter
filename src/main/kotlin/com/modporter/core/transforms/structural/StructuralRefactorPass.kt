@@ -111,14 +111,18 @@ class StructuralRefactorPass : Pass {
             return PassResult(name, changes, errors, skipped)
         }
 
-        val javaFiles = Files.walk(projectDir)
-            .filter { it.extension == "java" }
-            .filter { !projectDir.relativize(it).toString().replace('\\', '/').let { rel ->
-                rel.startsWith("build/") || rel.contains("/build/") ||
-                    rel.startsWith("src/references/") || rel.contains("/src/references/") ||
-                    rel.startsWith("src/main/java/com/modporter/generated/")
-            }}
-            .toList()
+        val moduleDir = GradleModLayout.modModule(projectDir)
+        val mainJavaSourceRoot = moduleDir.resolve("src/main/java")
+        val generatedCompatRoot = mainJavaSourceRoot.resolve("com/modporter/generated").toAbsolutePath().normalize()
+        val javaFiles = if (mainJavaSourceRoot.isDirectory()) {
+            walkJavaSourceRoots(mainJavaSourceRoot).use { paths ->
+                paths.filter { it.extension == "java" }
+                    .filter { !it.toAbsolutePath().normalize().startsWith(generatedCompatRoot) }
+                    .toList()
+            }
+        } else {
+            emptyList()
+        }
 
         try {
             changes.addAll(migrateLegacyPortalFamilyTransaction(projectDir, dryRun))

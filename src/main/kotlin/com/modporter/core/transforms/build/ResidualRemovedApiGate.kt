@@ -9,12 +9,15 @@ import com.github.javaparser.ast.body.VariableDeclarator
 import com.github.javaparser.ast.expr.Expression
 import com.github.javaparser.ast.expr.FieldAccessExpr
 import com.github.javaparser.ast.expr.MethodCallExpr
+import com.modporter.core.pipeline.GradleModLayout
 import com.modporter.core.transforms.structural.ExactJavaSemantics
 import com.modporter.core.transforms.structural.JavaProjectTypeIndex
+import com.modporter.core.transforms.util.JavaSourceText
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.extension
 import kotlin.io.path.readText
+import kotlin.streams.toList
 
 internal object ResidualRemovedApiGate {
     private const val POTION_UTILS = "net.minecraft.world.item.alchemy.PotionUtils"
@@ -30,39 +33,32 @@ internal object ResidualRemovedApiGate {
         val parser = JavaParser(
             ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
         )
-        val sourceRoot = projectDir.resolve("src/main/java")
-        val typeIndex = runCatching {
-            if (Files.isDirectory(sourceRoot)) JavaProjectTypeIndex.build(sourceRoot) else null
-        }.getOrNull()
+        val moduleDir = GradleModLayout.modModule(projectDir)
+        val sourceRoot = moduleDir.resolve("src/main/java")
+        if (!Files.isDirectory(sourceRoot)) return emptyList()
+        val sourceFiles = JavaSourceText.walkJavaSourceRoots(sourceRoot).use { paths ->
+            paths.filter { it.extension == "java" }.toList()
+        }
+        val typeIndex = runCatching { JavaProjectTypeIndex.build(sourceRoot) }.getOrNull()
         val findings = mutableListOf<String>()
-        Files.walk(projectDir).use { paths ->
-            paths.filter { it.extension == "java" }
-                .filter { file ->
-                    val relative = projectDir.relativize(file).toString().replace('\\', '/')
-                    !relative.startsWith("build/") &&
-                        !relative.contains("/build/") &&
-                        !relative.startsWith("src/references/") &&
-                        !relative.contains("/src/references/")
-                }
-                .forEach { file ->
-                    val source = file.readText()
-                    if (!couldContainRemovedPotionApi(source)) return@forEach
-                    val parsed = parser.parse(source)
-                    val cu = parsed.result.orElse(null)
-                    if (cu == null) {
-                        findings +=
-                            "Residual removed potion API scan could not parse " +
-                                "${projectDir.relativize(file)}: " +
-                                parsed.problems.joinToString("; ") { it.verboseMessage }
-                        return@forEach
-                    }
-                    val categories = removedPotionApiCategories(cu, typeIndex)
-                    categories.forEach { category ->
-                        findings +=
-                            "Residual removed Minecraft 1.20.1 $category API in " +
-                                projectDir.relativize(file).toString().replace('\\', '/')
-                    }
-                }
+        sourceFiles.forEach { file ->
+            val source = file.readText()
+            if (!couldContainRemovedPotionApi(source)) return@forEach
+            val parsed = parser.parse(source)
+            val cu = parsed.result.orElse(null)
+            if (cu == null) {
+                findings +=
+                    "Residual removed potion API scan could not parse " +
+                        "${moduleDir.relativize(file)}: " +
+                        parsed.problems.joinToString("; ") { it.verboseMessage }
+                return@forEach
+            }
+            val categories = removedPotionApiCategories(cu, typeIndex)
+            categories.forEach { category ->
+                findings +=
+                    "Residual removed Minecraft 1.20.1 $category API in " +
+                        moduleDir.relativize(file).toString().replace('\\', '/')
+            }
         }
         return findings
     }
