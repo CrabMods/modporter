@@ -78,7 +78,9 @@ jobs:
           ) -join ","
           $toolchainOption = "-Dorg.gradle.java.installations.paths=$toolchainPaths"
           $env:GRADLE_OPTS = "$($env:GRADLE_OPTS) $toolchainOption".Trim()
-          ./mod-build.ps1 build shadowJar --no-daemon --console=plain
+          ./mod-build.ps1 build shadowJar --no-daemon --console=plain `
+            '-Dorg.gradle.jvmargs=-Xmx4g' `
+            '-Pkotlin.compiler.execution.strategy=in-process'
 
       - name: Create artifact checksum
         shell: pwsh

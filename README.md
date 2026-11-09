@@ -90,7 +90,9 @@ entry point.
 
 ```powershell
 # Canonical build, tests, coverage report, and fat JAR
-./mod-build.ps1 build shadowJar --no-daemon
+./mod-build.ps1 build shadowJar --no-daemon `
+  '-Dorg.gradle.jvmargs=-Xmx4g' `
+  '-Pkotlin.compiler.execution.strategy=in-process'
 
 # Rule and integration tests
 ./mod-build.ps1 gradle test --no-daemon
@@ -99,6 +101,7 @@ entry point.
 ./scripts/run_strict_benchmarks.ps1 -KeepWork
 ```
 
+The full build uses a 4 GB Gradle heap and compiles Kotlin in that process.
 The public entry point uses the checked-in Gradle wrapper and
 `gradle/modporter-testing.gradle`; it does not require `gh`, a GitHub token, or
 private framework credentials. Maintainers may explicitly select an ignored

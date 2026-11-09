@@ -9,7 +9,8 @@ generated change, identify the API or source structure involved, and add a
 general migration rule with focused regression coverage. Keep original
 authors, source licenses, and resource provenance intact.
 
-Run the public build with `./mod-build.ps1 build shadowJar`. Changes to
+Run the public build with the heap and compiler options in the
+[README build command](README.md#build-and-test). Changes to
 runtime behavior also need the relevant native project checks. Record what
 was tested: compilation, server/client loading, item-interface rendering,
 and any specific gameplay or integration scenarios exercised.
