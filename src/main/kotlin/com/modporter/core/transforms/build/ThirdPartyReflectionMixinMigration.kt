@@ -2,6 +2,7 @@ package com.modporter.core.transforms.build
 
 import com.modporter.core.pipeline.Change
 import com.modporter.core.pipeline.Confidence
+import com.modporter.core.pipeline.GradleModLayout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -30,7 +31,8 @@ internal class ThirdPartyReflectionMixinMigration {
     private data class MixinConfig(val file: Path, val packageName: String, val root: JsonObject)
 
     fun migrate(projectDir: Path, dryRun: Boolean): List<Change> {
-        val srcDir = projectDir.resolve("src/main/java")
+        val moduleDir = GradleModLayout.modModule(projectDir)
+        val srcDir = moduleDir.resolve("src/main/java")
         if (!srcDir.exists()) return emptyList()
         val javaFiles = Files.walk(srcDir).filter { it.extension == "java" }.toList()
         val rewrites = linkedMapOf<Path, Pair<String, List<Replacement>>>()
@@ -60,7 +62,7 @@ internal class ThirdPartyReflectionMixinMigration {
         }
         if (rewrites.isEmpty()) return emptyList()
 
-        val config = findSingleMixinConfig(projectDir)
+        val config = findOwningMixinConfig(moduleDir, rewrites.values.map { it.first })
         val generatedPackage = "${config.packageName}.modporter"
         val changes = mutableListOf<Change>()
         for ((file, pair) in rewrites) {
@@ -200,7 +202,7 @@ internal class ThirdPartyReflectionMixinMigration {
         return resolveType(trimmed, source)
     }
 
-    private fun findSingleMixinConfig(projectDir: Path): MixinConfig {
+    private fun findOwningMixinConfig(projectDir: Path, sources: Collection<String>): MixinConfig {
         val resources = projectDir.resolve("src/main/resources")
         require(resources.exists()) { "Optional-target accessors require an existing Mixin config" }
         val configs = Files.walk(resources)
@@ -212,11 +214,35 @@ internal class ThirdPartyReflectionMixinMigration {
                 val packageName = root["package"]?.jsonPrimitive?.content ?: return@mapNotNull null
                 MixinConfig(file, packageName, root)
             }
-        require(configs.size == 1) {
-            "Optional-target accessor generation requires exactly one structured Mixin config; found ${configs.size}"
+        require(configs.isNotEmpty()) {
+            "Optional-target accessors require an existing structured Mixin config"
         }
-        return configs.single()
+        if (configs.size == 1) return configs.single()
+
+        val sourcePackages = sources.mapNotNull { source ->
+            Regex("""(?m)^\s*package\s+([A-Za-z_$][\w$.]*)\s*;""")
+                .find(maskJavaCommentsAndLiterals(source))?.groupValues?.get(1)
+        }.distinct()
+        require(sourcePackages.isNotEmpty()) {
+            "Optional-target accessor generation cannot derive source package ownership for ${configs.size} Mixin configs"
+        }
+        val scored = configs.map { config ->
+            config to sourcePackages.maxOf { sourcePackage ->
+                commonPackagePrefix(config.packageName, sourcePackage)
+            }
+        }
+        val bestScore = scored.maxOf { it.second }
+        val owners = scored.filter { it.second == bestScore }
+        require(bestScore >= 2 && owners.size == 1) {
+            val observed = scored.joinToString { (config, score) -> "${config.packageName}=$score" }
+            "Optional-target accessor generation cannot identify one source-owning Mixin config " +
+                "for packages ${sourcePackages.joinToString()}; observed $observed"
+        }
+        return owners.single().first
     }
+
+    private fun commonPackagePrefix(left: String, right: String): Int =
+        left.split('.').zip(right.split('.')).takeWhile { (a, b) -> a == b }.size
 
     private fun addMixinEntries(root: JsonObject, entries: List<String>, client: Boolean): JsonObject {
         val key = if (client) "client" else "mixins"

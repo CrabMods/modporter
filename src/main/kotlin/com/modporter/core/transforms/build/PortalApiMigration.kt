@@ -145,19 +145,27 @@ internal class PortalApiMigration {
         for (method in parseStaticMethods(source).asReversed()) {
             val lastParameter = method.parameters.lastOrNull() ?: continue
             val provider = Regex(
-                """(?:java\.util\.function\.)?BiFunction\s*<\s*ServerLevel\s*,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*,\s*(?:PortalInfo|DimensionTransition)\s*>\s*([A-Za-z_$][\w$]*)"""
+                """(?:java\.util\.function\.)?BiFunction\s*<\s*ServerLevel\s*,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*,\s*(PortalInfo|DimensionTransition|\?)\s*>\s*([A-Za-z_$][\w$]*)"""
             ).matchEntire(lastParameter.trim()) ?: continue
             val levelName = method.parameters.firstNotNullOfOrNull { parameter ->
                 Regex("""(?:[A-Za-z_$][\w$]*\.)*ServerLevel\s+([A-Za-z_$][\w$]*)""")
                     .matchEntire(parameter.trim())?.groupValues?.get(1)
             } ?: continue
             val probeType = provider.groupValues[1]
-            val providerName = provider.groupValues[2]
+            val providerResult = provider.groupValues[2]
+            val providerName = provider.groupValues[3]
             val methodSource = source.substring(method.start, method.closeBrace + 1)
             val executableMethod = maskJavaCommentsAndLiterals(methodSource)
-            val transition = Regex(
-                """\b(?:PortalInfo|DimensionTransition)\s+([A-Za-z_$][\w$]*)\s*=\s*${Regex.escape(providerName)}\.apply\(\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*\)\s*;"""
-            ).find(executableMethod) ?: continue
+            val transitionPattern = if (providerResult == "?") {
+                Regex(
+                    """\bPortalInfo\s+([A-Za-z_$][\w$]*)\s*=\s*LegacyPortalProbe\.portalInfo\(\s*${Regex.escape(providerName)}\.apply\(\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*\)\s*\)\s*;"""
+                )
+            } else {
+                Regex(
+                    """\b(?:PortalInfo|DimensionTransition)\s+([A-Za-z_$][\w$]*)\s*=\s*${Regex.escape(providerName)}\.apply\(\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*\)\s*;"""
+                )
+            }
+            val transition = transitionPattern.find(executableMethod) ?: continue
             val transitionName = transition.groupValues[1]
             val probeName = transition.groupValues[3]
             val portalState = Regex(
@@ -169,11 +177,18 @@ internal class PortalApiMigration {
                 .find(executableMethod)?.groupValues?.get(1)
 
             var migratedMethod = methodSource
-            migratedMethod = replaceMaskedRegex(
-                migratedMethod,
+            val assignmentPattern = if (providerResult == "?") {
+                Regex(
+                    """\bPortalInfo\s+${Regex.escape(transitionName)}\s*=\s*LegacyPortalProbe\.portalInfo\(\s*${Regex.escape(providerName)}\.apply\(\s*[A-Za-z_$][\w$]*\s*,\s*${Regex.escape(probeName)}\s*\)\s*\)\s*;"""
+                )
+            } else {
                 Regex(
                     """\b(?:PortalInfo|DimensionTransition)\s+${Regex.escape(transitionName)}\s*=\s*${Regex.escape(providerName)}\.apply\(\s*[A-Za-z_$][\w$]*\s*,\s*${Regex.escape(probeName)}\s*\)\s*;"""
                 )
+            }
+            migratedMethod = replaceMaskedRegex(
+                migratedMethod,
+                assignmentPattern
             ) {
                 "if (!($portalState.getBlock() instanceof Portal modporterPortal))\n" +
                     "\t\t\treturn null;\n\n" +
