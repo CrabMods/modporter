@@ -214,9 +214,10 @@
     ],
     "allowedFiles": [
       "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalTypeContracts.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/ReviewedLegacyPlantAdapterProfiles.kt",
       "src/main/resources/mappings/forge2neo/text-replacements.json"
     ],
-    "rationale": "Dynamic Trees publishes a renamed NeoForge artifact whose public classes and record surfaces require explicit dependency API contracts."
+    "rationale": "Dynamic Trees publishes a renamed NeoForge artifact whose public classes, record surfaces and removed plant producer/consumer contracts require explicit, artifact-bound dependency API contracts."
   },
   {
     "id": "flywheel-model-builders",

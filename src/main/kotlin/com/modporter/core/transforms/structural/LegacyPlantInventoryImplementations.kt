@@ -969,7 +969,7 @@ internal object ReviewedPlantPlatformFingerprints {
     // Exact dependency-only prepass variant reviewed in compat/legacy-plant-platform-prepass-v1.json.
     // Only Screen and BeaconBlockEntity differ from the original archive; all reviewed plant
     // source, class and method bytes are identical. Keep the original profile for sealed replay.
-    val all: List<PlatformArtifactFingerprint> = original + original.single {
+    private val reviewedDependencyOnlyTarget = original.single {
         it.phase == InventoryPhase.TARGET
     }.let { target ->
         val generatedSha256 =
@@ -986,6 +986,35 @@ internal object ReviewedPlantPlatformFingerprints {
             sourceReceiptSha256 =
                 "06e1a8f5c644bae7fb67a13ab48284981a2903928a5943d162af6dc021ba41ea"
         )
+    }
+    private val reviewedDependencyOnlySource = original.single {
+        it.phase == InventoryPhase.SOURCE
+    }
+    private val reviewedDependencyOnlyResourceTransitions =
+        mapOf<String, Pair<String?, String?>>(
+            "src/main/resources/META-INF/accesstransformer.cfg" to (
+                "cde51eb3f6dd81c81ac37ead89078e78de9288ce36a8c4de53eab6cf2d9c9db0" to
+                    "408a784139aa4920dc9f65cbfe8bdc35f81d4340c38599b7e646b382a6c64382"
+                )
+        )
+
+    val all: List<PlatformArtifactFingerprint> = original + reviewedDependencyOnlyTarget
+
+    fun requireDependencyOnlyResourceTransitions(
+        source: PlatformArtifactFingerprint,
+        target: PlatformArtifactFingerprint,
+        actual: Map<String, Pair<String?, String?>>
+    ) {
+        val expected = if (
+            source == reviewedDependencyOnlySource && target == reviewedDependencyOnlyTarget
+        ) {
+            reviewedDependencyOnlyResourceTransitions
+        } else {
+            emptyMap()
+        }
+        require(actual == expected) {
+            "Prepared non-runtime resources do not match reviewed dependency-only ownership"
+        }
     }
 }
 
@@ -2138,6 +2167,13 @@ private fun ResolvedGraph.exactCompileClasspathConfiguration(): String {
  * complete run file set before returning.
  */
 internal object LegacyPlantCoverageV2Verifier {
+    internal fun canonicalEntryText(values: Map<String, String>): String =
+        values.asSequence()
+            .filter { it.key.startsWith("entry.") }
+            .map { "${it.key}=${it.value}" }
+            .sorted()
+            .joinToString("\n", postfix = "\n")
+
     private const val OUTPUT = ".modporter/legacy-plant-external-coverage.properties"
     private const val ROOT = ".modporter/legacy-plant-inventory/runs"
 
@@ -2401,19 +2437,37 @@ internal object LegacyPlantCoverageV2Verifier {
         }) {
             "Prepared canonical runtime sources do not match verified resource bytes"
         }
+
+        val entryCount = values.getValue("entryCount").toInt()
+        require(entryCount > 0)
+        val runtimeArtifactIndex = (0 until entryCount).single { index ->
+            values["entry.$index.phase"] == "target" &&
+                values["entry.$index.artifactSha256"] == expectedRuntimeJarSha256 &&
+                values["entry.$index.coverage"] == "canonical-runtime"
+        }
+        val sealedRuntimeJar = receipt(
+            "entry.$runtimeArtifactIndex.artifactPath",
+            "entry.$runtimeArtifactIndex.artifactSha256"
+        )
         val runtimeResourceRoot =
             ".modporter/legacy-plant-compat/src/main/resources/"
         val runtimeResourceTransitions = preparationSnapshots.resourceTransitions
             .filterKeys { it.startsWith(runtimeResourceRoot) }
+        val dependencyOnlyResourceTransitions = preparationSnapshots.resourceTransitions
+            .filterKeys { !it.startsWith(runtimeResourceRoot) }
+        ReviewedPlantPlatformFingerprints.requireDependencyOnlyResourceTransitions(
+            reviewedSourcePlatform,
+            reviewedTargetPlatform,
+            dependencyOnlyResourceTransitions
+        )
+        val expectedRuntimeResourceTransitions: Map<String, Pair<String?, String?>> =
+            runtimeJarResourceHashes(sealedRuntimeJar, runtimeResourceRoot)
+                .mapValues { (_, hash) -> null to hash }
         require(
             runtimeResourceTransitions.isNotEmpty() &&
-                preparationSnapshots.resourceTransitions.keys ==
-                    runtimeResourceTransitions.keys &&
-                runtimeResourceTransitions.values.all { (before, after) ->
-                    before == null && after != null
-                }
+                runtimeResourceTransitions == expectedRuntimeResourceTransitions
         ) {
-            "Prepared runtime legal and compatibility resources lack exclusive ownership"
+            "Prepared runtime resources do not match the sealed canonical runtime JAR"
         }
         runtimeIdentity.generatedResourceHashes().forEach { (path, hash) ->
             val preparedPath = runtimeResourceRoot + path
@@ -2441,8 +2495,7 @@ internal object LegacyPlantCoverageV2Verifier {
             "target" to closureArtifactScans(targetClosureScan)
         )
 
-        val entryCount = values.getValue("entryCount").toInt()
-        require(entryCount > 0)
+
         val topLevelFields = setOf(
             "schema",
             "producer",
@@ -2507,8 +2560,7 @@ internal object LegacyPlantCoverageV2Verifier {
         }) {
             "Coverage pointer contains unknown or out-of-range fields"
         }
-        val entryLines = values.keys.filter { it.startsWith("entry.") }.sorted()
-            .joinToString("\n", postfix = "\n") { "$it=${values.getValue(it)}" }
+        val entryLines = canonicalEntryText(values)
         require(
             sha256(entryLines.toByteArray(Charsets.UTF_8)) ==
                 values.getValue("inventorySha256")
@@ -3402,6 +3454,36 @@ internal object LegacyPlantCoverageV2Verifier {
             }
         }
         return result
+    }
+
+    private fun runtimeJarResourceHashes(
+        runtimeJar: Path,
+        resourceRoot: String
+    ): Map<String, String> = JarFile(runtimeJar.toFile()).use { jar ->
+        val hashes = linkedMapOf<String, String>()
+        jar.entries().asSequence()
+            .filter { entry ->
+                !entry.isDirectory &&
+                    !entry.name.endsWith(".class") &&
+                    entry.name != "META-INF/MANIFEST.MF"
+            }
+            .forEach { entry ->
+                val name = entry.name
+                require(
+                    name.isNotBlank() &&
+                        '\\' !in name &&
+                        !name.startsWith('/') &&
+                        Path.of(name).normalize().toString().replace('\\', '/') == name &&
+                        !name.startsWith("../")
+                ) {
+                    "Canonical runtime JAR contains an invalid resource path: $name"
+                }
+                val hash = jar.getInputStream(entry).use { sha256(it.readBytes()) }
+                require(hashes.put(resourceRoot + name, hash) == null) {
+                    "Canonical runtime JAR contains a duplicate resource: $name"
+                }
+            }
+        hashes.toSortedMap()
     }
 
     private fun snapshotTransitions(
