@@ -88,6 +88,7 @@ class StructuralRefactorPass : Pass {
         val errors = mutableListOf<String>()
         val skipped = mutableListOf<String>()
         val parser = JavaParser(ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE))
+        var blockEntityCapabilityQueryFallbackBlocked = false
 
         legacyPlantRuntimeOwned = false
         if (LegacyMigrationArtifactInventoryHandoff.isPublished(projectDir) ||
@@ -535,13 +536,16 @@ class StructuralRefactorPass : Pass {
                     { detectRequiredGeneratedCompatPackage(projectDir, "legacy block entity capability queries") }, dryRun)
                 changes.addAll(queries.changes)
                 errors.addAll(queries.gates)
-                if (queries.gates.isNotEmpty()) return PassResult(name, changes, errors, skipped)
+                if (queries.gates.isNotEmpty()) {
+                    blockEntityCapabilityQueryFallbackBlocked = true
+                }
                 val peripheral = LegacyComputerCraftPeripheralCapabilities.migrate(projectDir, capabilityModId,
                     detectRequiredGeneratedCompatPackage(projectDir, "ComputerCraft peripheral capability"), dryRun)
                 changes.addAll(peripheral.changes)
                 errors.addAll(peripheral.gates)
             }
         } catch (e: Exception) {
+            blockEntityCapabilityQueryFallbackBlocked = true
             errors.add("Legacy block entity capability migration error: ${e.message}")
         }
 
@@ -818,19 +822,26 @@ class StructuralRefactorPass : Pass {
 
         // Handle exact residual BlockEntity queries only after the broader
         // source-relationship migration has consumed the shapes it owns.
-        try {
-            val queryChanges = ExactBlockEntityCapabilityQueryMigration(
-                projectDir.resolve("src/main/java"),
-                plannedLazyOptionalType = {
-                    detectRequiredGeneratedCompatPackage(
-                        projectDir,
-                        "exact BlockEntity capability query migration"
-                    ) + ".LazyOptional"
-                }
-            ).migrate(dryRun)
-            changes.addAll(queryChanges)
-        } catch (e: Exception) {
-            errors.add("Block entity capability query migration error: ${e.message}")
+        if (blockEntityCapabilityQueryFallbackBlocked) {
+            skipped.add(
+                "Exact BlockEntity capability query fallback retained because lifecycle-aware " +
+                    "query migration reported unresolved ownership or lifecycle gates"
+            )
+        } else {
+            try {
+                val queryChanges = ExactBlockEntityCapabilityQueryMigration(
+                    projectDir.resolve("src/main/java"),
+                    plannedLazyOptionalType = {
+                        detectRequiredGeneratedCompatPackage(
+                            projectDir,
+                            "exact BlockEntity capability query migration"
+                        ) + ".LazyOptional"
+                    }
+                ).migrate(dryRun)
+                changes.addAll(queryChanges)
+            } catch (e: Exception) {
+                errors.add("Block entity capability query migration error: ${e.message}")
+            }
         }
 
         try {
