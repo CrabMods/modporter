@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "com.modporter"
-version = "0.3.0"
+version = "0.4.0"
 
 repositories {
     mavenCentral()
@@ -17,8 +17,8 @@ val testKitRuntimeOnly by configurations.creating
 
 dependencies {
     // Java AST parsing
-    implementation("com.github.javaparser:javaparser-core:3.25.8")
-    implementation("com.github.javaparser:javaparser-symbol-solver-core:3.25.8")
+    implementation("com.github.javaparser:javaparser-core:3.26.4")
+    implementation("com.github.javaparser:javaparser-symbol-solver-core:3.26.4")
 
     // CLI framework
     implementation("com.github.ajalt.clikt:clikt:4.2.2")
@@ -36,7 +36,9 @@ dependencies {
     // Testing
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.1")
+    testImplementation("com.google.code.gson:gson:2.10.1")
     testImplementation("io.kotest:kotest-assertions-core:5.8.0")
+    testImplementation("net.java.dev.jna:jna:5.13.0")
     testCompileOnly(gradleTestKit())
     testKitRuntimeOnly(gradleTestKit())
 }
@@ -47,8 +49,11 @@ application {
 
 tasks.test {
     useJUnitPlatform()
+    // The full structural suite retains whole-project JavaParser graphs under JaCoCo.
+    maxHeapSize = "4g"
     filter {
         excludeTestsMatching("com.modporter.integration.CompilationVerificationTest")
+        excludeTestsMatching("com.modporter.transforms.LegacyPlantResolverTaskDependencyTest")
     }
     testLogging {
         events("passed", "skipped", "failed")
@@ -67,6 +72,7 @@ tasks.register<Test>("testKitTest") {
     classpath = sourceSets.test.get().runtimeClasspath + testKitRuntimeOnly
     filter {
         includeTestsMatching("com.modporter.integration.CompilationVerificationTest")
+        includeTestsMatching("com.modporter.transforms.LegacyPlantResolverTaskDependencyTest")
     }
     shouldRunAfter(tasks.test)
 
@@ -76,6 +82,10 @@ tasks.register<Test>("testKitTest") {
         showExceptions = true
         showCauses = true
     }
+}
+
+tasks.named("check") {
+    dependsOn("testKitTest")
 }
 
 fun Test.defaultEnvironment(name: String, value: String) {
@@ -98,8 +108,14 @@ fun realModBenchmarkCaseIds(): String =
         ?: ""
 
 tasks.register<Test>("realModBenchmark") {
+    dependsOn("modporterTestingEnsure")
     description = "Ports real mod benchmark targets from src/test/resources/benchmarks/real-mods.tsv"
     group = "verification"
+    // Whole-project JavaParser snapshots exceed Gradle Test's default 512 MiB heap for Create.
+    maxHeapSize = "8g"
+    extensions.configure<org.gradle.testing.jacoco.plugins.JacocoTaskExtension> {
+        isEnabled = false
+    }
 
     useJUnitPlatform()
     maxHeapSize = System.getenv("MODPORTER_BENCHMARK_MAX_HEAP") ?: "4g"
@@ -122,8 +138,13 @@ tasks.register<Test>("realModBenchmark") {
 }
 
 tasks.register<Test>("strictRealModBenchmark") {
+    dependsOn("modporterTestingEnsure")
     description = "Ports real mod benchmark targets and requires strict runtime success gates"
     group = "verification"
+    maxHeapSize = "8g"
+    extensions.configure<org.gradle.testing.jacoco.plugins.JacocoTaskExtension> {
+        isEnabled = false
+    }
 
     useJUnitPlatform()
     maxHeapSize = System.getenv("MODPORTER_BENCHMARK_MAX_HEAP") ?: "4g"
@@ -161,6 +182,11 @@ tasks.processResources {
 }
 
 tasks.withType<Jar>().configureEach {
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+    from("LICENSE") { into("META-INF/modporter") }
+    from("NOTICE") { into("META-INF/modporter") }
+    from("third_party") { into("META-INF/modporter/third-party") }
     manifest {
         attributes(
             "Main-Class" to "com.modporter.cli.MainKt",
@@ -197,3 +223,5 @@ tasks.jacocoTestCoverageVerification {
         }
     }
 }
+
+apply(from = "gradle/modporter-testing.gradle")

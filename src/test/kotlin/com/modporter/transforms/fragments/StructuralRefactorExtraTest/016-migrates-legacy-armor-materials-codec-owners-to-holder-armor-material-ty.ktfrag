@@ -1,0 +1,1170 @@
+
+    @Test
+    fun `migrates legacy ArmorMaterials codec owners to holder armor material types`() {
+        val projectDir = createFile("LegacyArmorMaterialModifier.java", """
+            package com.example;
+
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.world.item.ArmorMaterials;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+
+            public class LegacyArmorMaterialModifier {
+                public static final MapCodec<LegacyArmorMaterialModifier> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
+                    ItemStack.CODEC.fieldOf("stack").forGetter(modifier -> modifier.stack),
+                    ArmorMaterials.CODEC.fieldOf("armor_material").forGetter(modifier -> modifier.armorMaterial)
+                ).apply(instance, LegacyArmorMaterialModifier::new));
+
+                public final ItemStack stack;
+                public final ArmorMaterials armorMaterial;
+
+                public LegacyArmorMaterialModifier(LootItemCondition[] conditions, ItemStack stack, ArmorMaterials armorMaterial) {
+                    this.stack = stack;
+                    this.armorMaterial = armorMaterial;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/LegacyArmorMaterialModifier.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("BuiltInRegistries.ARMOR_MATERIAL.holderByNameCodec().fieldOf(\"armor_material\")"), migrated)
+        assertTrue(migrated.contains("public final Holder<ArmorMaterial> armorMaterial;"), migrated)
+        assertTrue(migrated.contains("public LegacyArmorMaterialModifier(LootItemCondition[] conditions, ItemStack stack, Holder<ArmorMaterial> armorMaterial)"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.core.Holder;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.core.registries.BuiltInRegistries;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.item.ArmorMaterial;"), migrated)
+        assertFalse(migrated.contains("ArmorMaterials.CODEC"), migrated)
+        assertFalse(migrated.contains("ArmorMaterials armorMaterial"), migrated)
+    }
+
+    @Test
+    fun `migrates legacy armor material override maps to holder keys`() {
+        val projectDir = createFile("LegacyTrimMaterialData.java", """
+            package com.example;
+
+            import java.util.Map;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.item.ArmorMaterials;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.armortrim.TrimMaterial;
+
+            public class LegacyTrimMaterialData {
+                public void register(Item ingredient, Map<ArmorMaterials, String> overrideArmorMaterials) {
+                    TrimMaterial.create(
+                        "example",
+                        ingredient,
+                        0.7F,
+                        Component.literal("Example"),
+                        overrideArmorMaterials
+                    );
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/LegacyTrimMaterialData.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("Map<Holder<ArmorMaterial>, String> overrideArmorMaterials"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.core.Holder;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.item.ArmorMaterial;"), migrated)
+        assertFalse(migrated.contains("Map<ArmorMaterials"), migrated)
+    }
+
+    @Test
+    fun `migrates legacy armor material parameters instanceof filters and switches to holder identity checks`() {
+        val projectDir = createFile("LegacyArmorMaterialSelection.java", """
+            package com.example;
+
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.item.ArmorItem;
+            import net.minecraft.world.item.ArmorMaterials;
+            import net.minecraft.world.item.Item;
+
+            public class LegacyArmorMaterialSelection {
+                public void equip(Mob mob, ArmorItem armorItem) {
+                    if (armorItem.getMaterial() instanceof ArmorMaterials armorMaterials) {
+                        this.equip(mob, armorMaterials);
+                    }
+                }
+
+                private void equip(Mob mob, ArmorMaterials armorMaterials) {
+                    Item item = this.itemFor(armorMaterials);
+                    if (item != null) {
+                        mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.HEAD, item.getDefaultInstance());
+                    }
+                }
+
+                private Item itemFor(ArmorMaterials armorMaterials) {
+                    switch (armorMaterials) {
+                        case LEATHER -> {
+                            return ExampleItems.LEATHER_HAT.get();
+                        }
+                        case GOLD, IRON -> {
+                            return ExampleItems.METAL_HAT.get();
+                        }
+                        case DIAMOND -> {
+                            return ExampleItems.DIAMOND_HAT.get();
+                        }
+                    }
+                    return null;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/LegacyArmorMaterialSelection.java").readText()
+
+        assertTrue(migrated.contains("import net.minecraft.core.Holder;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.item.ArmorMaterial;"), migrated)
+        assertTrue(migrated.contains("Holder<ArmorMaterial> armorMaterials = armorItem.getMaterial();"), migrated)
+        assertTrue(migrated.contains("armorMaterials.is(ArmorMaterials.LEATHER) || armorMaterials.is(ArmorMaterials.CHAIN)"), migrated)
+        assertTrue(migrated.contains("private void equip(Mob mob, Holder<ArmorMaterial> armorMaterials)"), migrated)
+        assertTrue(migrated.contains("private Item itemFor(Holder<ArmorMaterial> armorMaterials)"), migrated)
+        assertTrue(migrated.contains("if (armorMaterials.is(ArmorMaterials.LEATHER))"), migrated)
+        assertTrue(migrated.contains("else if (armorMaterials.is(ArmorMaterials.GOLD) || armorMaterials.is(ArmorMaterials.IRON))"), migrated)
+        assertFalse(migrated.contains("instanceof ArmorMaterials"), migrated)
+        assertFalse(migrated.contains("switch (armorMaterials)"), migrated)
+        assertFalse(migrated.contains("ArmorMaterials armorMaterials"), migrated)
+    }
+
+    @Test
+    fun `migrates indirect block loot subprovider constructors to holder lookup registries`() {
+        val projectDir = createFile("LibraryBlockLootSurface.java", """
+            package com.example;
+
+            import java.util.Set;
+            import net.minecraft.world.flag.FeatureFlagSet;
+            import net.minecraft.world.flag.FeatureFlags;
+            import net.minecraft.world.item.Item;
+
+            public class LibraryBlockLootSurface extends NitrogenBlockLootSubProvider {
+                public LibraryBlockLootSurface() {
+                    super(Set.of(), FeatureFlags.REGISTRY.allFlags());
+                }
+
+                protected LibraryBlockLootSurface(Set<Item> items, FeatureFlagSet flags) {
+                    super(items, flags);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/LibraryBlockLootSurface.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-block-loot-provider-121" })
+        assertTrue(migrated.contains("public LibraryBlockLootSurface(HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("super(Set.of(), FeatureFlags.REGISTRY.allFlags(), registries);"), migrated)
+        assertTrue(migrated.contains("protected LibraryBlockLootSurface(Set<Item> items, FeatureFlagSet flags, HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("super(items, flags, registries);"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.core.HolderLookup;"), migrated)
+    }
+
+    @Test
+    fun `migrates loot table provider factories and public loot id registries`() {
+        val projectDir = createFile("LegacyLootTableFactory.java", """
+            package com.example;
+
+            import java.util.List;
+            import net.minecraft.data.PackOutput;
+            import net.minecraft.data.loot.LootTableProvider;
+            import net.minecraft.world.level.storage.loot.parameters.LootContextParamSets;
+
+            public class LegacyLootTableFactory {
+                public static LootTableProvider create(PackOutput output) {
+                    return new LootTableProvider(output, ExampleLoot.IMMUTABLE_LOOT_TABLES, List.of(
+                        new LootTableProvider.SubProviderEntry(LegacyChestLoot::new, LootContextParamSets.CHEST)
+                    ));
+                }
+            }
+        """.trimIndent())
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.resolve("LegacyData.java").writeText("""
+            package com.example;
+
+            import java.util.Collections;
+            import java.util.List;
+            import net.minecraft.data.DataGenerator;
+            import net.minecraft.data.loot.LootTableProvider;
+            import net.minecraft.data.PackOutput;
+            import net.minecraft.world.level.storage.loot.parameters.LootContextParamSets;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            public class LegacyData {
+                public static void gatherData(GatherDataEvent event) {
+                    DataGenerator generator = event.getGenerator();
+                    PackOutput output = generator.getPackOutput();
+                    generator.addProvider(event.includeServer(), LegacyLootTableFactory.create(output));
+                    generator.addProvider(event.includeServer(), new LootTableProvider(output, Collections.emptySet(), List.of(
+                        new LootTableProvider.SubProviderEntry(LegacyChestLoot::new, LootContextParamSets.CHEST)
+                    )));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleLoot.java").writeText("""
+            package com.example;
+
+            import java.util.Collections;
+            import java.util.HashSet;
+            import java.util.Set;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.storage.loot.LootTable;
+
+            public class ExampleLoot {
+                public static final Set<ResourceLocation> LOOT_TABLES = new HashSet<>();
+                public static final Set<ResourceLocation> IMMUTABLE_LOOT_TABLES = Collections.unmodifiableSet(LOOT_TABLES);
+                public static final ResourceLocation ENTITY_DROP = register("entities/demo");
+
+                private static ResourceLocation register(String id) {
+                    return register(ExampleMod.prefix(id));
+                }
+
+                private static ResourceLocation register(ResourceLocation id) {
+                    if (LOOT_TABLES.add(id)) {
+                        return id;
+                    }
+                    throw new IllegalArgumentException(id + " duplicate");
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val factory = srcDir.resolve("LegacyLootTableFactory.java").readText()
+        val data = srcDir.resolve("LegacyData.java").readText()
+        val loot = srcDir.resolve("ExampleLoot.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(factory.contains("public static LootTableProvider create(PackOutput output, CompletableFuture<HolderLookup.Provider> lookupProvider)"), factory)
+        assertTrue(factory.contains("new LootTableProvider(output, ExampleLoot.IMMUTABLE_LOOT_TABLES, List.of("), factory)
+        assertTrue(factory.contains("), lookupProvider)"), factory)
+        assertTrue(factory.contains("import net.minecraft.core.HolderLookup;"), factory)
+        assertTrue(factory.contains("import java.util.concurrent.CompletableFuture;"), factory)
+        assertTrue(data.contains("LegacyLootTableFactory.create(output, event.getLookupProvider())"), data)
+        assertTrue(data.contains("new LootTableProvider(output, Collections.emptySet(), List.of("), data)
+        assertTrue(data.contains("), event.getLookupProvider())"), data)
+        assertTrue(loot.contains("public static final Set<ResourceKey<LootTable>> LOOT_TABLES"), loot)
+        assertTrue(loot.contains("public static final Set<ResourceKey<LootTable>> IMMUTABLE_LOOT_TABLES"), loot)
+        assertTrue(loot.contains("public static final ResourceKey<LootTable> ENTITY_DROP = register(\"entities/demo\")"), loot)
+        assertTrue(loot.contains("private static ResourceKey<LootTable> register(String id)"), loot)
+        assertTrue(loot.contains("private static ResourceKey<LootTable> register(ResourceKey<LootTable> id)"), loot)
+        assertFalse(loot.contains("Set<ResourceLocation>"), loot)
+    }
+
+    @Test
+    fun `loot table registry migration does not trust class name suffix or local loot markers`() {
+        val projectDir = createFile("LootTables.java", """
+            package com.example;
+
+            import java.util.HashSet;
+            import java.util.Set;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.storage.loot.LootTable;
+
+            public class LootTables {
+                private static final Set<ResourceLocation> IDS = new HashSet<>();
+                public static final ResourceLocation NOT_A_LOOT_TABLE = register("ids/demo");
+
+                private static ResourceLocation register(String id) {
+                    return register(ExampleMod.prefix(id));
+                }
+
+                private static ResourceLocation register(ResourceLocation id) {
+                    if (IDS.add(id)) {
+                        return id;
+                    }
+                    throw new IllegalArgumentException(id + " duplicate");
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = tempDir.resolve("src/main/java/com/example/LootTables.java").readText()
+        assertTrue(migrated.contains("Set<ResourceLocation> IDS"), migrated)
+        assertTrue(migrated.contains("public static final ResourceLocation NOT_A_LOOT_TABLE = register(\"ids/demo\")"), migrated)
+        assertFalse(migrated.contains("ResourceKey<LootTable>"), migrated)
+    }
+
+    @Test
+    fun `migrates indirect recipe provider constructors to holder lookup registries`() {
+        val projectDir = createFile("LibraryRecipeProvider.java", """
+            package com.example;
+
+            import net.minecraft.data.PackOutput;
+
+            public class LibraryRecipeProvider extends ProjectRecipeBase {
+                public LibraryRecipeProvider(PackOutput output, String id) {
+                    super(output, id);
+                }
+            }
+        """.trimIndent())
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.resolve("ProjectRecipeBase.java").writeText("""
+            package com.example;
+            import net.minecraft.data.PackOutput;
+            import net.minecraft.data.recipes.RecipeProvider;
+            public abstract class ProjectRecipeBase extends RecipeProvider {
+                protected final String id;
+                public ProjectRecipeBase(PackOutput output, String id) {
+                    super(output);
+                    this.id = id;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LegacyData.java").writeText("""
+            package com.example;
+
+            import net.minecraft.data.DataGenerator;
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            public class LegacyData {
+                public static void gatherData(GatherDataEvent event) {
+                    DataGenerator generator = event.getGenerator();
+                    PackOutput output = generator.getPackOutput();
+                    generator.addProvider(event.includeServer(), new LibraryRecipeProvider(output, "example"));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val provider = srcDir.resolve("LibraryRecipeProvider.java").readText()
+        val data = srcDir.resolve("LegacyData.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(provider.contains("public LibraryRecipeProvider(PackOutput output, CompletableFuture<HolderLookup.Provider> lookupProvider, String id)"), provider)
+        assertTrue(provider.contains("super(output, lookupProvider, id);"), provider)
+        assertTrue(provider.contains("import net.minecraft.core.HolderLookup;"), provider)
+        assertTrue(provider.contains("import java.util.concurrent.CompletableFuture;"), provider)
+        assertTrue(data.contains("new LibraryRecipeProvider(output, event.getLookupProvider(), \"example\")"), data)
+    }
+
+    @Test
+    fun `migrates legacy neoforge leather item tag constant`() {
+        val projectDir = createFile("LegacyLeatherTagRecipe.java", """
+            package com.example;
+
+            import net.neoforged.neoforge.common.Tags;
+
+            public class LegacyLeatherTagRecipe {
+                Object oldTag = Tags.Items.LEATHER;
+                Object existingTag = Tags.Items.LEATHERS;
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/LegacyLeatherTagRecipe.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("Object oldTag = Tags.Items.LEATHERS;"), migrated)
+        assertTrue(migrated.contains("Object existingTag = Tags.Items.LEATHERS;"), migrated)
+        assertFalse(migrated.contains("LEATHERSS"), migrated)
+    }
+
+    @Test
+    fun `migrates GameEventListener event holder signatures and comparisons`() {
+        val projectDir = createFile("ListenerBE.java", """
+            package com.example;
+
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.level.gameevent.GameEvent;
+            import net.minecraft.world.level.gameevent.GameEventListener;
+            import net.minecraft.world.level.gameevent.PositionSource;
+            import net.minecraft.world.phys.Vec3;
+
+            public class ListenerBE {
+                /*
+                public boolean handleGameEvent(ServerLevel docLevel, GameEvent documentedEvent, GameEvent.Context docContext, Vec3 docPos) {
+                    return documentedEvent == GameEvent.BLOCK_PLACE;
+                }
+                */
+
+                class Listener implements GameEventListener {
+                    public PositionSource getListenerSource() {
+                        return null;
+                    }
+
+                    public int getListenerRadius() {
+                        return 4;
+                    }
+
+                    @Override
+                    public boolean handleGameEvent(ServerLevel level, GameEvent event, GameEvent.Context context, Vec3 pos) {
+                        if (event == ModGameEvents.FROZEN.get() || event == GameEvent.BLOCK_PLACE) {
+                            return true;
+                        }
+                        return event != GameEvent.BLOCK_DESTROY;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/ListenerBE.java").readText()
+
+        assertTrue(migrated.contains("import net.minecraft.core.Holder;"))
+        assertTrue(migrated.contains("boolean handleGameEvent(ServerLevel level, Holder<GameEvent> event, GameEvent.Context context, Vec3 pos)"))
+        assertTrue(migrated.contains("event.is(ModGameEvents.FROZEN) || event.is(GameEvent.BLOCK_PLACE)"))
+        assertTrue(migrated.contains("return !event.is(GameEvent.BLOCK_DESTROY);"))
+        assertTrue(migrated.contains("boolean handleGameEvent(ServerLevel docLevel, GameEvent documentedEvent, GameEvent.Context docContext, Vec3 docPos)"))
+        assertTrue(migrated.contains("return documentedEvent == GameEvent.BLOCK_PLACE;"))
+        assertFalse(migrated.contains("event =="))
+        assertFalse(migrated.contains("event !="))
+    }
+
+    @Test
+    fun `propagates cancellable event interface to shared event base classes`() {
+        val projectDir = createFile("BaseFreezeEvent.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.Event;
+            import net.neoforged.bus.api.ICancellableEvent;
+
+            public class BaseFreezeEvent extends Event {
+                public static class FromBlock extends BaseFreezeEvent implements ICancellableEvent {
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/BaseFreezeEvent.java").readText()
+
+        assertTrue(migrated.contains("public class BaseFreezeEvent extends Event implements ICancellableEvent {"))
+        assertTrue(migrated.contains("public static class FromBlock extends BaseFreezeEvent implements ICancellableEvent"))
+    }
+
+    @Test
+    fun `adds Item import for TooltipContext and migrates registry backed MobEffect variables`() {
+        val projectDir = createFile("EffectItem.java", """
+            package com.example;
+
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.TooltipFlag;
+            import java.util.List;
+
+            public class EffectItem {
+                public void appendHoverText(ItemStack stack, Item.TooltipContext context, List<Component> tooltip, TooltipFlag flag) {
+                }
+
+                public void apply(Player player) {
+                    MobEffect coldResistance = ExternalEffects.COLD_RESISTANCE.get();
+                    if (player.hasEffect(coldResistance)) {
+                        MobEffectInstance current = player.getEffect(coldResistance);
+                    }
+                    player.addEffect(new MobEffectInstance(coldResistance, 100));
+                    player.removeEffect(coldResistance);
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/EffectItem.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-tooltip-context-import" })
+        assertTrue(result.changes.any { it.ruleId == "struct-mobeffect-holder-direct" })
+        assertTrue(migrated.contains("import net.minecraft.world.item.Item;"))
+        assertTrue(migrated.contains("import net.minecraft.core.Holder;"))
+        assertFalse(migrated.contains("import net.minecraft.core.registries.BuiltInRegistries;"))
+        assertTrue(migrated.contains("Holder<MobEffect> coldResistance = ExternalEffects.COLD_RESISTANCE;"))
+        assertTrue(migrated.contains("player.hasEffect(coldResistance)"))
+        assertTrue(migrated.contains("player.getEffect(coldResistance)"))
+        assertTrue(migrated.contains("new MobEffectInstance(coldResistance, 100)"))
+        assertTrue(migrated.contains("player.removeEffect(coldResistance)"))
+    }
+
+    @Test
+    fun `tooltip context import migration ignores comments and strings`() {
+        val projectDir = createFile("TooltipDocsOnly.java", """
+            package com.example;
+
+            public class TooltipDocsOnly {
+                private static final String DOC = "Item.TooltipContext";
+
+                /*
+                public void appendHoverText(ItemStack stack, Item.TooltipContext context) {
+                }
+                */
+                public void keep() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/TooltipDocsOnly.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-tooltip-context-import" }, result.changes.toString())
+        assertFalse(migrated.contains("import net.minecraft.world.item.Item;"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "Item.TooltipContext";"""), migrated)
+        val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
+        assertTrue(commentBlock.contains("Item.TooltipContext context"), migrated)
+    }
+
+    @Test
+    fun `migrates direct deferred effect holders without MobEffect variable declarations`() {
+        val projectDir = createFile("DirectEffectUse.java", """
+            package com.example;
+
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.entity.player.Player;
+
+            public class DirectEffectUse {
+                public boolean immune(Player player) {
+                    return player.hasEffect(ModEffects.REMEDY.get());
+                }
+
+                public boolean sameEffect(MobEffectInstance instance) {
+                    return instance.getEffect() == ModEffects.REMEDY.get();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/DirectEffectUse.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-mobeffect-holder-direct" })
+        assertTrue(migrated.contains("return player.hasEffect(ModEffects.REMEDY);"))
+        assertTrue(migrated.contains("return instance.getEffect().value() == ModEffects.REMEDY.get();"))
+        assertFalse(migrated.contains("hasEffect(ModEffects.REMEDY.get())"))
+    }
+
+    @Test
+    fun `migrates generic deferred effect holders in holder api arguments`() {
+        val projectDir = createFile("GenericEffectUse.java", """
+            package com.example;
+
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.network.protocol.game.ClientboundRemoveMobEffectPacket;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.entity.LivingEntity;
+
+            public class GenericEffectUse {
+                void cure(LivingEntity living, ServerLevel serverLevel) {
+                    MobEffect frozen = ExampleEffects.FROZEN.get();
+                    MobEffectInstance current = living.getEffect(BuiltInRegistries.MOB_EFFECT.wrapAsHolder(frozen));
+                    living.removeEffect(ExampleEffects.FROZEN.get());
+                    serverLevel.getChunkSource().broadcastAndSend(living,
+                            new ClientboundRemoveMobEffectPacket(living.getId(), ExampleEffects.FROZEN.get()));
+                    living.addEffect(new MobEffectInstance(frozen, 100, 0));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/GenericEffectUse.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-mobeffect-holder-direct" })
+        assertTrue(migrated.contains("import net.minecraft.core.Holder;"))
+        assertFalse(migrated.contains("import net.minecraft.core.registries.BuiltInRegistries;"))
+        assertTrue(migrated.contains("Holder<MobEffect> frozen = ExampleEffects.FROZEN;"), migrated)
+        assertTrue(migrated.contains("MobEffectInstance current = living.getEffect(frozen);"), migrated)
+        assertTrue(migrated.contains("living.removeEffect(ExampleEffects.FROZEN);"), migrated)
+        assertTrue(migrated.contains("new ClientboundRemoveMobEffectPacket(living.getId(), ExampleEffects.FROZEN)"), migrated)
+        assertTrue(migrated.contains("living.addEffect(new MobEffectInstance(frozen, 100, 0));"), migrated)
+        assertFalse(migrated.contains("ExampleEffects.FROZEN.get()"), migrated)
+        assertFalse(migrated.contains("BuiltInRegistries.MOB_EFFECT.wrapAsHolder(frozen)"), migrated)
+    }
+
+    @Test
+    fun `mob effect holder migration scopes executable evidence and ignores docs`() {
+        val projectDir = createFile("ScopedMobEffectUse.java", """
+            package com.example;
+
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.entity.player.Player;
+
+            public class ScopedMobEffectUse {
+                private static final String DOC = "MobEffect cold = ExternalEffects.COLD_RESISTANCE.get(); BuiltInRegistries.MOB_EFFECT.wrapAsHolder(cold)";
+
+                /*
+                void commented(Player player, MobEffect effect) {
+                    MobEffect cold = ExternalEffects.COLD_RESISTANCE.get();
+                    player.hasEffect(cold);
+                    player.hasEffect(effect);
+                    effect.getCategory();
+                }
+                */
+                void real(Player player) {
+                    MobEffect cold = ExternalEffects.COLD_RESISTANCE.get();
+                    if (player.hasEffect(cold)) {
+                        MobEffectInstance current = player.getEffect(BuiltInRegistries.MOB_EFFECT.wrapAsHolder(cold));
+                    }
+                    player.addEffect(new MobEffectInstance(cold, 100));
+                }
+
+                void holderParameter(Player player, MobEffect effect) {
+                    if (player.hasEffect(effect)) {
+                        effect.getCategory();
+                    }
+                }
+
+                void sameNamedParameterWithoutHolderEvidence(Player player, MobEffect effect) {
+                    Object untouched = effect;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/ScopedMobEffectUse.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-mobeffect-holder-direct" })
+        assertTrue(migrated.contains("import net.minecraft.core.Holder;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.core.registries.BuiltInRegistries;"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "MobEffect cold = ExternalEffects.COLD_RESISTANCE.get(); BuiltInRegistries.MOB_EFFECT.wrapAsHolder(cold)";"""), migrated)
+        assertTrue(migrated.contains("Holder<MobEffect> cold = ExternalEffects.COLD_RESISTANCE;"), migrated)
+        val realBody = migrated.substringAfter("void real(Player player)").substringBefore("void holderParameter")
+        assertTrue(realBody.contains("player.getEffect(cold)"), migrated)
+        assertTrue(realBody.contains("new MobEffectInstance(cold, 100)"), migrated)
+        assertFalse(realBody.contains("BuiltInRegistries.MOB_EFFECT.wrapAsHolder(cold)"), migrated)
+        assertTrue(migrated.contains("void holderParameter(Player player, Holder<MobEffect> effect)"), migrated)
+        assertTrue(migrated.contains("effect.value().getCategory();"), migrated)
+        assertTrue(migrated.contains("void sameNamedParameterWithoutHolderEvidence(Player player, MobEffect effect)"), migrated)
+        val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
+        assertTrue(commentBlock.contains("MobEffect cold = ExternalEffects.COLD_RESISTANCE.get();"), migrated)
+        assertTrue(commentBlock.contains("player.hasEffect(effect);"), migrated)
+        assertTrue(commentBlock.contains("effect.getCategory();"), migrated)
+        assertFalse(commentBlock.contains("Holder<MobEffect>"), migrated)
+        assertFalse(commentBlock.contains("effect.value().getCategory();"), migrated)
+    }
+
+    @Test
+    fun `migrates item and fluid custom child tags to CustomData components`() {
+        val projectDir = createFile("CustomFluidNBTHelper.java", """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.ItemStack;
+
+            public class CustomFluidNBTHelper {
+                public static final String TAG_CUSTOM_FLUID = "HotbathCustomFluid";
+                public static final String TAG_FLUID_ID = "FluidId";
+                public static final String TAG_FLUID_COLOR = "FluidColor";
+                public static final String TAG_FLUID_NAME = "FluidName";
+
+                public static void setFluidId(ItemStack stack, ResourceLocation fluidId) {
+                    CompoundTag tag = stack.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag().getCompound(TAG_CUSTOM_FLUID);
+                    tag.putString(TAG_FLUID_ID, fluidId.toString());
+                    CustomFluidRegistry.getDefinition(fluidId).ifPresent(definition -> {
+                        tag.putInt(TAG_FLUID_COLOR, definition.color());
+                        tag.putString(TAG_FLUID_NAME, definition.getTranslationKey());
+                    });
+                }
+
+                public static ResourceLocation getFluidId(ItemStack stack) {
+                    CompoundTag tag = stack.getTagElement(TAG_CUSTOM_FLUID);
+                    return tag != null ? ResourceLocation.parse(tag.getString(TAG_FLUID_ID)) : null;
+                }
+
+                public static void clearFluidData(ItemStack stack) {
+                    stack.removeTagKey(TAG_CUSTOM_FLUID);
+                }
+            }
+        """.trimIndent())
+        val fluidFile = projectDir.resolve("src/main/java/com/example/CustomFluidStackHelper.java")
+        fluidFile.writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.resources.ResourceLocation;
+            import net.neoforged.neoforge.fluids.FluidStack;
+
+            public class CustomFluidStackHelper {
+                public static boolean isDynamicCustomFluid(FluidStack stack) {
+                    return true;
+                }
+
+                public static void setFluidId(FluidStack stack, ResourceLocation fluidId) {
+                    if (stack == null || stack.isEmpty() || fluidId == null || !isDynamicCustomFluid(stack)) {
+                        return;
+                    }
+                    CompoundTag customFluidTag = stack.getOrCreateChildTag(CustomFluidNBTHelper.TAG_CUSTOM_FLUID);
+                    customFluidTag.putString(CustomFluidNBTHelper.TAG_FLUID_ID, fluidId.toString());
+                }
+
+                public static ResourceLocation getFluidId(FluidStack stack) {
+                    CompoundTag customFluidTag = stack.getChildTag(CustomFluidNBTHelper.TAG_CUSTOM_FLUID);
+                    return customFluidTag != null ? ResourceLocation.parse(customFluidTag.getString(CustomFluidNBTHelper.TAG_FLUID_ID)) : null;
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val itemMigrated = tempDir.resolve("src/main/java/com/example/CustomFluidNBTHelper.java").readText()
+        val fluidMigrated = tempDir.resolve("src/main/java/com/example/CustomFluidStackHelper.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-custom-data-components" })
+        assertTrue(itemMigrated.contains("import net.minecraft.core.component.DataComponents;"))
+        assertTrue(itemMigrated.contains("import net.minecraft.world.item.component.CustomData;"))
+        assertTrue(itemMigrated.contains("updateCustomDataChild(stack, TAG_CUSTOM_FLUID, tag -> {"))
+        assertTrue(itemMigrated.contains("CustomData.update(DataComponents.CUSTOM_DATA, stack"))
+        assertTrue(itemMigrated.contains("CompoundTag tag = getCustomDataChild(stack, TAG_CUSTOM_FLUID);"))
+        assertTrue(itemMigrated.contains("removeCustomDataChild(stack, TAG_CUSTOM_FLUID);"))
+        assertTrue(fluidMigrated.contains("updateFluidCustomDataChild(stack, CustomFluidNBTHelper.TAG_CUSTOM_FLUID"))
+        assertTrue(fluidMigrated.contains("stack.set(DataComponents.CUSTOM_DATA, CustomData.of(root));"))
+        assertTrue(fluidMigrated.contains("CompoundTag customFluidTag = getFluidCustomDataChild(stack, CustomFluidNBTHelper.TAG_CUSTOM_FLUID);"))
+    }
+
+    @Test
+    fun `custom data child tag migration ignores comments and strings`() {
+        val projectDir = createFile("CustomDataDocsOnly.java", """
+            package com.example;
+
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.fluids.FluidStack;
+
+            public class CustomDataDocsOnly {
+                private static final String ITEM_DOC = "CompoundTag tag = stack.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag().getCompound(TAG_CUSTOM_FLUID); stack.getTagElement(TAG_CUSTOM_FLUID); stack.removeTagKey(TAG_CUSTOM_FLUID);";
+                private static final String FLUID_DOC = "CompoundTag customFluidTag = stack.getChildTag(CustomFluidNBTHelper.TAG_CUSTOM_FLUID);";
+
+                /*
+                CompoundTag tag = stack.getTagElement(TAG_CUSTOM_FLUID);
+                stack.removeTagKey(TAG_CUSTOM_FLUID);
+                CompoundTag customFluidTag = stack.getChildTag(CustomFluidNBTHelper.TAG_CUSTOM_FLUID);
+                */
+
+                public static void setFluidId(ItemStack stack, ResourceLocation fluidId) {
+                    stack.toString();
+                }
+
+                public static void setFluidId(FluidStack stack, ResourceLocation fluidId) {
+                    stack.toString();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/CustomDataDocsOnly.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-custom-data-components" }, result.changes.toString())
+        assertFalse(migrated.contains("import net.minecraft.core.component.DataComponents;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.world.item.component.CustomData;"), migrated)
+        assertFalse(migrated.contains("import java.util.function.Consumer;"), migrated)
+        assertFalse(migrated.contains("updateCustomDataChild("), migrated)
+        assertFalse(migrated.contains("updateFluidCustomDataChild("), migrated)
+        assertFalse(migrated.contains("getCustomDataChild(ItemStack stack"), migrated)
+        assertFalse(migrated.contains("getFluidCustomDataChild(FluidStack stack"), migrated)
+        assertTrue(migrated.contains("public static void setFluidId(ItemStack stack, ResourceLocation fluidId) {\n        stack.toString();\n    }"), migrated)
+        assertTrue(migrated.contains("public static void setFluidId(FluidStack stack, ResourceLocation fluidId) {\n        stack.toString();\n    }"), migrated)
+        assertTrue(migrated.contains("private static final String ITEM_DOC"), migrated)
+        assertTrue(migrated.contains("CompoundTag tag = stack.getTagElement(TAG_CUSTOM_FLUID);"), migrated)
+        assertTrue(migrated.contains("CompoundTag customFluidTag = stack.getChildTag(CustomFluidNBTHelper.TAG_CUSTOM_FLUID);"), migrated)
+    }
+
+    @Test
+    fun `migrates brewing registration to NeoForge brewing event`() {
+        val textBlockDelimiter = "\"\"\""
+        val projectDir = createFile("BrewingSurface.java", """
+            package com.example;
+
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.common.brewing.BrewingRecipeRegistry;
+            import net.neoforged.neoforge.common.NeoForge;
+            import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
+
+            public class BrewingSurface {
+                private static final String DOC = "BrewingRecipeRegistry.addRecipe(Ingredient.of(ExampleItems.DOC.get()), Ingredient.EMPTY, ExampleItems.DOC_RESULT.get())";
+                private static final String METHOD_DOC = $textBlockDelimiter
+                    private void registerBrewingRecipes(final FMLCommonSetupEvent fakeEvent) {
+                        BrewingRecipeRegistry.addRecipe(Ingredient.of(ExampleItems.DOC.get()), Ingredient.EMPTY, ExampleItems.DOC_RESULT.get());
+                    }
+                    $textBlockDelimiter;
+
+                public BrewingSurface() {
+                    NeoForge.EVENT_BUS.register(this);
+                }
+
+                private void commonSetup(final FMLCommonSetupEvent event) {
+                    registerBrewingRecipes(event);
+                }
+
+                private void registerBrewingRecipes(final FMLCommonSetupEvent event) {
+                    event.enqueueWork(() -> {
+                        BrewingRecipeRegistry.addRecipe(Ingredient.of(ItemRegister.HOT_WATER_BOTTLE.get()), Ingredient.of(Items.GUNPOWDER), ItemRegister.SPLASH_HOT_WATER_BOTTLE.get().getDefaultInstance());
+                        BrewingRecipeRegistry.addRecipe(Ingredient.of(ExampleItems.BASE.get()), Ingredient.of(ExampleItems.BOOST.get()), ExampleItems.RESULT.get().getDefaultInstance());
+                        BrewingRecipeRegistry.addRecipe(new CustomFluidBrewingRecipe());
+                    });
+                }
+
+                /*
+                @SubscribeEvent
+                public void onBrewingRecipeRegister(net.neoforged.neoforge.event.brewing.RegisterBrewingRecipesEvent event) {
+                    event.getBuilder().addRecipe(recipe);
+                }
+                */
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/BrewingSurface.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-brewing-recipes-event" })
+        assertTrue(migrated.contains("import net.neoforged.neoforge.event.brewing.RegisterBrewingRecipesEvent;"))
+        assertFalse(migrated.contains("import net.neoforged.neoforge.common.brewing.BrewingRecipeRegistry;"))
+        assertTrue(!migrated.contains("registerBrewingRecipes(event);"))
+        assertTrue(migrated.contains("@SubscribeEvent"))
+        assertTrue(migrated.contains("public void registerBrewingRecipes(final RegisterBrewingRecipesEvent event)"))
+        assertTrue(migrated.contains("event.getBuilder().addRecipe(Ingredient.of(ItemRegister.HOT_WATER_BOTTLE.get()), Ingredient.of(Items.GUNPOWDER), ItemRegister.SPLASH_HOT_WATER_BOTTLE.get().getDefaultInstance());"))
+        assertTrue(migrated.contains("event.getBuilder().addRecipe(Ingredient.of(ExampleItems.BASE.get()), Ingredient.of(ExampleItems.BOOST.get()), ExampleItems.RESULT.get().getDefaultInstance());"))
+        assertTrue(migrated.contains("event.getBuilder().addRecipe(new CustomFluidBrewingRecipe());"))
+        assertTrue(migrated.contains("""private static final String DOC = "BrewingRecipeRegistry.addRecipe(Ingredient.of(ExampleItems.DOC.get()), Ingredient.EMPTY, ExampleItems.DOC_RESULT.get())";"""))
+        assertTrue(migrated.contains("private static final String METHOD_DOC = \"\"\""))
+        assertTrue(migrated.contains("private void registerBrewingRecipes(final FMLCommonSetupEvent fakeEvent)"))
+        assertTrue(migrated.contains("BrewingRecipeRegistry.addRecipe(Ingredient.of(ExampleItems.DOC.get()), Ingredient.EMPTY, ExampleItems.DOC_RESULT.get());"))
+        assertFalse(migrated.contains("event.getBuilder().addRecipe(Ingredient.of(ExampleItems.DOC.get())"))
+        assertFalse(migrated.contains("HONEY_BATH_BOTTLE"))
+        assertFalse(migrated.contains("MILK_BATH_BOTTLE"))
+        assertTrue(!migrated.contains("onBrewingRecipeRegister"))
+    }
+
+    @Test
+    fun `migrates common Minecraft 121 vanilla API changes`() {
+        val projectDir = createFile("VanillaApiUse.java", """
+            package com.example;
+
+            import net.minecraft.client.player.AbstractClientPlayer;
+            import net.minecraft.client.renderer.entity.player.PlayerRenderer;
+            import net.minecraft.core.Holder;
+            import net.minecraft.core.particles.ParticleTypes;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.effect.MobEffects;
+            import net.minecraft.world.entity.MobType;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.enchantment.EnchantmentHelper;
+            import net.minecraft.world.item.trading.MerchantOffer;
+            import net.neoforged.neoforge.event.entity.living.LivingDamageEvent;
+
+            public class VanillaApiUse {
+                void player(Player player) {
+                    ItemStack stack = new ItemStack(Items.POTION);
+                    double reach = player.getBlockReach();
+                    if (player.getMobType() == MobType.UNDEAD) {}
+                    new MerchantOffer(new ItemStack(Items.EMERALD, 10), new ItemStack(Items.DIRT), 16, 2, 0.05F);
+                    int emeraldCost = 3;
+                    ItemStack itemstack = new ItemStack(Items.COD, emeraldCost);
+                    new MerchantOffer(itemstack, new ItemStack(Items.EMERALD), 16, 2, 0.05F);
+                    new MerchantOffer(new ItemStack(Items.EMERALD, emeraldCost), new ItemStack(Items.DIRT, 2), 16, 2, 0.05F);
+                    new MerchantOffer(
+                        new ItemStack(Items.EMERALD, 10),
+                        new ItemStack(Items.DIRT),
+                        16, // maxUses
+                        2, // xpValue
+                        0.05F // priceMultiplier
+                    );
+                    int color = net.minecraft.world.item.alchemy.PotionUtils.getColor(stack);
+                    boolean locked = EnchantmentHelper.hasBindingCurse(stack);
+                    boolean retained = EnchantmentHelper.hasVanishingCurse(stack);
+                    if (EquipmentSlot.CHEST.getType() == EquipmentSlot.Type.ARMOR) {}
+                }
+
+                void attr(Player player, Attribute attribute, ResourceLocation modifierName, boolean add, double value, AttributeModifier.Operation operation) {
+                    AttributeInstance attributeInstance = player.getAttribute(attribute);
+                    java.util.UUID uuid = java.util.UUID.nameUUIDFromBytes(modifierName.toString().getBytes());
+                    AttributeModifier modifier = new AttributeModifier(uuid, modifierName.toString(), value, AttributeModifier.Operation.MULTIPLY_TOTAL);
+                    if (!attributeInstance.hasModifier(modifier)) {}
+                    attributeInstance.removeModifier(uuid);
+                }
+
+                void effect(Holder<MobEffect> effectHolder) {
+                    MobEffect effect = effectHolder;
+                    if (effectHolder != MobEffects.UNLUCK) {}
+                }
+
+                Holder<MobEffect> remap(MobEffectInstance instance) {
+                    MobEffect effect = instance.getEffect();
+                    return changeEffect(effect);
+                }
+
+                private MobEffect changeEffect(MobEffect effect) {
+                    if (effect == MobEffects.POISON) {
+                        return MobEffects.REGENERATION;
+                    } else if (!effect.isBeneficial()) {
+                        return null;
+                    }
+                    return effect;
+                }
+
+                void model(AbstractClientPlayer client, TrophyType trophyType) {
+                    if (client.getModelName().equals("slim")) {}
+                    String modelName = trophyType.getModelName();
+                }
+
+                public static void onPlayerHurt(LivingDamageEvent event) {
+                    if (!event.isCanceled()) {
+                        Object entity = event.getEntity();
+                    }
+                }
+
+                public static void clampPlayerHurt(LivingDamageEvent event) {
+                    float amount = event.getAmount();
+                    event.setAmount(Math.min(amount, 10.0F));
+                }
+
+                public static void cancelPlayerHurt(LivingDamageEvent event) {
+                    if (event.getAmount() > 20.0F) {
+                        event.setCanceled(true);
+                    }
+                }
+
+                static class TrophyType {
+                    String getModelName() {
+                        return "trophy";
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/VanillaApiUse.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("player.blockInteractionRange()"))
+        assertTrue(migrated.contains("player.getType().is(EntityTypeTags.UNDEAD)"))
+        assertTrue(
+            migrated.contains("new ItemCost(Items.EMERALD, 10)") ||
+                migrated.contains("new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, 10)"),
+            migrated
+        )
+        assertTrue(migrated.contains("new MerchantOffer(new net.minecraft.world.item.trading.ItemCost(Items.COD, emeraldCost), new ItemStack(Items.EMERALD), 16, 2, 0.05F)"), migrated)
+        assertTrue(migrated.contains("new MerchantOffer(new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, emeraldCost), new ItemStack(Items.DIRT, 2), 16, 2, 0.05F)"), migrated)
+        assertTrue(migrated.contains("new MerchantOffer(new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, 10), new ItemStack(Items.DIRT), 16, 2, 0.05F)"), migrated)
+        assertFalse(migrated.contains("priceMultiplier);"), migrated)
+        assertTrue(migrated.contains("(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"))
+        assertTrue(migrated.contains("EnchantmentHelper.has(stack, EnchantmentEffectComponents.PREVENT_ARMOR_CHANGE)"))
+        assertTrue(migrated.contains("EnchantmentHelper.has(stack, EnchantmentEffectComponents.PREVENT_EQUIPMENT_DROP)"))
+        assertTrue(migrated.contains("import net.minecraft.world.item.enchantment.EnchantmentEffectComponents;"))
+        assertTrue(migrated.contains("EquipmentSlot.CHEST.getType() == EquipmentSlot.Type.HUMANOID_ARMOR"))
+        assertTrue(!migrated.contains("EquipmentSlot.Type.ARMOR"))
+        assertTrue(migrated.contains("Holder<Attribute> attribute"))
+        assertTrue(migrated.contains("new AttributeModifier(modifierName, value, AttributeModifier.Operation.ADD_MULTIPLIED_TOTAL)"), migrated)
+        assertTrue(migrated.contains("attributeInstance.hasModifier(modifier.id())"))
+        assertTrue(migrated.contains("attributeInstance.removeModifier(modifierName)"))
+        assertTrue(migrated.contains("MobEffect effect = effectHolder.value();"))
+        assertTrue(migrated.contains("Holder<MobEffect> effect = instance.getEffect();"), migrated)
+        assertTrue(migrated.contains("private Holder<MobEffect> changeEffect(Holder<MobEffect> effect)"), migrated)
+        assertTrue(
+            migrated.contains("if (effect.is(MobEffects.POISON))") ||
+                migrated.contains("if (effect.is(MobEffects.POISON.unwrapKey().orElseThrow()))"),
+            migrated
+        )
+        assertTrue(migrated.contains("return MobEffects.REGENERATION;"), migrated)
+        assertTrue(migrated.contains("!effect.value().isBeneficial()"), migrated)
+        assertTrue(migrated.contains("client.getSkin().model().id().equals(\"slim\")"))
+        assertTrue(migrated.contains("String modelName = trophyType.getModelName();"))
+        assertTrue(migrated.contains("onPlayerHurt(LivingDamageEvent.Post event)"))
+        assertTrue(migrated.contains("clampPlayerHurt(LivingDamageEvent.Pre event)"))
+        assertTrue(migrated.contains("cancelPlayerHurt(LivingIncomingDamageEvent event)"))
+        assertTrue(migrated.contains("Object entity = event.getEntity();"))
+        assertTrue(migrated.contains("float amount = event.getNewDamage();"))
+        assertTrue(migrated.contains("event.setNewDamage(Math.min(amount, 10.0F));"))
+        assertTrue(migrated.contains("import net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent;"))
+        assertFalse(migrated.contains("if (!event.isCanceled())"))
+    }
+
+    @Test
+    fun `aligns living damage helper call sites across split NeoForge damage phases`() {
+        val eventDir = tempDir.resolve("src/main/java/com/example/event")
+        val bindingDir = tempDir.resolve("src/main/java/com/example/binding")
+        eventDir.createDirectories()
+        bindingDir.createDirectories()
+
+        eventDir.resolve("AttackEvents.java").writeText("""
+            package com.example.event;
+
+            import com.example.binding.BindingEvents;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.event.entity.living.LivingDamageEvent;
+            import net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent;
+
+            public class AttackEvents {
+                @SubscribeEvent
+                public static void livingHurtEvent(LivingDamageEvent.Post event) {
+                    if (event.getEntity() instanceof ServerPlayer sp) {
+                        BindingEvents.playerHurtEvent(event, sp);
+                    }
+                }
+
+                @SubscribeEvent
+                public static void livingDamageEvent(LivingDamageEvent.Pre event) {
+                    LivingEntity entity = event.getEntity();
+                    if (entity instanceof ServerPlayer player) {
+                        playerDamageEvent(event, player);
+                    }
+                    BindingEvents.minionDamageEvent(event);
+                    BindingEvents.playerDamageEvent(event);
+                }
+
+                private static void playerDamageEvent(LivingIncomingDamageEvent event, ServerPlayer player) {
+                    if (event.getAmount() > 20.0F) {
+                        event.setCanceled(true);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        bindingDir.resolve("BindingEvents.java").writeText("""
+            package com.example.binding;
+
+            import net.minecraft.server.level.ServerPlayer;
+            import net.neoforged.neoforge.event.entity.living.LivingDamageEvent;
+            import net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent;
+
+            public class BindingEvents {
+                public static void minionDamageEvent(LivingDamageEvent.Pre event) {
+                    event.setNewDamage(event.getNewDamage() * 1.5F);
+                }
+
+                public static void playerDamageEvent(LivingDamageEvent.Post event) {
+                    event.getEntity().setAirSupply((int) event.getNewDamage());
+                }
+
+                public static void playerHurtEvent(LivingIncomingDamageEvent event, ServerPlayer sp) {
+                    if (event.getAmount() > 0) {
+                        event.setCanceled(true);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val attack = eventDir.resolve("AttackEvents.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-living-damage-helper-boundary" }, attack)
+        assertTrue(attack.contains("public static void livingHurtEvent(LivingIncomingDamageEvent event)"), attack)
+        assertTrue(attack.contains("public static void livingDamageEvent(LivingDamageEvent.Pre event)"), attack)
+        assertTrue(attack.contains("BindingEvents.minionDamageEvent(event);"), attack)
+        val preMethod = Regex("""(?s)public static void livingDamageEvent\(LivingDamageEvent\.Pre event\).*?\n    }""")
+            .find(attack)
+            ?.value
+            ?: error(attack)
+        assertFalse(preMethod.contains("playerDamageEvent(event, player);"), attack)
+        assertFalse(preMethod.contains("BindingEvents.playerDamageEvent(event);"), attack)
+        assertTrue(attack.contains("public static void modporterLivingDamageEventIncoming(LivingIncomingDamageEvent event)"), attack)
+        assertTrue(attack.contains("if (event.getEntity() instanceof ServerPlayer player)"), attack)
+        assertTrue(attack.contains("playerDamageEvent(event, player);"), attack)
+        assertTrue(attack.contains("public static void modporterLivingDamageEventPost(LivingDamageEvent.Post event)"), attack)
+        assertTrue(attack.contains("BindingEvents.playerDamageEvent(event);"), attack)
+    }
+
+    @Test
+    fun `holder value accessor migration ignores comments and strings`() {
+        val projectDir = createFile("HolderAccessDocs.java", """
+            package com.example;
+
+            import net.minecraft.client.player.AbstractClientPlayer;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectInstance;
+
+            public class HolderAccessDocs {
+                private static final String DOC = ".getEffect().getDescriptionId() client.getModelName() MobEffect effect = otherHolder;";
+
+                /*
+                void docs(Holder<MobEffect> otherHolder, MobEffectInstance instance, AbstractClientPlayer client) {
+                    String id = instance.getEffect().getDescriptionId();
+                    MobEffect effect = otherHolder;
+                    String model = client.getModelName();
+                }
+                */
+
+                void real(Holder<MobEffect> otherHolder, MobEffectInstance instance, AbstractClientPlayer client, TrophyType trophyType) {
+                    String id = instance.getEffect().getDescriptionId();
+                    MobEffect effect = otherHolder;
+                    String model = client.getModelName();
+                    String trophy = trophyType.getModelName();
+                }
+
+                static class TrophyType {
+                    String getModelName() {
+                        return "trophy";
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = projectDir.resolve("src/main/java/com/example/HolderAccessDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("""private static final String DOC = ".getEffect().getDescriptionId() client.getModelName() MobEffect effect = otherHolder;";"""), migrated)
+        assertTrue(migrated.contains("String id = instance.getEffect().value().getDescriptionId();"), migrated)
+        assertTrue(migrated.contains("MobEffect effect = otherHolder.value();"), migrated)
+        assertTrue(migrated.contains("String model = client.getSkin().model().id();"), migrated)
+        assertTrue(migrated.contains("String trophy = trophyType.getModelName();"), migrated)
+        assertTrue(
+            Regex("""/\*\s*void docs\(Holder<MobEffect> otherHolder, MobEffectInstance instance, AbstractClientPlayer client\)\s*\{\s*String id = instance\.getEffect\(\)\.getDescriptionId\(\);\s*MobEffect effect = otherHolder;\s*String model = client\.getModelName\(\);""", RegexOption.DOT_MATCHES_ALL)
+                .containsMatchIn(migrated),
+            migrated
+        )
+    }
+
+    @Test
+    fun `migrates recipe book ghost recipe holder override without broad recipe rewrites`() {
+        val projectDir = createFile("IncubatorRecipeBookComponent.java", """
+            package com.example;
+
+            import net.minecraft.client.gui.screens.recipebook.RecipeBookComponent;
+            import net.minecraft.world.inventory.Slot;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.Recipe;
+
+            import java.util.List;
+
+            public class IncubatorRecipeBookComponent extends RecipeBookComponent {
+                @Override
+                public void setupGhostRecipe(Recipe<?> recipe, List<Slot> slots) {
+                    this.ghostRecipe.setRecipe(recipe);
+                    Ingredient ingredient = recipe.getIngredients().get(0);
+                    Slot slot = slots.get(0);
+                    this.ghostRecipe.addIngredient(ingredient, slot.x, slot.y);
+                }
+
+                public Ingredient inspectUnrelatedRecipe(Recipe<?> recipe) {
+                    return recipe.getIngredients().get(0);
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/IncubatorRecipeBookComponent.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("import net.minecraft.world.item.crafting.RecipeHolder;"))
+        assertTrue(migrated.contains("public void setupGhostRecipe(RecipeHolder<?> recipe, List<Slot> slots)"))
+        assertTrue(migrated.contains("this.ghostRecipe.setRecipe(recipe);"))
+        assertTrue(migrated.contains("Ingredient ingredient = recipe.value().getIngredients().get(0);"))
+        assertTrue(migrated.contains("public Ingredient inspectUnrelatedRecipe(Recipe<?> recipe)"))
+        assertTrue(migrated.contains("return recipe.getIngredients().get(0);"))
+    }

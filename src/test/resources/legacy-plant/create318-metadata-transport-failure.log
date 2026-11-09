@@ -1,0 +1,51 @@
+> Task :modporterLegacyPlantResolve FAILED
+
+[Incubating] Problems report is available at: file:///example/converted-project/build/reports/problems/problems-report.html
+
+FAILURE: Build failed with an exception.
+
+* Where:
+Initialization script 'example\modporter\legacy-plant-resolve.init.gradle' line: 266
+
+* What went wrong:
+Execution failed for task ':modporterLegacyPlantResolve'.
+> Could not resolve all files for configuration ':runtimeClasspath'.
+   > Could not resolve dev.engine-room.flywheel:flywheel-forge-1.20.1:{strictly [1.0,2.0); prefer 1.0.6-beta-266}.
+     Required by:
+         root project :
+      > Failed to list versions for dev.engine-room.flywheel:flywheel-forge-1.20.1.
+         > Unable to load Maven meta-data from https://maven.createmod.net/dev/engine-room/flywheel/flywheel-forge-1.20.1/maven-metadata.xml.
+            > Could not HEAD 'https://maven.createmod.net/dev/engine-room/flywheel/flywheel-forge-1.20.1/maven-metadata.xml'.
+               > Got SSL handshake exception during request. It might be caused by SSL misconfiguration
+                  > PKIX path building failed: sun.security.provider.certpath.SunCertPathBuilderException: unable to find valid certification path to requested target
+      > Failed to list versions for dev.engine-room.flywheel:flywheel-forge-1.20.1.
+         > Unable to load Maven meta-data from https://maven.ithundxr.dev/mirror/dev/engine-room/flywheel/flywheel-forge-1.20.1/maven-metadata.xml.
+            > Could not GET 'https://maven.ithundxr.dev/mirror/dev/engine-room/flywheel/flywheel-forge-1.20.1/maven-metadata.xml'. Received status code 400 from server: Bad Request
+   > Could not resolve dev.engine-room.flywheel:flywheel-forge-1.20.1:[1.0,2.0).
+     Required by:
+         root project :
+      > Failed to list versions for dev.engine-room.flywheel:flywheel-forge-1.20.1.
+         > Unable to load Maven meta-data from https://maven.createmod.net/dev/engine-room/flywheel/flywheel-forge-1.20.1/maven-metadata.xml.
+            > Could not HEAD 'https://maven.createmod.net/dev/engine-room/flywheel/flywheel-forge-1.20.1/maven-metadata.xml'.
+               > Got SSL handshake exception during request. It might be caused by SSL misconfiguration
+                  > PKIX path building failed: sun.security.provider.certpath.SunCertPathBuilderException: unable to find valid certification path to requested target
+      > Failed to list versions for dev.engine-room.flywheel:flywheel-forge-1.20.1.
+         > Unable to load Maven meta-data from https://maven.ithundxr.dev/mirror/dev/engine-room/flywheel/flywheel-forge-1.20.1/maven-metadata.xml.
+            > Could not GET 'https://maven.ithundxr.dev/mirror/dev/engine-room/flywheel/flywheel-forge-1.20.1/maven-metadata.xml'. Received status code 400 from server: Bad Request
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights.
+> Get more help at https://help.gradle.org.
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 9.0.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/8.14.4/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD FAILED in 1m 56s
+2 actionable tasks: 2 executed
+minecraft-mod-testing: FAIL: project command failed with exit code 1
+minecraft-mod-testing release gate=passed latest=v0.1.15

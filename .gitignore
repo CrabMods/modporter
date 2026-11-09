@@ -20,3 +20,16 @@ src/test/resources/fixtures/*-ported/
 
 # Local paper drafts, kept private until publication-ready
 /paper/
+__pycache__/
+
+# Local benchmark evidence, working drafts, and runtime profiles
+/logs/
+.codex-source-build.lock
+*.jfr
+*.hprof
+/.modporter/
+
+# Optional local private build sidecar and Python cache
+/.minecraft-mod-testing/
+/.agents/skills/minecraft-mod-testing/
+/.modporter/private-framework-local/

@@ -234,11 +234,14 @@ class ResourceMigrationPass(
             }
 
             val assetsDir = resourceDir.resolve("assets")
-            if (assetsDir.exists() && !dryRun) {
-                transformAssetJsonFiles(assetsDir, resourceDirs, changes, errors)
-                fillMissingSoundSubtitleTranslations(assetsDir, changes, errors)
-                generateMissingItemModels(projectDir, resourceDir, changes, errors)
-                normalizeItemTextureMipDimensions(assetsDir, changes, errors)
+            if (assetsDir.exists()) {
+                migrateLegacyFogDistanceShaders(assetsDir, changes, errors, dryRun)
+                if (!dryRun) {
+                    transformAssetJsonFiles(assetsDir, resourceDirs, changes, errors)
+                    fillMissingSoundSubtitleTranslations(assetsDir, changes, errors)
+                    generateMissingItemModels(projectDir, resourceDir, changes, errors)
+                    normalizeItemTextureMipDimensions(assetsDir, changes, errors)
+                }
             }
 
             // Update pack.mcmeta
@@ -258,6 +261,69 @@ class ResourceMigrationPass(
             }
         }
 
+        if (isCreateStructureNbtOwner(projectDir)) {
+            val createStructureNbtPlan = CreateStructureNbtMigrationStage.plan(resourceDirs)
+            if (createStructureNbtPlan.blockers.isNotEmpty()) {
+                errors += createStructureNbtPlan.blockers.map {
+                    "Create structure NBT migration refused: $it"
+                }
+            } else {
+                createStructureNbtPlan.files.forEach { file ->
+                    val migratedPayloads = buildList {
+                        if (file.migratedTankCount > 0) {
+                            add("${file.migratedTankCount} tank FluidStack payload(s)")
+                        }
+                        if (file.migratedAirCount > 0) {
+                            add("${file.migratedAirCount} empty ItemStack payload(s)")
+                        }
+                        if (file.migratedItemCount > 0) {
+                            add("${file.migratedItemCount} nonempty ItemStack payload(s)")
+                        }
+                        if (file.migratedGravityCount > 0) {
+                            add("${file.migratedGravityCount} entity gravity attribute(s)")
+                        }
+                        if (file.migratedEmptyEntityCount > 0) {
+                            add(
+                                "${file.migratedEmptyEntityCount} " +
+                                    "source-proven empty entity wrapper(s)"
+                            )
+                        }
+                    }.joinToString(" and ")
+                    val appliedRuleIds = buildList {
+                        if (file.migratedTankCount > 0) {
+                            add(CreateStructureFluidNbtMigration.RULE_ID)
+                        }
+                        if (file.migratedAirCount > 0) {
+                            add(CreateStructureEmptyItemNbtMigration.RULE_ID)
+                        }
+                        if (file.migratedItemCount > 0) {
+                            add(CreateStructureItemStackNbtMigration.RULE_ID)
+                        }
+                        if (file.migratedGravityCount > 0) {
+                            add(CreateStructureGravityAttributeNbtMigration.RULE_ID)
+                        }
+                        if (file.migratedEmptyEntityCount > 0) {
+                            add(CreateStructureEmptyEntityNbtMigration.RULE_ID)
+                        }
+                    }
+                    val ruleId =
+                        appliedRuleIds.singleOrNull() ?: CreateStructureNbtMigrationStage.RULE_ID
+                    changes += Change(
+                        file = file.path,
+                        line = 0,
+                        description = "Migrate $migratedPayloads in Create structure NBT",
+                        before = file.originalSha256,
+                        after = file.migratedSha256,
+                        confidence = Confidence.HIGH,
+                        ruleId = ruleId
+                    )
+                }
+                if (!dryRun) {
+                    CreateStructureNbtMigrationStage.apply(createStructureNbtPlan)
+                }
+            }
+        }
+
         if (!dryRun) {
             generateMissingLiquidBlockAssets(projectDir, resourceDirs, changes, errors)
             generateMissingLightBlockAssets(projectDir, resourceDirs, changes, errors)
@@ -270,6 +336,160 @@ class ResourceMigrationPass(
         migrateCustomEnchantmentData(projectDir, changes, errors)
 
         return PassResult(name, changes, errors)
+    }
+
+    private fun migrateLegacyFogDistanceShaders(
+        assetsDir: Path,
+        changes: MutableList<Change>,
+        errors: MutableList<String>,
+        dryRun: Boolean
+    ) {
+        val vertexShaders = Files.walk(assetsDir).use { paths ->
+            paths.filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".vsh") }
+                .sorted()
+                .toList()
+        }
+        val uniformPattern = Regex(
+            """(?m)^[ \t]*uniform\s+mat3\s+IViewRotMat\s*;\s*\r?\n"""
+        )
+        val legacyCallPattern = Regex(
+            """(?<![A-Za-z0-9_$])fog_distance(?![A-Za-z0-9_$])\s*\(\s*ModelViewMat\s*,\s*IViewRotMat\s*\*\s*([A-Za-z_$][\w$]*)\s*,\s*FogShape\s*\)"""
+        )
+        val viewRotationName = Regex("""\bIViewRotMat\b""")
+
+        vertexShaders.forEach { vertexShader ->
+            val source = vertexShader.readText()
+            if (!source.contains("fog_distance") || !source.contains("IViewRotMat")) {
+                return@forEach
+            }
+            val executableSource = maskGlslComments(source)
+            val uniforms = uniformPattern.findAll(executableSource).toList()
+            val calls = legacyCallPattern.findAll(executableSource).toList()
+            val references = viewRotationName.findAll(executableSource).toList()
+            if (uniforms.size != 1 || calls.size != 1 || references.size != 2) {
+                errors +=
+                    "Cannot migrate legacy fog_distance shader $vertexShader: expected one IViewRotMat " +
+                        "uniform and one exact legacy call with no other IViewRotMat references"
+                return@forEach
+            }
+
+            val programJson = vertexShader.resolveSibling(
+                vertexShader.fileName.toString().removeSuffix(".vsh") + ".json"
+            )
+            if (!programJson.exists()) {
+                errors +=
+                    "Cannot migrate legacy fog_distance shader $vertexShader: paired program JSON is missing"
+                return@forEach
+            }
+            val programSource = programJson.readText()
+            val program = parseResourceJson(programSource) as? JsonObject
+            val programUniforms = program?.get("uniforms") as? JsonArray
+            if (program == null || programUniforms == null) {
+                errors +=
+                    "Cannot migrate legacy fog_distance shader $vertexShader: paired program JSON has no uniforms array"
+                return@forEach
+            }
+            val rotationUniforms = programUniforms.filter { uniform ->
+                (uniform as? JsonObject)
+                    ?.get("name")
+                    .let { it as? JsonPrimitive }
+                    ?.contentOrNull == "IViewRotMat"
+            }
+            if (rotationUniforms.size != 1) {
+                errors +=
+                    "Cannot migrate legacy fog_distance shader $vertexShader: paired program JSON must declare " +
+                        "IViewRotMat exactly once"
+                return@forEach
+            }
+
+            val position = calls.single().groupValues[1]
+            var migratedVertex = source
+            listOf(
+                calls.single().range to "fog_distance($position, FogShape)",
+                uniforms.single().range to ""
+            ).sortedByDescending { it.first.first }
+                .forEach { (range, replacement) ->
+                    migratedVertex = migratedVertex.replaceRange(range, replacement)
+                }
+            val migratedProgram = JsonObject(
+                program.mapValues { (key, value) ->
+                    if (key == "uniforms") {
+                        JsonArray(programUniforms.filterNot { uniform ->
+                            (uniform as? JsonObject)
+                                ?.get("name")
+                                .let { it as? JsonPrimitive }
+                                ?.contentOrNull == "IViewRotMat"
+                        })
+                    } else {
+                        value
+                    }
+                }
+            )
+            val migratedProgramSource =
+                RESOURCE_JSON.encodeToString(JsonElement.serializer(), migratedProgram) + "\n"
+
+            changes += Change(
+                file = vertexShader,
+                line = source.lineSequence()
+                    .takeWhile { !it.contains("fog_distance") }
+                    .count() + 1,
+                description = "Migrate the legacy three-argument fog_distance shader call",
+                before = calls.single().value,
+                after = "fog_distance($position, FogShape)",
+                confidence = Confidence.HIGH,
+                ruleId = "res-shader-fog-distance-121"
+            )
+            changes += Change(
+                file = programJson,
+                line = 0,
+                description = "Remove the obsolete IViewRotMat shader uniform",
+                before = "\"name\": \"IViewRotMat\"",
+                after = "removed",
+                confidence = Confidence.HIGH,
+                ruleId = "res-shader-fog-distance-121"
+            )
+            if (!dryRun) {
+                vertexShader.writeText(migratedVertex)
+                programJson.writeText(migratedProgramSource)
+            }
+        }
+    }
+
+    private fun maskGlslComments(source: String): String {
+        val masked = source.toCharArray()
+        var index = 0
+        while (index < source.length) {
+            if (index + 1 < source.length && source[index] == '/' && source[index + 1] == '/') {
+                masked[index] = ' '
+                masked[index + 1] = ' '
+                index += 2
+                while (index < source.length && source[index] != '\n' && source[index] != '\r') {
+                    masked[index] = ' '
+                    index++
+                }
+                continue
+            }
+            if (index + 1 < source.length && source[index] == '/' && source[index + 1] == '*') {
+                masked[index] = ' '
+                masked[index + 1] = ' '
+                index += 2
+                while (index < source.length) {
+                    if (index + 1 < source.length && source[index] == '*' && source[index + 1] == '/') {
+                        masked[index] = ' '
+                        masked[index + 1] = ' '
+                        index += 2
+                        break
+                    }
+                    if (source[index] != '\n' && source[index] != '\r') {
+                        masked[index] = ' '
+                    }
+                    index++
+                }
+                continue
+            }
+            index++
+        }
+        return masked.concatToString()
     }
 
     private fun mergeDirectoryContents(source: Path, target: Path, errors: MutableList<String>) {
@@ -372,12 +592,32 @@ class ResourceMigrationPass(
         return RESOURCE_JSON.encodeToString(JsonElement.serializer(), JsonObject(merged)) + "\n"
     }
 
+    private fun isCreateStructureNbtOwner(projectDir: Path): Boolean =
+        listOf(
+            "src/main/java/com/simibubi/create/Create.java",
+            "src/main/java/com/simibubi/create/content/fluids/tank/FluidTankBlockEntity.java"
+        ).all { projectDir.resolve(it).isRegularFile() }
+
     private fun findResourceDirs(projectDir: Path): List<Path> {
         val dirs = mutableListOf<Path>()
         val mainResources = projectDir.resolve("src/main/resources")
         if (mainResources.exists()) dirs.add(mainResources)
         val genResources = projectDir.resolve("src/generated/resources")
         if (genResources.exists()) dirs.add(genResources)
+        // Every other source set with resources (game-test mods such as src/bucketTest) ships the
+        // same mod metadata and data packs, which the loader reads with the 1.21 layout.
+        val src = projectDir.resolve("src")
+        if (src.exists()) {
+            runCatching {
+                Files.list(src).use { sets ->
+                    sets.filter { Files.isDirectory(it) }
+                        .map { it.resolve("resources") }
+                        .filter { Files.isDirectory(it) && it !in dirs && it.parent.fileName.toString() != "references" }
+                        .sorted()
+                        .forEach { dirs.add(it) }
+                }
+            }
+        }
         return dirs
     }
 
@@ -1670,6 +1910,22 @@ class ResourceMigrationPass(
                                     ))
                                 }
                             }
+                        }
+                    }
+
+                    if (isRecipeFile) {
+                        val stainedGlassContent = migrateLegacyStainedGlassRecipeIngredients(content)
+                        if (stainedGlassContent != content) {
+                            content = stainedGlassContent
+                            modified = true
+                            changes.add(Change(
+                                file = file, line = 0,
+                                description = "Preserve stained glass washing ingredients as native tag intersections",
+                                before = "Legacy Forge stained glass item tags",
+                                after = "Native glass kind and dyed tag intersection",
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-create-stained-glass-intersection"
+                            ))
                         }
                     }
 

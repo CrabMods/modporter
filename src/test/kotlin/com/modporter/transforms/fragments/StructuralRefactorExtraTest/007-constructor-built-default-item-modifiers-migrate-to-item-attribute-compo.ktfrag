@@ -1,0 +1,1010 @@
+
+    @Test
+    fun `constructor built default item modifiers migrate to item attribute components`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("SurgeryItem.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.Item;
+
+            public class SurgeryItem extends Item {
+                public SurgeryItem(Item.Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("KnifeItem.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+            import net.minecraft.world.item.Item;
+
+            public class KnifeItem extends Item {
+                private final Multimap<Holder<Attribute>, AttributeModifier> defaultModifiers;
+
+                public KnifeItem() {
+                    super(new Properties().durability(200));
+                    ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier> builder = ImmutableMultimap.builder();
+                    builder.put(Attributes.ATTACK_DAMAGE, new AttributeModifier(BASE_ATTACK_DAMAGE_UUID, "Weapon modifier", 4, AttributeModifier.Operation.ADD_VALUE));
+                    builder.put(Attributes.ATTACK_SPEED, new AttributeModifier(BASE_ATTACK_SPEED_UUID, "Weapon modifier", -2.4, AttributeModifier.Operation.ADD_VALUE));
+                    this.defaultModifiers = builder.build();
+                }
+
+                public Multimap<Holder<Attribute>, AttributeModifier> getDefaultAttributeModifiers(EquipmentSlot slot) {
+                    return slot == EquipmentSlot.MAINHAND ? this.defaultModifiers : super.getDefaultAttributeModifiers(slot);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ScalpelItem.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+
+            public class ScalpelItem extends SurgeryItem {
+                private final Multimap<Holder<Attribute>, AttributeModifier> defaultModifiers;
+
+                public ScalpelItem() {
+                    super(new Properties().durability(200));
+                    ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier> builder = ImmutableMultimap.builder();
+                    builder.put(Attributes.ATTACK_DAMAGE, new AttributeModifier(BASE_ATTACK_DAMAGE_UUID, "Weapon modifier", 4, AttributeModifier.Operation.ADD_VALUE));
+                    builder.put(Attributes.ATTACK_SPEED, new AttributeModifier(BASE_ATTACK_SPEED_UUID, "Weapon modifier", -2.4, AttributeModifier.Operation.ADD_VALUE));
+                    this.defaultModifiers = builder.build();
+                }
+
+                public Multimap<Holder<Attribute>, AttributeModifier> getDefaultAttributeModifiers(EquipmentSlot slot) {
+                    return slot == EquipmentSlot.MAINHAND ? this.defaultModifiers : super.getDefaultAttributeModifiers(slot);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("HammerItem.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+            import net.minecraft.world.item.Tier;
+            import net.minecraft.world.item.TieredItem;
+
+            public class HammerItem extends TieredItem {
+                private final Multimap<Holder<Attribute>, AttributeModifier> defaultModifiers;
+                private final float attackDamageBaseline;
+
+                public HammerItem(int attackDamage, float attackSpeed, Properties properties) {
+                    super(makeTier(), properties);
+                    this.attackDamageBaseline = attackDamage + makeTier().getAttackDamageBonus();
+                    ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier> builder = ImmutableMultimap.builder();
+                    builder.put(Attributes.ATTACK_DAMAGE, new AttributeModifier(BASE_ATTACK_DAMAGE_UUID, "Tool modifier", (double)this.attackDamageBaseline, AttributeModifier.Operation.ADD_VALUE));
+                    builder.put(Attributes.ATTACK_SPEED, new AttributeModifier(BASE_ATTACK_SPEED_UUID, "Tool modifier", (double)attackSpeed, AttributeModifier.Operation.ADD_VALUE));
+                    this.defaultModifiers = builder.build();
+                }
+
+                private static Tier makeTier() {
+                    return null;
+                }
+
+                public Multimap<Holder<Attribute>, AttributeModifier> getDefaultAttributeModifiers(EquipmentSlot slot) {
+                    return slot == EquipmentSlot.MAINHAND ? this.defaultModifiers : super.getDefaultAttributeModifiers(slot);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val knife = srcDir.resolve("KnifeItem.java").readText()
+        val scalpel = srcDir.resolve("ScalpelItem.java").readText()
+        val hammer = srcDir.resolve("HammerItem.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        listOf(knife, scalpel, hammer).forEach { migrated ->
+            assertTrue(migrated.contains("import net.minecraft.world.item.component.ItemAttributeModifiers;"), migrated)
+            assertTrue(migrated.contains("import net.minecraft.world.entity.EquipmentSlotGroup;"), migrated)
+            assertTrue(migrated.contains(".attributes(ItemAttributeModifiers.builder()"), migrated)
+            assertTrue(migrated.contains(".add(Attributes.ATTACK_SPEED"), migrated)
+            assertTrue(migrated.contains(".build())"), migrated)
+            assertFalse(migrated.contains("defaultModifiers"), migrated)
+            assertFalse(migrated.contains("ImmutableMultimap"), migrated)
+            assertFalse(migrated.contains("getDefaultAttributeModifiers(EquipmentSlot"), migrated)
+        }
+        assertTrue(knife.contains(".add(Attributes.ATTACK_DAMAGE"), knife)
+        assertTrue(scalpel.contains(".add(Attributes.ATTACK_DAMAGE"), scalpel)
+        assertTrue(hammer.contains(".add(Attributes.ATTACK_DAMAGE"), hammer)
+        assertTrue(hammer.contains("net.minecraft.world.item.Item.BASE_ATTACK_DAMAGE_ID"), hammer)
+        assertTrue(hammer.contains("net.minecraft.world.item.Item.BASE_ATTACK_SPEED_ID"), hammer)
+        assertTrue(hammer.contains("(double)(attackDamage + makeTier().getAttackDamageBonus())"), hammer)
+    }
+
+    @Test
+    fun `legacy tier enum getLevel migrates to incorrect block tag field structurally`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleTiers.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.Tier;
+            import net.minecraft.world.item.crafting.Ingredient;
+
+            import java.util.function.Supplier;
+
+            public enum ExampleTiers implements Tier {
+                COPPER(2, 512, 6.5F, 2.0F, 25, () -> Ingredient.EMPTY),
+                MYTHIC(4, 1561, 8.0F, 3.0F, 10, () -> Ingredient.EMPTY);
+
+                private final int harvestLevel;
+                private final int maxUses;
+                private final float efficiency;
+                private final float attackDamage;
+                private final int enchantability;
+                private final Supplier<Ingredient> repairMaterial;
+
+                ExampleTiers(int harvestLevel, int maxUses, float efficiency, float attackDamage, int enchantability, Supplier<Ingredient> repairMaterial) {
+                    this.harvestLevel = harvestLevel;
+                    this.maxUses = maxUses;
+                    this.efficiency = efficiency;
+                    this.attackDamage = attackDamage;
+                    this.enchantability = enchantability;
+                    this.repairMaterial = repairMaterial;
+                }
+
+                @Override
+                public int getUses() {
+                    return this.maxUses;
+                }
+
+                @Override
+                public float getSpeed() {
+                    return this.efficiency;
+                }
+
+                @Override
+                public float getAttackDamageBonus() {
+                    return this.attackDamage;
+                }
+
+                @Override
+                public int getLevel() {
+                    return this.harvestLevel;
+                }
+
+                @Override
+                public int getEnchantmentValue() {
+                    return this.enchantability;
+                }
+
+                @Override
+                public Ingredient getRepairIngredient() {
+                    return this.repairMaterial.get();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+
+        val migrated = srcDir.resolve("ExampleTiers.java").readText()
+
+        assertTrue(migrated.contains("import net.minecraft.tags.BlockTags;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.tags.TagKey;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.level.block.Block;"), migrated)
+        assertTrue(migrated.contains("COPPER(BlockTags.INCORRECT_FOR_IRON_TOOL, 512, 6.5F, 2.0F, 25, () -> Ingredient.EMPTY)"), migrated)
+        assertTrue(migrated.contains("MYTHIC(BlockTags.INCORRECT_FOR_NETHERITE_TOOL, 1561, 8.0F, 3.0F, 10, () -> Ingredient.EMPTY)"), migrated)
+        assertTrue(migrated.contains("private final TagKey<Block> incorrectBlocksForDrops;"), migrated)
+        assertTrue(migrated.contains("ExampleTiers(TagKey<Block> incorrectBlocksForDrops, int maxUses, float efficiency, float attackDamage, int enchantability, Supplier<Ingredient> repairMaterial)"), migrated)
+        assertTrue(migrated.contains("this.incorrectBlocksForDrops = incorrectBlocksForDrops;"), migrated)
+        assertTrue(migrated.contains("public TagKey<Block> getIncorrectBlocksForDrops()"), migrated)
+        assertTrue(migrated.contains("return this.incorrectBlocksForDrops;"), migrated)
+        assertFalse(migrated.contains("getLevel()"), migrated)
+        assertFalse(migrated.contains("harvestLevel"), migrated)
+    }
+
+    @Test
+    fun `migrates attribute modifier multimaps to holder keyed types`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AttributeMaps.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+            import net.neoforged.neoforge.common.NeoForgeMod;
+
+            public class AttributeMaps {
+                public Multimap<Attribute, AttributeModifier> modifiers() {
+                    ImmutableMultimap.Builder<Attribute, AttributeModifier> builder = ImmutableMultimap.builder();
+                    builder.put(Attributes.ATTACK_DAMAGE, new AttributeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath("example", "damage"), 1.0, AttributeModifier.Operation.ADD_VALUE));
+                    builder.put(NeoForgeMod.SWIM_SPEED.get(), new AttributeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath("example", "swim"), 1.0, AttributeModifier.Operation.ADD_VALUE));
+                    return builder.build();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("AttributeMaps.java").readText()
+
+        assertTrue(migrated.contains("import net.minecraft.core.Holder;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.entity.ai.attributes.Attribute;"), migrated)
+        assertTrue(migrated.contains("Multimap<Holder<Attribute>, AttributeModifier>"), migrated)
+        assertTrue(migrated.contains("ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier>"), migrated)
+        assertTrue(migrated.contains("builder.put(NeoForgeMod.SWIM_SPEED, new AttributeModifier"), migrated)
+        assertFalse(migrated.contains("Holder.direct(NeoForgeMod.SWIM_SPEED"), migrated)
+        assertFalse(migrated.contains("Multimap<Attribute, AttributeModifier>"), migrated)
+    }
+
+    @Test
+    fun `migrates reach attribute multimaps after neoforge reach constants`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ReachAttributes.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.neoforged.neoforge.common.NeoForgeMod;
+
+            public interface ReachAttributes {
+                default Multimap<Attribute, AttributeModifier> extend(Multimap<Attribute, AttributeModifier> map, EquipmentSlot slot) {
+                    ImmutableMultimap.Builder<Attribute, AttributeModifier> builder = ImmutableMultimap.builder();
+                    builder.putAll(map);
+                    builder.put(NeoForgeMod.BLOCK_REACH.get(), new AttributeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath("example", "block_reach"), 1.0D, AttributeModifier.Operation.ADD_VALUE));
+                    builder.put(NeoForgeMod.ENTITY_REACH.get(), new AttributeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath("example", "entity_reach"), 1.0D, AttributeModifier.Operation.ADD_VALUE));
+                    return builder.build();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ReachAttributes.java").readText()
+
+        assertTrue(migrated.contains("import net.minecraft.core.Holder;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.entity.ai.attributes.Attributes;"), migrated)
+        assertTrue(migrated.contains("Multimap<Holder<Attribute>, AttributeModifier>"), migrated)
+        assertTrue(migrated.contains("ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier>"), migrated)
+        assertTrue(migrated.contains("builder.put(Attributes.BLOCK_INTERACTION_RANGE"), migrated)
+        assertTrue(migrated.contains("builder.put(Attributes.ENTITY_INTERACTION_RANGE"), migrated)
+        assertFalse(migrated.contains("NeoForgeMod"), migrated)
+    }
+
+    @Test
+    fun `migrates legacy player capability facade to NeoForge attachment bridge`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val dirtinessDir = srcDir.resolve("dirtiness")
+        val registersDir = srcDir.resolve("registers")
+        dirtinessDir.createDirectories()
+        registersDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.registers.EntityRegister;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "example";
+
+                public ExampleMod(IEventBus modEventBus) {
+                    EntityRegister.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+
+        registersDir.resolve("EntityRegister.java").writeText("""
+            package com.example.registers;
+
+            import net.neoforged.bus.api.IEventBus;
+
+            public class EntityRegister {
+                public static void register(IEventBus eventBus) {
+                }
+            }
+        """.trimIndent())
+
+        dirtinessDir.resolve("DirtinessData.java").writeText("""
+            package com.example.dirtiness;
+
+            import net.minecraft.nbt.CompoundTag;
+
+            public class DirtinessData {
+                public CompoundTag serializeNBT() {
+                    return new CompoundTag();
+                }
+
+                public void deserializeNBT(CompoundTag tag) {
+                }
+            }
+        """.trimIndent())
+
+        dirtinessDir.resolve("DirtinessCapability.java").writeText("""
+            package com.example.dirtiness;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.player.Player;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import net.neoforged.neoforge.event.AttachCapabilitiesEvent;
+            import com.modporter.compat.CapabilityManager;
+            import com.modporter.compat.CapabilityToken;
+            import com.modporter.compat.LazyOptional;
+
+            public class DirtinessCapability {
+                public static final Object DIRTINESS = CapabilityManager.get(new CapabilityToken<DirtinessData>() {});
+
+                public static LazyOptional<DirtinessData> get(Player player) {
+                    return player.getCapability(DIRTINESS);
+                }
+
+                public static void onAttachCapabilities(AttachCapabilitiesEvent<Entity> event) {
+                    event.addCapability(null, new DirtinessProvider());
+                }
+
+                public static class DirtinessProvider implements ICapabilityProvider {
+                    private final DirtinessData data = new DirtinessData();
+                    public CompoundTag serializeNBT() {
+                        return data.serializeNBT();
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(tempDir)
+        val bridge = dirtinessDir.resolve("DirtinessCapability.java").readText()
+        val attachment = dirtinessDir.resolve("DirtinessAttachment.java").readText()
+        val data = dirtinessDir.resolve("DirtinessData.java").readText()
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-attachment-bridge" })
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-attachment-register" })
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-data-attachment-serializable" })
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-attachment-main-register" })
+        assertTrue(bridge.contains("player.getData(DirtinessAttachment.DIRTINESS)"))
+        assertTrue(!bridge.contains("ICapabilityProvider"))
+        assertTrue(!bridge.contains("AttachCapabilitiesEvent"))
+        assertTrue(!bridge.contains("CapabilityManager"))
+        assertTrue(attachment.contains("DeferredRegister.create(NeoForgeRegistries.ATTACHMENT_TYPES, com.example.ExampleMod.MOD_ID)"))
+        assertTrue(attachment.contains("AttachmentType.serializable(DirtinessData::new).copyOnDeath().build()"))
+        assertTrue(data.contains("public class DirtinessData implements INBTSerializable<CompoundTag>"))
+        assertTrue(data.contains("public CompoundTag serializeNBT(HolderLookup.Provider provider)"))
+        assertTrue(data.contains("public void deserializeNBT(HolderLookup.Provider provider, CompoundTag tag)"))
+        assertTrue(mod.contains("import com.example.dirtiness.DirtinessAttachment;"))
+        assertTrue(mod.contains("DirtinessAttachment.register(modEventBus);"))
+    }
+
+    @Test
+    fun `legacy capability facade migration uses declared types instead of dirtiness names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val cleanDir = srcDir.resolve("clean")
+        cleanDir.createDirectories()
+
+        cleanDir.resolve("ExampleMod.java").writeText("""
+            package com.example.clean;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "example";
+
+                public ExampleMod(IEventBus modEventBus) {
+                }
+            }
+        """.trimIndent())
+
+        cleanDir.resolve("WrongDataFile.java").writeText("""
+            package com.example.clean;
+
+            import net.minecraft.nbt.CompoundTag;
+
+            class CleanlinessState {
+                public void reset() {
+                }
+
+                public CompoundTag serializeNBT() {
+                    return new CompoundTag();
+                }
+
+                public void deserializeNBT(CompoundTag tag) {
+                }
+            }
+        """.trimIndent())
+
+        cleanDir.resolve("WrongFacadeFile.java").writeText("""
+            package com.example.clean;
+
+            import com.modporter.compat.CapabilityManager;
+            import com.modporter.compat.CapabilityToken;
+            import com.modporter.compat.LazyOptional;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.player.Player;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import net.neoforged.neoforge.event.AttachCapabilitiesEvent;
+
+            class CleanlinessBridge {
+                public static final Object CLEAN_STATE = CapabilityManager.get(new CapabilityToken<CleanlinessState>() {});
+
+                public static LazyOptional<CleanlinessState> get(Player player) {
+                    return player.getCapability(CLEAN_STATE);
+                }
+
+                public static void attach(AttachCapabilitiesEvent<Entity> event) {
+                    event.addCapability(null, new Provider());
+                }
+
+                static class Provider implements ICapabilityProvider {
+                    private final CleanlinessState state = new CleanlinessState();
+                    public CompoundTag serializeNBT() {
+                        return state.serializeNBT();
+                    }
+                }
+            }
+        """.trimIndent())
+
+        cleanDir.resolve("CleanlinessUse.java").writeText("""
+            package com.example.clean;
+
+            import net.minecraft.world.entity.player.Player;
+
+            class CleanlinessUse {
+                void reset(Player player) {
+                    com.modporter.compat.LazyOptional.ofNullable(player.getCapability(CleanlinessBridge.CLEAN_STATE, null)).ifPresent(CleanlinessState::reset);
+                    player.getCapability(CleanlinessBridge.CLEAN_STATE).ifPresent(state -> {
+                        state.reset();
+                    });
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val facade = cleanDir.resolve("WrongFacadeFile.java").readText()
+        val attachment = cleanDir.resolve("CleanlinessBridgeAttachment.java").readText()
+        val data = cleanDir.resolve("WrongDataFile.java").readText()
+        val mod = cleanDir.resolve("ExampleMod.java").readText()
+        val use = cleanDir.resolve("CleanlinessUse.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-facade-lookup" })
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-attachment-bridge" })
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-attachment-register" })
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-data-attachment-serializable" })
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-attachment-main-register" })
+        assertTrue(facade.contains("final class CleanlinessBridge"), facade)
+        assertFalse(facade.contains("public final class CleanlinessBridge"), facade)
+        assertTrue(facade.contains("LazyOptional<CleanlinessState> get(Player player)"), facade)
+        assertTrue(facade.contains("player.getData(CleanlinessBridgeAttachment.CLEAN_STATE)"), facade)
+        assertFalse(facade.contains("Dirtiness"), facade)
+        assertFalse(facade.contains("WrongFacadeFile"), facade)
+        assertTrue(attachment.contains("public final class CleanlinessBridgeAttachment"), attachment)
+        assertTrue(attachment.contains("Supplier<AttachmentType<CleanlinessState>> CLEAN_STATE"), attachment)
+        assertTrue(attachment.contains("ATTACHMENT_TYPES.register(\"clean_state\", () -> AttachmentType.serializable(CleanlinessState::new).copyOnDeath().build())"), attachment)
+        assertFalse(attachment.contains("Dirtiness"), attachment)
+        assertTrue(data.contains("class CleanlinessState implements INBTSerializable<CompoundTag>"), data)
+        assertTrue(data.contains("serializeNBT(HolderLookup.Provider provider)"), data)
+        assertTrue(data.contains("deserializeNBT(HolderLookup.Provider provider, CompoundTag tag)"), data)
+        assertTrue(mod.contains("CleanlinessBridgeAttachment.register(modEventBus);"), mod)
+        assertFalse(mod.contains("DirtinessAttachment"), mod)
+        assertTrue(use.contains("CleanlinessBridge.get(player).ifPresent(CleanlinessState::reset);"), use)
+        assertTrue(use.contains("CleanlinessBridge.get(player).ifPresent(state -> {"), use)
+        assertFalse(use.contains("getCapability(CleanlinessBridge.CLEAN_STATE"), use)
+    }
+
+    @Test
+    fun `INBTSerializable holder lookup migration is scoped to executable serializable types`() {
+        val projectDir = createFile("NbtSerializableSurface.java", """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.neoforged.neoforge.common.util.INBTSerializable;
+
+            public class NbtSerializableSurface implements INBTSerializable<CompoundTag> {
+                private static final String DOC = "public CompoundTag serializeNBT() public void deserializeNBT(CompoundTag tag)";
+
+                /*
+                public CompoundTag serializeNBT() {
+                    return new CompoundTag();
+                }
+
+                public void deserializeNBT(CompoundTag tag) {
+                }
+                */
+                @Override
+                public CompoundTag serializeNBT() {
+                    return new CompoundTag();
+                }
+
+                @Override
+                public void deserializeNBT(CompoundTag tag) {
+                }
+            }
+
+            class DocumentationOnly {
+                public CompoundTag serializeNBT() {
+                    return new CompoundTag();
+                }
+
+                public void deserializeNBT(CompoundTag tag) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/NbtSerializableSurface.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-inbtserializable-holderlookup" })
+        assertTrue(migrated.contains("""private static final String DOC = "public CompoundTag serializeNBT() public void deserializeNBT(CompoundTag tag)";"""), migrated)
+        assertTrue(migrated.contains("public CompoundTag serializeNBT(HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("public void deserializeNBT(HolderLookup.Provider registries, CompoundTag tag)"), migrated)
+        val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
+        assertTrue(commentBlock.contains("public CompoundTag serializeNBT()"), migrated)
+        assertTrue(commentBlock.contains("public void deserializeNBT(CompoundTag tag)"), migrated)
+        val documentationOnly = migrated.substringAfter("class DocumentationOnly")
+        assertTrue(documentationOnly.contains("public CompoundTag serializeNBT()"), migrated)
+        assertTrue(documentationOnly.contains("public void deserializeNBT(CompoundTag tag)"), migrated)
+        assertFalse(documentationOnly.contains("HolderLookup.Provider"), migrated)
+    }
+
+    @Test
+    fun `INBTSerializable holder lookup migration follows project interface inheritance`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/cap")
+        srcDir.createDirectories()
+
+        srcDir.resolve("PlayerState.java").writeText("""
+            package com.example.cap;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.neoforged.neoforge.common.util.INBTSerializable;
+
+            public interface PlayerState extends INBTSerializable<CompoundTag> {
+                boolean enabled();
+            }
+        """.trimIndent())
+
+        srcDir.resolve("PlayerStateImpl.java").writeText("""
+            package com.example.cap;
+
+            import net.minecraft.nbt.CompoundTag;
+
+            public class PlayerStateImpl implements PlayerState {
+                @Override
+                public boolean enabled() {
+                    return true;
+                }
+
+                @Override
+                public CompoundTag serializeNBT() {
+                    return new CompoundTag();
+                }
+
+                @Override
+                public void deserializeNBT(CompoundTag tag) {
+                }
+            }
+
+            class PlainData {
+                public CompoundTag serializeNBT() {
+                    return new CompoundTag();
+                }
+
+                public void deserializeNBT(CompoundTag tag) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val impl = srcDir.resolve("PlayerStateImpl.java").readText()
+        val plainData = impl.substringAfter("class PlainData")
+
+        assertTrue(result.changes.any { it.ruleId == "struct-inbtserializable-holderlookup" })
+        assertTrue(impl.contains("public CompoundTag serializeNBT(HolderLookup.Provider registries)"), impl)
+        assertTrue(impl.contains("public void deserializeNBT(HolderLookup.Provider registries, CompoundTag tag)"), impl)
+        assertTrue(plainData.contains("public CompoundTag serializeNBT()"), impl)
+        assertTrue(plainData.contains("public void deserializeNBT(CompoundTag tag)"), impl)
+        assertFalse(plainData.contains("HolderLookup.Provider"), impl)
+    }
+
+    @Test
+    fun `legacy capability facade migration rejects placeholder attachment ids`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/invalid")
+        srcDir.createDirectories()
+
+        srcDir.resolve("InvalidCapability.java").writeText("""
+            package com.example.invalid;
+
+            import com.modporter.compat.CapabilityManager;
+            import com.modporter.compat.CapabilityToken;
+            import com.modporter.compat.LazyOptional;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.player.Player;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import net.neoforged.neoforge.event.AttachCapabilitiesEvent;
+
+            class ${'$'}${'$'}${'$'} {
+            }
+
+            class InvalidCapability {
+                public static final Object ${'$'}${'$'}${'$'} = CapabilityManager.get(new CapabilityToken<${'$'}${'$'}${'$'}>() {});
+
+                public static LazyOptional<${'$'}${'$'}${'$'}> get(Player player) {
+                    return player.getCapability(${'$'}${'$'}${'$'});
+                }
+
+                public static void attach(AttachCapabilitiesEvent<Entity> event) {
+                    event.addCapability(null, new Provider());
+                }
+
+                static class Provider implements ICapabilityProvider {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+
+        assertTrue(
+            result.errors.any {
+                it.contains("Cannot derive legacy capability attachment id in InvalidCapability.java")
+            },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(result.changes.any { it.ruleId == "struct-legacy-capability-attachment-register" })
+        assertFalse(srcDir.resolve("InvalidAttachment.java").exists())
+        assertFalse(srcDir.resolve("InvalidCapabilityAttachment.java").exists())
+    }
+
+    @Test
+    fun `custom entity capability migration imports Direction for sided EntityCapability`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val capabilityDir = srcDir.resolve("capability")
+        capabilityDir.createDirectories()
+
+        capabilityDir.resolve("PlayerData.java").writeText("""
+            package com.example.capability;
+
+            import net.minecraft.world.entity.player.Player;
+
+            public interface PlayerData {
+                void setEntity(Player player);
+            }
+        """.trimIndent())
+
+        capabilityDir.resolve("PlayerDataCapability.java").writeText("""
+            package com.example.capability;
+
+            public class PlayerDataCapability implements PlayerData {
+                public void setEntity(net.minecraft.world.entity.player.Player player) {
+                }
+            }
+        """.trimIndent())
+
+        capabilityDir.resolve("ExampleCapabilities.java").writeText("""
+            package com.example.capability;
+
+            import com.modporter.compat.Capability;
+            import com.modporter.compat.CapabilityManager;
+            import com.modporter.compat.CapabilityToken;
+            import net.minecraft.world.entity.Entity;
+            import net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent;
+            import net.neoforged.neoforge.event.AttachCapabilitiesEvent;
+
+            public class ExampleCapabilities {
+                public static final Capability<PlayerData> PLAYER_DATA = CapabilityManager.get(new CapabilityToken<>() {});
+
+                public static void registerCapabilities(RegisterCapabilitiesEvent event) {
+                    event.register(PlayerData.class);
+                }
+
+                public static void attachCapabilities(AttachCapabilitiesEvent<Entity> event) {
+                    event.addCapability(null, new PlayerDataCapability());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val capabilities = capabilityDir.resolve("ExampleCapabilities.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-custom-entity-capabilities" })
+        assertTrue(capabilities.contains("import net.minecraft.core.Direction;"), capabilities)
+        assertTrue(capabilities.contains("EntityCapability<PlayerData, Direction> PLAYER_DATA"), capabilities)
+        assertTrue(capabilities.contains("event.registerEntity(PLAYER_DATA"), capabilities)
+        assertFalse(capabilities.contains("com.modporter.generated.shared"))
+    }
+
+    @Test
+    fun `custom entity capability LazyOptional bridge hard gates missing source mod id`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val capabilityDir = srcDir.resolve("capability")
+        capabilityDir.createDirectories()
+
+        capabilityDir.resolve("PlayerData.java").writeText("""
+            package com.example.capability;
+
+            import net.minecraft.world.entity.player.Player;
+
+            public interface PlayerData {
+                void setEntity(Player player);
+            }
+        """.trimIndent())
+        capabilityDir.resolve("PlayerDataCapability.java").writeText("""
+            package com.example.capability;
+
+            public class PlayerDataCapability implements PlayerData {
+                public void setEntity(net.minecraft.world.entity.player.Player player) {
+                }
+            }
+        """.trimIndent())
+        capabilityDir.resolve("ExampleCapabilities.java").writeText("""
+            package com.example.capability;
+
+            import com.modporter.compat.Capability;
+            import com.modporter.compat.CapabilityManager;
+            import com.modporter.compat.CapabilityToken;
+            import net.minecraft.world.entity.Entity;
+            import net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent;
+            import net.neoforged.neoforge.event.AttachCapabilitiesEvent;
+
+            public class ExampleCapabilities {
+                public static final Capability<PlayerData> PLAYER_DATA = CapabilityManager.get(new CapabilityToken<>() {});
+
+                public static void registerCapabilities(RegisterCapabilitiesEvent event) {
+                    event.register(PlayerData.class);
+                }
+
+                public static void attachCapabilities(AttachCapabilitiesEvent<Entity> event) {
+                    event.addCapability(null, new PlayerDataCapability());
+                }
+            }
+        """.trimIndent())
+        capabilityDir.resolve("PlayerDataAccess.java").writeText("""
+            package com.example.capability;
+
+            import net.minecraft.world.entity.player.Player;
+
+            public class PlayerDataAccess {
+                public Object read(Player player) {
+                    return player.getCapability(ExampleCapabilities.PLAYER_DATA);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val access = capabilityDir.resolve("PlayerDataAccess.java").readText()
+
+        assertTrue(
+            result.errors.any {
+                it.contains("Custom entity capability migration error") &&
+                    it.contains("Cannot derive generated compat package") &&
+                    it.contains("custom entity capability LazyOptional bridge")
+            },
+            "Expected missing mod id hard gate, got: ${result.errors}"
+        )
+        assertFalse(access.contains("com.modporter.generated.shared"))
+        assertFalse(access.contains("com.modporter.generated.mod"))
+    }
+
+    @Test
+    fun `fluid tank nbt provider migration uses receiver type evidence and ignores business nbt helpers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("TankNbtSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.RegistryAccess;
+            import net.minecraft.nbt.CompoundTag;
+            import net.neoforged.neoforge.fluids.FluidStack;
+            import net.neoforged.neoforge.fluids.capability.templates.FluidTank;
+
+            public class TankNbtSurface {
+                private final FluidTank tank = new FluidTank(1000);
+                private final FluidStack fluid = FluidStack.EMPTY;
+                private final ArsenalEffect effect = new ArsenalEffect();
+
+                public void save(RegistryAccess access, CompoundTag tag) {
+                    tank.writeToNBT(tag);
+                    CompoundTag fluidTag = fluid.writeToNBT(new CompoundTag());
+                    effect.writeToNBT(new CompoundTag());
+                }
+
+                public void load(RegistryAccess access, CompoundTag tag) {
+                    tank.readFromNBT(tag);
+                    FluidStack restored = FluidStack.loadFluidStackFromNBT(tag.getCompound("fluid"));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("TankNbtSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("tank.writeToNBT(access, tag);"), migrated)
+        assertTrue(migrated.contains("tank.readFromNBT(access, tag);"), migrated)
+        assertTrue(migrated.contains("CompoundTag fluidTag = (CompoundTag) fluid.saveOptional(access);"), migrated)
+        assertTrue(migrated.contains("FluidStack restored = FluidStack.parseOptional(access, tag.getCompound(\"fluid\"));"), migrated)
+        assertTrue(migrated.contains("effect.writeToNBT(new CompoundTag());"), migrated)
+        assertFalse(migrated.contains("effect.writeToNBT(access"), migrated)
+        assertFalse(migrated.contains("RegistryAccess.EMPTY"), migrated)
+    }
+
+    @Test
+    fun `registered enchantment holders compare without get cooking aliases inline and meat statements vanish`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PotatoItem.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.Enchantments;
+
+            public class PotatoItem extends net.minecraft.world.item.Item {
+                public PotatoItem(Properties properties) {
+                    super(properties);
+                }
+
+                @Override
+                public boolean canApplyAtEnchantingTable(ItemStack stack, Enchantment enchantment) {
+                    if (enchantment == Enchantments.MOB_LOOTING)
+                        return true;
+                    if (enchantment == AllEnchantments.POTATO_RECOVERY.get())
+                        return true;
+                    if (AllEnchantments.CAPACITY.get() != enchantment)
+                        return false;
+                    return super.canApplyAtEnchantingTable(stack, enchantment);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CookingGen.java").writeText("""
+            package com.example;
+
+            import java.util.function.UnaryOperator;
+            import net.minecraft.data.recipes.SimpleCookingRecipeBuilder;
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public class CookingGen {
+                private final RecipeSerializer<? extends AbstractCookingRecipe> FURNACE = RecipeSerializer.SMELTING_RECIPE,
+                    SMOKER = RecipeSerializer.SMOKING_RECIPE, BLAST = RecipeSerializer.BLASTING_RECIPE,
+                    CAMPFIRE = RecipeSerializer.CAMPFIRE_COOKING_RECIPE;
+
+                void inFurnace(UnaryOperator<SimpleCookingRecipeBuilder> builder) {
+                    create(FURNACE, builder, 1);
+                    create(SMOKER, builder, .5f);
+                }
+
+                private void create(RecipeSerializer<? extends AbstractCookingRecipe> serializer, UnaryOperator<SimpleCookingRecipeBuilder> builder, float cookingTimeModifier) {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("FoodCodec.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.food.FoodProperties;
+
+            public class FoodCodec {
+                static FoodProperties build(int nutrition, boolean isMeat, boolean fast) {
+                    FoodProperties.Builder builder = new FoodProperties.Builder().nutrition(nutrition);
+                    if (isMeat) builder.meat();
+                    if (fast) builder.fast();
+                    FoodProperties.Builder chained = new FoodProperties.Builder().nutrition(2).meat().fast();
+                    return builder.build();
+                }
+            }
+        """.trimIndent())
+
+        // the text pass moves canApplyAtEnchantingTable to supportsEnchantment(Holder) first, as in the pipeline
+        TextReplacementPass(MappingDatabase.loadDefault()).apply(tempDir)
+        val result = StructuralRefactorPass().apply(tempDir)
+        val potato = srcDir.resolve("PotatoItem.java").readText()
+        val cooking = srcDir.resolve("CookingGen.java").readText().replace("\r\n", "\n")
+        val food = srcDir.resolve("FoodCodec.java").readText().replace("\r\n", "\n")
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(potato.contains("if (enchantment.is(AllEnchantments.POTATO_RECOVERY))"), potato)
+        assertTrue(potato.contains("if (!enchantment.is(AllEnchantments.CAPACITY))"), potato)
+        assertTrue(Regex("""supportsEnchantment\(ItemStack stack, (?:net\.minecraft\.core\.)?Holder<Enchantment> enchantment\)""").containsMatchIn(potato), potato)
+        assertFalse(potato.contains(".get)"), potato)
+        assertFalse(potato.contains(".get()"), potato)
+        assertFalse(cooking.contains("FURNACE"), cooking)
+        assertTrue(cooking.contains("create(RecipeSerializer.SMELTING_RECIPE, SmeltingRecipe::new, builder, 1);"), cooking)
+        assertTrue(cooking.contains("create(RecipeSerializer.SMOKING_RECIPE, SmokingRecipe::new, builder, .5f);"), cooking)
+        assertTrue(cooking.contains("private <T extends AbstractCookingRecipe> void create(RecipeSerializer<T> serializer, AbstractCookingRecipe.Factory<T> serializerFactory, UnaryOperator<SimpleCookingRecipeBuilder> builder, float cookingTimeModifier)"), cooking)
+        assertFalse(cooking.contains("SmeltingRecipe::new, SmeltingRecipe::new"), cooking)
+        assertFalse(food.contains("meat"), food)
+        assertFalse(food.contains("if (isMeat)"), food)
+        assertTrue(food.contains("if (fast) builder.fast();"), food)
+        assertTrue(food.contains("new FoodProperties.Builder().nutrition(2).fast();"), food)
+    }
+
+    @Test
+    fun `grown registrate entry generics gain their registry type and forge nonnull functionals become java functionals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DisplaySources.java").writeText("""
+            package com.example;
+
+            import com.tterrag.registrate.util.entry.ItemProviderEntry;
+            import com.tterrag.registrate.util.entry.RegistryEntry;
+            import java.util.List;
+
+            public class DisplaySources {
+                public static RegistryEntry<? extends DisplaySource> SOURCE;
+                public static RegistryEntry<?> ANY;
+                public static List<ItemProviderEntry<?>> ITEMS;
+                public static ItemProviderEntry<? extends net.minecraft.world.level.ItemLike> ICON;
+
+                public static <T extends DisplaySource> RegistryEntry<T> register(String name, T value) {
+                    return null;
+                }
+
+                public static RegistryEntry<ScoreboardDisplaySource> SCOREBOARD = register("scoreboard", new ScoreboardDisplaySource());
+            }
+        """.trimIndent())
+        srcDir.resolve("ResetableLazy.java").writeText("""
+            package com.example;
+
+            import net.minecraftforge.common.util.NonNullPredicate;
+            import net.minecraftforge.common.util.NonNullSupplier;
+
+            public class ResetableLazy<T> {
+                private final NonNullSupplier<T> supplier;
+                private NonNullPredicate<T> validator;
+
+                public static <T> ResetableLazy<T> of(NonNullSupplier<T> supplier) {
+                    return new ResetableLazy<>(supplier);
+                }
+
+                private ResetableLazy(NonNullSupplier<T> supplier) {
+                    this.supplier = supplier;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val sources = srcDir.resolve("DisplaySources.java").readText()
+        val lazy = srcDir.resolve("ResetableLazy.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(sources.contains("RegistryEntry<? extends DisplaySource, ? extends DisplaySource> SOURCE"), sources)
+        assertTrue(sources.contains("RegistryEntry<?, ?> ANY"), sources)
+        assertTrue(sources.contains("List<ItemProviderEntry<?, ?>> ITEMS"), sources)
+        assertTrue(sources.contains("ItemProviderEntry<? extends net.minecraft.world.level.ItemLike, ? extends net.minecraft.world.level.ItemLike> ICON"), sources)
+        assertTrue(sources.contains("<T extends DisplaySource> RegistryEntry<?, T> register("), sources)
+        assertTrue(sources.contains("RegistryEntry<?, ScoreboardDisplaySource> SCOREBOARD"), sources)
+        assertTrue(lazy.contains("import java.util.function.Predicate;"), lazy)
+        assertTrue(lazy.contains("import java.util.function.Supplier;"), lazy)
+        assertTrue(lazy.contains("private final Supplier<T> supplier;"), lazy)
+        assertTrue(lazy.contains("private Predicate<T> validator;"), lazy)
+        assertTrue(lazy.contains("of(Supplier<T> supplier)"), lazy)
+        assertFalse(lazy.contains("NonNull"), lazy)
+    }

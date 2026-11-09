@@ -1,0 +1,10 @@
+{
+  "description": "Dependency classes that moved to another package between the Forge 1.20.1 and NeoForge 1.21.1 builds while keeping their API (javap of both jars). Imports and fully qualified uses follow the class.",
+  "relocations": [
+    {
+      "from": "net.createmod.catnip.net.ClientboundSimpleActionPacket",
+      "to": "net.createmod.catnip.net.packets.ClientboundSimpleActionPacket",
+      "notes": "Catnip: net/createmod/catnip/net/ClientboundSimpleActionPacket.class in Ponder-Forge-1.20.1-1.0.91 is net/createmod/catnip/net/packets/ClientboundSimpleActionPacket.class in ponder-neoforge-1.0.87+mc1.21.1; addAction(String, Supplier<Consumer<String>>) is unchanged."
+    }
+  ]
+}

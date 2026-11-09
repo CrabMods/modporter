@@ -610,9 +610,7 @@ class MappingCompletenessTest {
     @Test
     fun `nitrogen fuel migrations use typed API shape evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
-        val structuralSource = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val structuralSource = StructuralRuleSources.text
         val resourceSource = projectRoot
             .resolve("src/main/kotlin/com/modporter/resources/ResourceMigrator.kt")
             .readText()
@@ -686,10 +684,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `nitrogen sync call migration does not borrow owner entity ids for receiver calls`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun rewriteNitrogenSyncCalls")
         assertTrue(start >= 0, "rewriteNitrogenSyncCalls is missing")
         val end = source.indexOf("private fun stripDimensionAccessor", start + 1).let {
@@ -728,10 +723,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `nitrogen sync receiver owner accessors use Java visible FQN resolution`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun javaNonStaticWildcardImports")
         assertTrue(start >= 0, "javaNonStaticWildcardImports is missing")
         val end = source.indexOf("private fun rewriteNitrogenSyncCalls", start + 1).let {
@@ -774,10 +766,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `nitrogen synchable detection requires resolved API owners`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun hasNitrogenAttachmentSyncPacketMethod")
         assertTrue(start >= 0, "hasNitrogenAttachmentSyncPacketMethod is missing")
         val end = source.indexOf("private fun extractJavaTopLevelSuperTypes", start + 1).let {
@@ -810,10 +799,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `nitrogen attachment suppliers require resolved neoforge attachment type`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun collectNitrogenAttachmentSuppliers")
         assertTrue(start >= 0, "collectNitrogenAttachmentSuppliers is missing")
         val end = source.indexOf("private fun ensureNitrogenSyncPacketAttachmentGetter", start + 1).let {
@@ -853,10 +839,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `backpack container API migration binds inventory wrapper to slot constructor`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateQuarkBackpackInventoryWrappers")
         assertTrue(start >= 0, "migrateQuarkBackpackInventoryWrappers is missing")
         val end = source.indexOf("private fun hasNitrogenAttachmentSyncPacketMethod", start + 1).let {
@@ -904,13 +887,31 @@ class MappingCompletenessTest {
             "getMethod" to Regex("""\.getMethod\s*\("""),
             "setAccessible" to Regex("""\bsetAccessible\s*\(""")
         )
-
+        val admittedLegacyPreimages = mapOf(
+            "src/main/kotlin/com/modporter/core/transforms/structural/CreateCommonMetalTagNamespaceMigration.kt" to ("OBSOLETE_TODO" to Regex("private\\s+const\\s+val\\s+OBSOLETE_TODO\\s*=\\s*\"TODO: change forge to c in 1\\.21\"")),
+            "src/main/kotlin/com/modporter/core/transforms/structural/CreateCopperDataMapMigration.kt" to ("LEGACY_INJECT_BODY" to Regex("private\\s+const\\s+val\\s+LEGACY_INJECT_BODY\\s*=\\s*\"\"\".*?\"\"\"", RegexOption.DOT_MATCHES_ALL))
+        )
         val offenders = Files.walk(projectRoot.resolve("src/main/kotlin")).use { stream ->
             stream
                 .filter { Files.isRegularFile(it) && it.extension == "kt" }
                 .flatMap { file ->
                     val relative = projectRoot.relativize(file).invariantSeparatorsPathString
-                    val text = file.readText()
+                    var text = file.readText()
+                    admittedLegacyPreimages[relative]?.let { (symbol, pattern) ->
+                        val matches = pattern.findAll(text).toList()
+                        assertEquals(1, matches.size, "$relative must carry one exact $symbol legacy preimage")
+                        assertEquals(2, Regex("""\b${Regex.escape(symbol)}\b""").findAll(text).count(), "$symbol must be consumed exactly once")
+                        val match = matches.single()
+                        val exactConsumer = when (symbol) {
+                            "OBSOLETE_TODO" -> text.contains(".filter { it.content.trim() == OBSOLETE_TODO }")
+                            "LEGACY_INJECT_BODY" -> Regex("""requireMethodBody\s*\(\s*methods\.getValue\("inject"\)\s*,\s*LEGACY_INJECT_BODY\s*\)""").containsMatchIn(text) &&
+                                text.contains("val expected = renderRegistries()") && text.contains("return expected") &&
+                                match.value.contains("getDeclaredField(\"delegate\")") && match.value.contains("setAccessible(true)")
+                            else -> false
+                        }
+                        assertTrue(exactConsumer, "$symbol must remain an input-only comparison contract")
+                        text = text.replaceRange(match.range, match.value.map { if (it == '\r' || it == '\n') it else ' ' }.joinToString(""))
+                    }
                     forbidden
                         .filter { (marker, pattern) ->
                             pattern.containsMatchIn(text) &&
@@ -1021,10 +1022,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `structural migrations do not synthesize placeholder names for unclear source structure`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val forbiddenMarkers = listOf(
             """ifBlank { "CUSTOM" }""",
             """ifBlank { "custom" }""",
@@ -1048,10 +1046,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `bucket pickup call site migration requires scoped receiver evidence before nullable player`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyBucketPickupCallSites")
         assertTrue(start >= 0, "migrateLegacyBucketPickupCallSites is missing")
         val end = source.indexOf("private fun migratedItemUseDurationCall", start + 1).let {
@@ -1087,10 +1082,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `bucket fluid helper migration uses executable source`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateBucketItemCanBlockContainFluidSource")
         assertTrue(start >= 0, "migrateBucketItemCanBlockContainFluidSource is missing")
         val end = source.indexOf("private fun migrateUnboundLevelRegistryAccessCalls", start + 1).let {
@@ -1126,10 +1118,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `bucket fluid access migration uses executable source`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateBucketItemFluidAccessSource")
         assertTrue(start >= 0, "migrateBucketItemFluidAccessSource is missing")
         val end = source.indexOf("private fun migrateItemStackHoverNameSource", start + 1).let {
@@ -1158,10 +1147,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `level summary nullable migration uses enclosing method structure`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun isNullableLevelSummaryMethod")
         assertTrue(start >= 0, "isNullableLevelSummaryMethod is missing")
         val end = source.indexOf("private fun migrateLegacyBindingCurseChecks", start + 1).let {
@@ -1184,5 +1170,31 @@ class MappingCompletenessTest {
         assertTrue(
             offenders.isEmpty(),
             "LevelSummary nullable migration must not use file-prefix or previous-method fallback: $offenders"
+        )
+    }
+
+    @Test
+    fun `cumulus panorama migration uses resolved mod id expression namespace`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun cumulusPanoramaExpression")
+        assertTrue(start >= 0, "cumulusPanoramaExpression is missing")
+        val end = source.indexOf("private fun resolveLiteralModIdExpression", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "project metadata mod id fallback" to "projectMetadataModId(projectDir)",
+            "single asset namespace fallback" to "singleAssetNamespace(projectDir)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("resolveCumulusModIdNamespace(projectDir, source, modIdExpression)"),
+            "Cumulus panorama migration must validate resources against the source mod id expression namespace"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Cumulus panorama migration must not borrow metadata or single-asset namespaces: $offenders"
         )
     }

@@ -1,0 +1,658 @@
+
+    @Test
+    fun `migrates stair block subclass constructors from state suppliers to block states`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RichStairsBlock.java").writeText("""
+            package com.example;
+
+            import java.util.function.Supplier;
+            import net.minecraft.world.level.block.StairBlock;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+
+            public class RichStairsBlock extends StairBlock {
+                /*
+                public RichStairsBlock(Supplier<BlockState> documentedState, BlockBehaviour.Properties documentedProperties) {
+                    super(documentedState, documentedProperties);
+                }
+                */
+                public RichStairsBlock(Supplier<BlockState> state, BlockBehaviour.Properties properties) {
+                    super(state, properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleBlocks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+
+            public class ExampleBlocks {
+                /*
+                Object commented = new RichStairsBlock(() -> ModBlocks.DOC.get().defaultBlockState(), BlockBehaviour.Properties.of());
+                */
+                private static final String DOC = "new RichStairsBlock(() -> ModBlocks.DOC.get().defaultBlockState(), BlockBehaviour.Properties.of())";
+
+                public Object rich() {
+                    return new RichStairsBlock(() -> ModBlocks.STONE.get().defaultBlockState(), BlockBehaviour.Properties.ofFullCopy(ModBlocks.STONE.get()));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val block = srcDir.resolve("RichStairsBlock.java").readText()
+        val registry = srcDir.resolve("ExampleBlocks.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-stairblock-state-constructor" })
+        assertTrue(block.contains("public RichStairsBlock(BlockState state, BlockBehaviour.Properties properties)"), block)
+        assertTrue(block.contains("super(state, properties);"), block)
+        assertFalse(block.contains("java.util.function.Supplier"), block)
+        assertTrue(block.contains("public RichStairsBlock(Supplier<BlockState> documentedState, BlockBehaviour.Properties documentedProperties)"), block)
+        assertTrue(registry.contains("new RichStairsBlock(ModBlocks.STONE.get().defaultBlockState(), BlockBehaviour.Properties.ofFullCopy(ModBlocks.STONE.get()))"), registry)
+        assertTrue(registry.contains("new RichStairsBlock(() -> ModBlocks.DOC.get().defaultBlockState(), BlockBehaviour.Properties.of())"), registry)
+        assertFalse(registry.contains("return new RichStairsBlock(() -> ModBlocks.STONE"), registry)
+    }
+
+    @Test
+    fun `migrates legacy banner pattern builders to component factories with registry context`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleBlocks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.DyeColor;
+            import net.minecraft.world.level.block.entity.BannerPattern;
+            import net.minecraft.world.level.block.entity.BannerPatterns;
+
+            public class ExampleBlocks {
+                public static final BannerPattern.Builder EXAMPLE_PATTERN = new BannerPattern.Builder()
+                    .addPattern(BannerPatterns.STRIPE_BOTTOM, DyeColor.CYAN)
+                    .addPattern(BannerPatterns.BORDER, DyeColor.WHITE);
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleItems.java").writeText("""
+            package com.example;
+
+            import net.minecraft.ChatFormatting;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.ItemStack.TooltipPart;
+            import net.minecraft.world.item.BlockItem;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+
+            public class ExampleItems {
+                public static ItemStack EXAMPLE_BANNER = null;
+
+                public static ItemStack createExampleBannerItemStack() {
+                    if (EXAMPLE_BANNER == null) {
+                        ItemStack bannerStack = new ItemStack(Items.BLACK_BANNER).setHoverName(Component.literal("example").withStyle(ChatFormatting.GOLD));
+                        CompoundTag tag = new CompoundTag();
+                        tag.put("Patterns", ExampleBlocks.EXAMPLE_PATTERN.toListTag());
+                        BlockItem.setBlockEntityData(bannerStack, BlockEntityType.BANNER, tag);
+                        bannerStack.hideTooltipPart(TooltipPart.ADDITIONAL);
+                        EXAMPLE_BANNER = bannerStack;
+                    }
+                    return EXAMPLE_BANNER;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleTabs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.CreativeModeTab;
+
+            public class ExampleTabs {
+                public static final CreativeModeTab TAB = CreativeModeTab.builder()
+                    .displayItems((features, output) -> {
+                        output.accept(ExampleItems.createExampleBannerItemStack());
+                    })
+                    .build();
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleRecipe.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.CraftingInput;
+
+            public class ExampleRecipe {
+                public ItemStack assemble(CraftingInput input, HolderLookup.Provider registries) {
+                    return ExampleItems.createExampleBannerItemStack();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.LevelAccessor;
+
+            public class ExampleEntity {
+                public boolean check(LevelAccessor level, ItemStack stack) {
+                    return ItemStack.matches(stack, ExampleItems.createExampleBannerItemStack());
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LoreInventory.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.SimpleContainer;
+            import net.minecraft.world.entity.player.Player;
+
+            public class LoreInventory extends SimpleContainer {
+                private final Player player;
+
+                public LoreInventory(Player player) {
+                    super(1);
+                    this.player = player;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LoreBookMenu.java").writeText("""
+            package com.example;
+
+            import java.util.HashMap;
+            import java.util.Map;
+            import java.util.function.Predicate;
+            import net.minecraft.world.item.ItemStack;
+
+            public class LoreBookMenu {
+                private static final Map<Predicate<ItemStack>, String> LORE_ENTRY_OVERRIDES = new HashMap<>();
+                private final LoreInventory loreInventory;
+
+                public LoreBookMenu(LoreInventory loreInventory) {
+                    this.loreInventory = loreInventory;
+                }
+
+                public static void addLoreEntryOverride(Predicate<ItemStack> predicate, String entry) {
+                    LORE_ENTRY_OVERRIDES.putIfAbsent(predicate, entry);
+                }
+
+                public String getLoreEntryKey(ItemStack stack) {
+                    for (Predicate<ItemStack> predicate : LORE_ENTRY_OVERRIDES.keySet()) {
+                        if (predicate.test(stack)) {
+                            return LORE_ENTRY_OVERRIDES.get(predicate);
+                        }
+                    }
+                    return "lore." + stack.getDescriptionId();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LoreClient.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+
+            public class LoreClient {
+                public static void registerLoreOverrides() {
+                    LoreBookMenu.addLoreEntryOverride(stack -> ItemStack.isSameItemSameComponents(stack, ExampleItems.createExampleBannerItemStack()), "lore.example");
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val blocks = srcDir.resolve("ExampleBlocks.java").readText()
+        val items = srcDir.resolve("ExampleItems.java").readText()
+        val tabs = srcDir.resolve("ExampleTabs.java").readText()
+        val recipe = srcDir.resolve("ExampleRecipe.java").readText()
+        val entity = srcDir.resolve("ExampleEntity.java").readText()
+        val loreInventory = srcDir.resolve("LoreInventory.java").readText()
+        val loreBook = srcDir.resolve("LoreBookMenu.java").readText()
+        val loreClient = srcDir.resolve("LoreClient.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-banner-pattern-components" })
+        assertTrue(result.changes.any { it.ruleId == "struct-registry-backed-itemstack-predicate" })
+        assertTrue(blocks.contains("public static BannerPatternLayers EXAMPLE_PATTERN(HolderGetter<BannerPattern> patternRegistry)"), blocks)
+        assertTrue(blocks.contains(".add(patternRegistry.getOrThrow(BannerPatterns.STRIPE_BOTTOM), DyeColor.CYAN)"), blocks)
+        assertTrue(blocks.contains("import net.minecraft.core.HolderGetter;"), blocks)
+        assertTrue(blocks.contains("import net.minecraft.world.level.block.entity.BannerPatternLayers;"), blocks)
+
+        assertTrue(items.contains("public static ItemStack createExampleBannerItemStack(HolderGetter<BannerPattern> patternRegistry)"), items)
+        assertTrue(items.contains("bannerStack.set(DataComponents.CUSTOM_NAME, Component.literal(\"example\").withStyle(ChatFormatting.GOLD));"), items)
+        assertTrue(items.contains("bannerStack.set(DataComponents.BANNER_PATTERNS, ExampleBlocks.EXAMPLE_PATTERN(patternRegistry));"), items)
+        assertFalse(items.contains(".setHoverName("), items)
+        assertFalse(items.contains("BlockItem.setBlockEntityData"), items)
+        assertFalse(items.contains("toListTag"), items)
+
+        assertTrue(tabs.contains("ExampleItems.createExampleBannerItemStack(features.holders().lookupOrThrow(Registries.BANNER_PATTERN))"), tabs)
+        assertTrue(recipe.contains("ExampleItems.createExampleBannerItemStack(registries.lookupOrThrow(Registries.BANNER_PATTERN))"), recipe)
+        assertTrue(recipe.contains("import net.minecraft.core.registries.Registries;"), recipe)
+        assertTrue(entity.contains("ExampleItems.createExampleBannerItemStack(level.holderLookup(Registries.BANNER_PATTERN))"), entity)
+        assertTrue(loreInventory.contains("public final Player player;"), loreInventory)
+        assertTrue(loreBook.contains("Map<Function<RegistryAccess, Predicate<ItemStack>>, String> LORE_ENTRY_OVERRIDES"), loreBook)
+        assertTrue(loreBook.contains("public static void addLoreEntryOverride(Function<RegistryAccess, Predicate<ItemStack>> predicate, String entry)"), loreBook)
+        assertTrue(loreBook.contains("Optional<String> key = LORE_ENTRY_OVERRIDES.entrySet().stream().filter(e -> e.getKey().apply(this.loreInventory.player.registryAccess()).test(stack)).findAny().map(Map.Entry::getValue);"), loreBook)
+        assertTrue(loreBook.contains("return key.orElseGet(() -> \"lore.\" + stack.getDescriptionId());"), loreBook)
+        assertTrue(loreClient.contains("LoreBookMenu.addLoreEntryOverride(registryAccess -> stack -> ItemStack.isSameItemSameComponents(stack, ExampleItems.createExampleBannerItemStack(registryAccess.registryOrThrow(Registries.BANNER_PATTERN).asLookup())), \"lore.example\")"), loreClient)
+    }
+
+    @Test
+    fun `item stack predicate override registry access rejects ambiguous player backed containers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        listOf("PrimaryInventory", "SecondaryInventory").forEach { name ->
+            srcDir.resolve("$name.java").writeText("""
+                package com.example;
+
+                import net.minecraft.world.SimpleContainer;
+                import net.minecraft.world.entity.player.Player;
+
+                public class $name extends SimpleContainer {
+                    private final Player player;
+
+                    public $name(Player player) {
+                        super(1);
+                        this.player = player;
+                    }
+                }
+            """.trimIndent())
+        }
+        srcDir.resolve("LoreBookMenu.java").writeText("""
+            package com.example;
+
+            import java.util.HashMap;
+            import java.util.Map;
+            import java.util.function.Predicate;
+            import net.minecraft.world.item.ItemStack;
+
+            public class LoreBookMenu {
+                private static final Map<Predicate<ItemStack>, String> LORE_ENTRY_OVERRIDES = new HashMap<>();
+                private final PrimaryInventory primaryInventory;
+                private final SecondaryInventory secondaryInventory;
+
+                public LoreBookMenu(PrimaryInventory primaryInventory, SecondaryInventory secondaryInventory) {
+                    this.primaryInventory = primaryInventory;
+                    this.secondaryInventory = secondaryInventory;
+                }
+
+                public static void addLoreEntryOverride(Predicate<ItemStack> predicate, String entry) {
+                    LORE_ENTRY_OVERRIDES.putIfAbsent(predicate, entry);
+                }
+
+                public String getLoreEntryKey(ItemStack stack) {
+                    for (Predicate<ItemStack> predicate : LORE_ENTRY_OVERRIDES.keySet()) {
+                        if (predicate.test(stack)) {
+                            return LORE_ENTRY_OVERRIDES.get(predicate);
+                        }
+                    }
+                    return "lore." + stack.getDescriptionId();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LoreClient.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+
+            public class LoreClient {
+                public static void registerLoreOverrides() {
+                    LoreBookMenu.addLoreEntryOverride(stack -> ItemStack.isSameItemSameComponents(stack, ItemStack.EMPTY), "lore.example");
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val primary = srcDir.resolve("PrimaryInventory.java").readText()
+        val secondary = srcDir.resolve("SecondaryInventory.java").readText()
+        val menu = srcDir.resolve("LoreBookMenu.java").readText()
+        val client = srcDir.resolve("LoreClient.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-registry-backed-itemstack-predicate" }, result.changes.joinToString("\n"))
+        assertTrue(primary.contains("private final Player player;"), primary)
+        assertTrue(secondary.contains("private final Player player;"), secondary)
+        assertTrue(menu.contains("Map<Predicate<ItemStack>, String> LORE_ENTRY_OVERRIDES"), menu)
+        assertFalse(menu.contains("Function<RegistryAccess, Predicate<ItemStack>>"), menu)
+        assertFalse(menu.contains(".player.registryAccess()"), menu)
+        assertFalse(client.contains("registryAccess ->"), client)
+    }
+
+    @Test
+    fun `legacy banner item factories do not infer owners from java file names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleItems.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.BlockItem;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+
+            public static ItemStack createExampleBannerItemStack() {
+                ItemStack bannerStack = new ItemStack(Items.WHITE_BANNER);
+                CompoundTag tag = new CompoundTag();
+                tag.put("Patterns", new BannerPattern.Builder().toListTag());
+                BlockItem.setBlockEntityData(bannerStack, BlockEntityType.BANNER, tag);
+                return bannerStack;
+            }
+        """.trimIndent())
+        srcDir.resolve("Usage.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.item.ItemStack;
+
+            public class Usage {
+                public ItemStack make(HolderLookup.Provider registries) {
+                    return ExampleItems.createExampleBannerItemStack();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val usage = srcDir.resolve("Usage.java").readText()
+
+        assertTrue(usage.contains("return ExampleItems.createExampleBannerItemStack();"), usage)
+        assertFalse(usage.contains("lookupOrThrow(Registries.BANNER_PATTERN)"), usage)
+    }
+
+    @Test
+    fun `legacy banner item factories do not borrow out of scope registry lookups`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleItems.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.BlockItem;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.entity.BannerPattern;
+
+            public class ExampleItems {
+                public static ItemStack createExampleBannerItemStack() {
+                    ItemStack bannerStack = new ItemStack(Items.WHITE_BANNER).setHoverName(Component.literal("example"));
+                    CompoundTag tag = new CompoundTag();
+                    tag.put("Patterns", new BannerPattern.Builder().toListTag());
+                    BlockItem.setBlockEntityData(bannerStack, BlockEntityType.BANNER, tag);
+                    return bannerStack;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Usage.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderGetter;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.block.entity.BannerPattern;
+
+            public class Usage {
+                public void cache(HolderGetter<BannerPattern> patternRegistry) {
+                    patternRegistry.toString();
+                }
+
+                public ItemStack make() {
+                    return ExampleItems.createExampleBannerItemStack();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val usage = srcDir.resolve("Usage.java").readText()
+
+        assertTrue(usage.contains("return ExampleItems.createExampleBannerItemStack();"), usage)
+        assertFalse(usage.contains("createExampleBannerItemStack(patternRegistry)"), usage)
+        assertFalse(usage.contains("lookupOrThrow(Registries.BANNER_PATTERN)"), usage)
+    }
+
+    @Test
+    fun `legacy banner item factory collection ignores commented factory definitions`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleItems.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.BlockItem;
+            import net.minecraft.world.level.block.entity.BannerPattern;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+
+            public class ExampleItems {
+                /*
+                public static ItemStack createExampleBannerItemStack() {
+                    ItemStack bannerStack = new ItemStack(Items.WHITE_BANNER);
+                    CompoundTag tag = new CompoundTag();
+                    tag.put("Patterns", new BannerPattern.Builder().toListTag());
+                    BlockItem.setBlockEntityData(bannerStack, BlockEntityType.BANNER, tag);
+                    return bannerStack;
+                }
+                */
+
+                public static ItemStack createExampleBannerItemStack() {
+                    return new ItemStack(Items.WHITE_BANNER);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Usage.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.item.ItemStack;
+
+            public class Usage {
+                public ItemStack make(HolderLookup.Provider registries) {
+                    return ExampleItems.createExampleBannerItemStack();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val usage = srcDir.resolve("Usage.java").readText()
+        val items = srcDir.resolve("ExampleItems.java").readText()
+
+        assertTrue(usage.contains("return ExampleItems.createExampleBannerItemStack();"), usage)
+        assertFalse(usage.contains("lookupOrThrow(Registries.BANNER_PATTERN)"), usage)
+        assertFalse(items.contains("HolderGetter<BannerPattern> patternRegistry"), items)
+        assertTrue(result.changes.none { it.ruleId == "struct-banner-pattern-components" }, result.changes.joinToString("\n"))
+    }
+
+    @Test
+    fun `legacy banner item factory calls ignore commented call examples`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleItems.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.BlockItem;
+            import net.minecraft.world.item.DyeColor;
+            import net.minecraft.world.level.block.entity.BannerPattern;
+            import net.minecraft.world.level.block.entity.BannerPatterns;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+
+            public class ExampleItems {
+                public static ItemStack createExampleBannerItemStack() {
+                    ItemStack bannerStack = new ItemStack(Items.WHITE_BANNER);
+                    CompoundTag tag = new CompoundTag();
+                    tag.put("Patterns", new BannerPattern.Builder().addPattern(BannerPatterns.STRIPE_BOTTOM, DyeColor.CYAN).toListTag());
+                    BlockItem.setBlockEntityData(bannerStack, BlockEntityType.BANNER, tag);
+                    return bannerStack;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Usage.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.item.ItemStack;
+
+            public class Usage {
+                public ItemStack make(HolderLookup.Provider registries) {
+                    // ExampleItems.createExampleBannerItemStack();
+                    return ExampleItems.createExampleBannerItemStack();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val usage = srcDir.resolve("Usage.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-banner-pattern-components" }, result.changes.joinToString("\n"))
+        assertTrue(usage.contains("return ExampleItems.createExampleBannerItemStack(registries.lookupOrThrow(Registries.BANNER_PATTERN));"), usage)
+        assertTrue(usage.contains("// ExampleItems.createExampleBannerItemStack();"), usage)
+        assertFalse(usage.contains("// ExampleItems.createExampleBannerItemStack(registries.lookupOrThrow(Registries.BANNER_PATTERN));"), usage)
+    }
+
+    @Test
+    fun `item stack predicate override methods do not infer owners from java file names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LoreBookMenu.java").writeText("""
+            package com.example;
+
+            import java.util.HashMap;
+            import java.util.Map;
+            import java.util.function.Predicate;
+            import net.minecraft.world.item.ItemStack;
+
+            private static final Map<Predicate<ItemStack>, String> LORE_ENTRY_OVERRIDES = new HashMap<>();
+
+            public static void addLoreEntryOverride(Predicate<ItemStack> predicate, String entry) {
+                LORE_ENTRY_OVERRIDES.putIfAbsent(predicate, entry);
+            }
+        """.trimIndent())
+        srcDir.resolve("LoreClient.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+
+            public class LoreClient {
+                public static void registerLoreOverrides() {
+                    LoreBookMenu.addLoreEntryOverride(stack -> stack.isEmpty(), "lore.example");
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val loreClient = srcDir.resolve("LoreClient.java").readText()
+
+        assertTrue(loreClient.contains("LoreBookMenu.addLoreEntryOverride(stack -> stack.isEmpty(), \"lore.example\")"), loreClient)
+        assertFalse(loreClient.contains("registryAccess ->"), loreClient)
+        assertTrue(result.changes.none { it.ruleId == "struct-registry-backed-itemstack-predicate" }, result.changes.joinToString("\n"))
+    }
+
+    @Test
+    fun `migrates creative tab entries hover names and uuid map writers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("CreativeAndNetworkSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.component.DataComponents;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+            import net.minecraft.world.item.CreativeModeTab;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent;
+            import java.util.Map;
+            import java.util.UUID;
+
+            public class CreativeAndNetworkSurface {
+                public void build(BuildCreativeModeTabContentsEvent event) {
+                    event.getEntries().putAfter(new ItemStack(Items.LEATHER_BOOTS), new ItemStack(Items.DIAMOND_BOOTS), CreativeModeTab.TabVisibility.PARENT_AND_SEARCH_TABS);
+                }
+
+                public ItemStack named() {
+                    ItemStack stack = new ItemStack(Items.DIAMOND).setHoverName(Component.literal("named"));
+                    stack.setHoverName(Component.literal("updated"));
+                    return stack;
+                }
+
+                public void encode(FriendlyByteBuf buf, Map<UUID, DeveloperGlow> glows) {
+                    buf.writeMap(glows, FriendlyByteBuf::writeUUID, DeveloperGlow::write);
+                }
+
+                public Map<UUID, DeveloperGlow> decode(FriendlyByteBuf buf) {
+                    return buf.readMap(FriendlyByteBuf::readUUID, DeveloperGlow::read);
+                }
+
+                public record Apply(UUID playerUUID, DeveloperGlow glow) implements CustomPacketPayload {
+                    public void execute() {
+                    }
+                }
+            }
+
+            class DeveloperGlow {
+                static void write(FriendlyByteBuf buf, DeveloperGlow glow) {}
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val surface = srcDir.resolve("CreativeAndNetworkSurface.java").readText()
+
+        assertTrue(surface.contains("event.insertAfter(new ItemStack(Items.LEATHER_BOOTS), new ItemStack(Items.DIAMOND_BOOTS), CreativeModeTab.TabVisibility.PARENT_AND_SEARCH_TABS);"), surface)
+        assertFalse(surface.contains("getEntries().putAfter"), surface)
+        assertTrue(surface.contains("ItemStack stack = new ItemStack(Items.DIAMOND);"), surface)
+        assertTrue(surface.contains("stack.set(DataComponents.CUSTOM_NAME, Component.literal(\"named\"));"), surface)
+        assertTrue(surface.contains("stack.set(DataComponents.CUSTOM_NAME, Component.literal(\"updated\"));"), surface)
+        assertFalse(surface.contains(".setHoverName("), surface)
+        assertTrue(surface.contains("buf.writeMap(glows, (buffer, value) -> buffer.writeUUID(value), (buffer, value) -> DeveloperGlow.write(buffer, value));"), surface)
+        assertTrue(surface.contains("return buf.readMap(buffer -> buffer.readUUID(), buffer -> DeveloperGlow.read(buffer));"), surface)
+        assertTrue(surface.contains("public static final CustomPacketPayload.Type<Apply> TYPE"), surface)
+        assertTrue(surface.contains("ResourceLocation.fromNamespaceAndPath(\"example\", \"creative_and_network_surface_apply\")"), surface)
+        assertTrue(surface.contains("public CustomPacketPayload.Type<? extends CustomPacketPayload> type()"), surface)
+        assertTrue(surface.contains("import net.minecraft.resources.ResourceLocation;"), surface)
+    }
+
+    @Test
+    fun `creative tab entries and bytebuf map migrations ignore comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val sourceFile = srcDir.resolve("CreativeAndNetworkDocs.java")
+        sourceFile.writeText("""
+            package com.example;
+
+            public class CreativeAndNetworkDocs {
+                // event.getEntries().putAfter(new ItemStack(Items.LEATHER_BOOTS), new ItemStack(Items.DIAMOND_BOOTS), CreativeModeTab.TabVisibility.PARENT_AND_SEARCH_TABS);
+                private static final String CREATIVE_DOC = "event.getEntries().putAfter(new ItemStack(Items.LEATHER_BOOTS), new ItemStack(Items.DIAMOND_BOOTS), CreativeModeTab.TabVisibility.PARENT_AND_SEARCH_TABS);";
+
+                /*
+                 * buf.writeMap(glows, FriendlyByteBuf::writeUUID, DeveloperGlow::write);
+                 * return buf.readMap(FriendlyByteBuf::readUUID, DeveloperGlow::read);
+                 */
+                private static final String WRITE_DOC = "buf.writeMap(glows, FriendlyByteBuf::writeUUID, DeveloperGlow::write);";
+                private static final String READ_DOC = "return buf.readMap(FriendlyByteBuf::readUUID, DeveloperGlow::read);";
+                // ItemStack stack = new ItemStack(Items.DIAMOND).setHoverName(Component.literal("named"));
+                // stack.setHoverName(Component.literal("comment"));
+                private static final String HOVER_ASSIGNMENT_DOC = "ItemStack stack = new ItemStack(Items.DIAMOND).setHoverName(Component.literal(\"named\"));";
+                private static final String HOVER_CALL_DOC = "stack.setHoverName(Component.literal(\"doc\"));";
+
+                public void keep() {
+                    System.out.println(CREATIVE_DOC + WRITE_DOC + READ_DOC + HOVER_ASSIGNMENT_DOC + HOVER_CALL_DOC);
+                }
+            }
+        """.trimIndent())
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = sourceFile.readText()
+
+        assertEquals(original, migrated)
+        assertEquals(0, result.changeCount)
+        assertFalse(migrated.contains("insertAfter("), migrated)
+        assertFalse(migrated.contains("buffer.writeUUID(value)"), migrated)
+        assertFalse(migrated.contains("buffer.readUUID()"), migrated)
+        assertFalse(migrated.contains("set(DataComponents.CUSTOM_NAME"), migrated)
+    }

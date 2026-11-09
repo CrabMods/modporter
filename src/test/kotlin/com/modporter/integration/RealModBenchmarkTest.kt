@@ -1,16 +1,22 @@
 package com.modporter.integration
 
+import com.modporter.core.pipeline.GradleModLayout
 import com.modporter.core.pipeline.Pipeline
 import com.modporter.core.pipeline.PipelineResult
 import com.modporter.core.pipeline.Confidence
+import com.modporter.core.pipeline.Change
 import com.modporter.mapping.MappingDatabase
 import com.modporter.registry.PipelineOptions
 import com.modporter.registry.PipelineRegistry
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable
@@ -18,9 +24,12 @@ import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import java.awt.image.BufferedImage
 import javax.imageio.ImageIO
+import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import java.util.jar.JarEntry
 import java.util.jar.JarOutputStream
@@ -32,6 +41,7 @@ import kotlin.io.path.name
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.assertTrue
+import kotlin.test.assertEquals
 
 /**
  * Real-mod benchmark harness.
@@ -53,6 +63,7 @@ import kotlin.test.assertTrue
  *                                           run runClientWorld and quick-load the smoke save
  *   MODPORTER_BENCHMARK_LOG_CLEAN=true    fail runtime gates on non-allowlisted WARN lines
  *   MODPORTER_BENCHMARK_KEEP_WORK=true    keep temporary sources/outputs for debugging
+ *   MODPORTER_BENCHMARK_RUN_ID=id          reserve a unique output root under build/real-mod-benchmark/runs
  *   MODPORTER_BENCHMARK_CASES=a,b         run only the listed manifest ids
  *   MODPORTER_BENCHMARK_PROGRESS_GRACE_SECONDS=75
  *                                           after a progress marker, fail fast if final markers never arrive
@@ -71,7 +82,8 @@ class RealModBenchmarkTest {
     @EnabledIfEnvironmentVariable(named = "MODPORTER_REAL_MOD_TEST", matches = "true")
     fun `real mod benchmark manifest`() {
         val repoRoot = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize()
-        val reportRoot = repoRoot.resolve("build/real-mod-benchmark").toAbsolutePath().normalize()
+        val options = BenchmarkOptions.fromEnvironment()
+        val reportRoot = prepareBenchmarkReportRoot(repoRoot, options.runId)
         val tempRoot = reportRoot.resolve("tmp")
         val sourceRoot = tempRoot.resolve("sources")
         val workRoot = tempRoot.resolve("work")
@@ -85,7 +97,6 @@ class RealModBenchmarkTest {
         workRoot.createDirectories()
         artifactRoot.createDirectories()
 
-        val options = BenchmarkOptions.fromEnvironment()
         val allCases = loadCases(repoRoot.resolve("src/test/resources/benchmarks/real-mods.tsv"))
         val cases = selectCases(
             allCases,
@@ -153,7 +164,8 @@ class RealModBenchmarkTest {
             tempDir,
             logFile,
             timeoutSeconds = outerTimeoutSeconds,
-            runtimeLogPolicy = RuntimeLogPolicy.clientWorld(failOnWarnings = false, progressGraceSeconds = 1)
+            runtimeLogPolicy = RuntimeLogPolicy.clientWorld(failOnWarnings = false, progressGraceSeconds = 1),
+            requiresScopedJavaCleanup = false
         )
 
         val elapsedSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started)
@@ -179,7 +191,8 @@ class RealModBenchmarkTest {
             tempDir,
             logFile,
             timeoutSeconds = outerTimeoutSeconds,
-            runtimeLogPolicy = RuntimeLogPolicy.gameTestServer(failOnWarnings = false)
+            runtimeLogPolicy = RuntimeLogPolicy.gameTestServer(failOnWarnings = false),
+            requiresScopedJavaCleanup = false
         )
 
         val elapsedSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started)
@@ -187,6 +200,35 @@ class RealModBenchmarkTest {
         assertTrue(
             elapsedSeconds < outerTimeoutSeconds,
             "Completed GameTest shutdown gate should not wait for the outer timeout; elapsed=${elapsedSeconds}s"
+        )
+    }
+
+    @Test
+    fun `gametest runtime gate releases captured owned descendant after parent exits`(@TempDir tempDir: Path) {
+        val logFile = tempDir.resolve("gametest-held-log.log")
+        val descendantPidFile = tempDir.resolve("gametest-held-log-descendant.pid")
+        val outerTimeoutSeconds = 20L
+        val started = System.nanoTime()
+
+        val result = runRuntimeProcess(
+            heldLogGameTestShutdownCommand(tempDir, logFile),
+            tempDir,
+            logFile,
+            timeoutSeconds = outerTimeoutSeconds,
+            runtimeLogPolicy = RuntimeLogPolicy.gameTestServer(failOnWarnings = false),
+            requiresScopedJavaCleanup = false
+        )
+
+        val elapsedSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started)
+        assertTrue(result.status == CheckStatus.PASS, "Expected held-log GameTest shutdown gate to pass: ${result.note}")
+        assertTrue(
+            elapsedSeconds < outerTimeoutSeconds,
+            "Captured owned descendant should be released after parent exit; elapsed=${elapsedSeconds}s"
+        )
+        val descendantPid = descendantPidFile.readText().trim().toLong()
+        assertTrue(
+            ProcessHandle.of(descendantPid).map { !it.isAlive }.orElse(true),
+            "Owned descendant retaining the runtime log must exit after its parent terminates: pid=$descendantPid"
         )
     }
 
@@ -209,6 +251,22 @@ class RealModBenchmarkTest {
             auditRuntimeLog(shutdownLog, failOnWarnings = false).findings.isEmpty(),
             "OpenAL invalid-name after Minecraft shutdown is benchmark harness noise"
         )
+    }
+
+    @Test
+    fun `runtime log audit rejects malformed UTF8 with raw evidence`(@TempDir tempDir: Path) {
+        val logFile = tempDir.resolve("malformed-runtime.log")
+        Files.write(
+            logFile,
+            "[12:00:00] [main/INFO] [example/]: prefix ".toByteArray(Charsets.US_ASCII) +
+                byteArrayOf(0xa6.toByte(), 0xcc.toByte())
+        )
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = false)
+
+        assertTrue(audit.findings.single().contains("runtime log is not strict UTF-8"), audit.findings.toString())
+        assertTrue(audit.findings.single().contains("sha256="), audit.findings.toString())
+        assertTrue(audit.findings.single().contains("invalidOffset="), audit.findings.toString())
     }
 
     @Test
@@ -809,6 +867,39 @@ class RealModBenchmarkTest {
     }
 
     @Test
+    fun `runtime log audit allowlists source inherited missing blockstate variant`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeBlockstateVariantEvidence(projectDir)
+        writeBlockstateVariantEvidence(sourceDir)
+        val logFile = tempDir.resolve("blockstate-variant-inherited.log")
+        logFile.writeText("""
+            [02:03:51] [Worker-Main-10/WARN] [minecraft/BlockStateModelLoader]: Exception loading blockstate definition: 'example:blockstates/server.json' missing model for variant: 'example:server#active=false,facing=west,state=2'
+            [02:03:52] [Worker-Main-10/WARN] [minecraft/ModelManager]: Missing textures in model example:server#active=true,facing=west,state=0:
+                minecraft:textures/atlas/blocks.png:minecraft:server_front_on
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected source-inherited blockstate findings to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("none of their 4 variants covers 'active=false,facing=west,state=2'") },
+            audit.allowedIssues.toString()
+        )
+        assertTrue(
+            audit.allowedIssues.any { it.contains("neither provides 'assets/minecraft/textures/server_front_on.png'") },
+            audit.allowedIssues.toString()
+        )
+
+        // a variant the porter dropped is not inherited: the converted blockstate differs from the input
+        projectDir.resolve("src/main/resources/assets/example/blockstates/server.json").writeText(
+            """{"variants":{"active=false":{"model":"example:block/server_off"}}}""" + "\n"
+        )
+        val dropped = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+        assertTrue(dropped.findings.any { it.contains("missing model for variant") }, dropped.findings.toString())
+    }
+
+    @Test
     fun `runtime log audit allowlists source inherited missing item model`(@TempDir tempDir: Path) {
         val projectDir = tempDir.resolve("work/example")
         val sourceDir = tempDir.resolve("sources/example")
@@ -1147,7 +1238,8 @@ class RealModBenchmarkTest {
         )
         assertTrue(stagedSmokeHarness.exists())
         assertTrue(!projectWithoutTests.resolve("src/main/java/com/modporter/benchmark/ModPorterBenchmarkGameTests.java").exists())
-        assertTrue(projectWithoutTests.resolve("src/main/resources/gameteststructures/modporter_benchmark_empty.snbt").exists())
+        // dev runs read SNBT test structures from gameteststructures/ in their working directory
+        assertTrue(projectWithoutTests.resolve("run/gameteststructures/modporter_benchmark_empty.snbt").exists())
         assertTrue(
             stagedSmokeHarness.readText().contains("package com.modporter.generated.resmod.benchmark;")
         )
@@ -1175,6 +1267,146 @@ class RealModBenchmarkTest {
         assertTrue(!projectWithTests.resolve("src/main/java/com/modporter/generated/with_tests/benchmark/ModPorterBenchmarkGameTests.java").exists())
     }
 
+
+    @Test
+    fun `journeymap sepia evidence binds exact warnings pin and shader resources`(
+        @TempDir tempDir: Path
+    ) {
+        val jar = tempDir.resolve("journeymap-fixture.jar")
+        createJar(jar, journeyMapSepiaFixtureEntries())
+        val hash = sha256File(jar)
+        val size = Files.size(jar)
+        val loading =
+            "[main/INFO] [ne.ne.fm.lo.mo.ModDiscoverer/SCAN]: Loading mod file $jar with languages [javafml]"
+        val cache = RuntimeLogEvidenceCache(null, null)
+
+        journeyMapSepiaColorModulatorMessages.forEach { message ->
+            val lines = listOf(
+                loading,
+                "[18:10:25] [Render thread/WARN] [minecraft/ShaderInstance]: $message"
+            )
+            val evidence = journeyMapSepiaColorModulatorEvidence(
+                lines,
+                1,
+                cache,
+                hash,
+                size,
+                requirePinnedMapping = false
+            )
+            assertTrue(evidence?.contains("exact sepia descriptor/shader ownership") == true, "$message: $evidence")
+        }
+        val unknown = listOf(
+            loading,
+            "[18:10:25] [Render thread/WARN] [minecraft/ShaderInstance]: Shader journeymap:sepia_4 could not find uniform named ColorModulator in the specified shader program."
+        )
+        assertTrue(
+            journeyMapSepiaColorModulatorEvidence(
+                unknown,
+                1,
+                RuntimeLogEvidenceCache(null, null),
+                hash,
+                size,
+                requirePinnedMapping = false
+            ) == null,
+            "Unproved JourneyMap shader warning must remain fatal"
+        )
+        val fatalSeverity = listOf(
+            loading,
+            "[18:10:25] [Render thread/ERROR] [minecraft/ShaderInstance]: ${journeyMapSepiaColorModulatorMessages.last()}"
+        )
+        assertTrue(
+            journeyMapSepiaColorModulatorEvidence(
+                fatalSeverity,
+                1,
+                RuntimeLogEvidenceCache(null, null),
+                hash,
+                size,
+                requirePinnedMapping = false
+            ) == null,
+            "Fatal severity must not be admitted by the JourneyMap warning evidence"
+        )
+        assertTrue(
+            journeyMapSepiaColorModulatorEvidence(
+                listOf(loading, "[18:10:25] [Render thread/WARN] [minecraft/ShaderInstance]: ${journeyMapSepiaColorModulatorMessages.last()}"),
+                1,
+                RuntimeLogEvidenceCache(null, null),
+                "0".repeat(64),
+                size,
+                requirePinnedMapping = false
+            ) == null,
+            "JourneyMap artifact hash drift must remain fatal"
+        )
+        assertTrue(
+            journeyMapRuntimePinMatches(JOURNEYMAP_RUNTIME_SHA256),
+            "Production JourneyMap evidence constants must match neoforge-deps.json"
+        )
+    }
+
+    @Test
+    fun `journeymap sepia evidence rejects duplicate loads and resource drift`(
+        @TempDir tempDir: Path
+    ) {
+        val jar = tempDir.resolve("journeymap-fixture.jar")
+        createJar(jar, journeyMapSepiaFixtureEntries())
+        val duplicate = tempDir.resolve("journeymap-duplicate.jar")
+        Files.copy(jar, duplicate)
+        val message = journeyMapSepiaColorModulatorMessages.last()
+        val duplicateLines = listOf(
+            "[main/INFO] [ne.ne.fm.lo.mo.ModDiscoverer/SCAN]: Loading mod file $jar with languages [javafml]",
+            "[main/INFO] [ne.ne.fm.lo.mo.ModDiscoverer/SCAN]: Loading mod file $duplicate with languages [javafml]",
+            "[18:10:25] [Render thread/WARN] [minecraft/ShaderInstance]: $message"
+        )
+        assertTrue(
+            journeyMapSepiaColorModulatorEvidence(
+                duplicateLines,
+                2,
+                RuntimeLogEvidenceCache(null, null),
+                sha256File(jar),
+                Files.size(jar),
+                requirePinnedMapping = false
+            ) == null,
+            "Multiple loaded JourneyMap artifacts must remain fatal"
+        )
+
+        val drifted = tempDir.resolve("journeymap-drifted.jar")
+        createJar(drifted, journeyMapSepiaFixtureEntries(thirdFragmentDeclaresColor = true))
+        val driftedLines = listOf(
+            "[main/INFO] [ne.ne.fm.lo.mo.ModDiscoverer/SCAN]: Loading mod file $drifted with languages [javafml]",
+            "[18:10:25] [Render thread/WARN] [minecraft/ShaderInstance]: $message"
+        )
+        assertTrue(
+            journeyMapSepiaColorModulatorEvidence(
+                driftedLines,
+                1,
+                RuntimeLogEvidenceCache(null, null),
+                sha256File(drifted),
+                Files.size(drifted),
+                requirePinnedMapping = false
+            ) == null,
+            "JourneyMap shader resource drift must remain fatal"
+        )
+    }
+
+    private fun journeyMapSepiaFixtureEntries(
+        thirdFragmentDeclaresColor: Boolean = false
+    ): Map<String, String> {
+        val entries = linkedMapOf(
+            "META-INF/neoforge.mods.toml" to "[[mods]]\nmodId=\"journeymap\"\n",
+            "assets/journeymap/shaders/core/jm_position_tex_color.vsh" to
+                "#version 150\nuniform mat4 ModelViewMat;\nvoid main() {}\n"
+        )
+        for (shaderIndex in 1..3) {
+            entries["assets/journeymap/shaders/core/sepia_$shaderIndex.json"] =
+                """{"vertex":"journeymap:jm_position_tex_color","fragment":"journeymap:sepia_$shaderIndex","uniforms":[{"name":"ColorModulator","type":"float","count":4,"values":[1.0,1.0,1.0,1.0]}]}"""
+            entries["assets/journeymap/shaders/core/sepia_$shaderIndex.fsh"] =
+                if (shaderIndex < 3 || thirdFragmentDeclaresColor) {
+                    "#version 150\nuniform vec4 ColorModulator;\nvoid main() {}\n"
+                } else {
+                    "#version 150\nvoid main() {}\n"
+                }
+        }
+        return entries
+    }
     @Test
     fun `benchmark client world harness is staged in per-mod package`(@TempDir tempDir: Path) {
         tempDir.resolve("gradle.properties").writeText("mod_id=resmod\n")
@@ -1198,13 +1430,163 @@ class RealModBenchmarkTest {
         assertTrue(!tempDir.resolve("src/main/java/com/modporter/benchmark/ModPorterClientWorldHarness.java").exists())
         assertTrue(harness.readText().contains("package com.modporter.generated.resmod.benchmark;"))
         assertTrue(harness.readText().contains("Creative tab browse complete"))
+        // only a mod with no registered items may finish without a tab of its own
+        assertTrue(harness.readText().contains(".anyMatch(key -> key.getNamespace().equals(modId));"))
         assertTrue(harness.readText().contains("tabContainsNamespace(tab, modId)"))
         assertTrue(harness.readText().contains("observeMenuItems(menu, browseRow);"))
         assertTrue(harness.readText().contains("expectedItems = itemKeys(menu.items);"))
         assertTrue(harness.readText().contains("stableMenuItems"))
+        assertTrue(
+            harness.readText().contains(
+                """System.setProperty("modporter.benchmark.clientBrowse.completed", "true");"""
+            )
+        )
         assertTrue(!harness.readText().contains("expectedItems = itemKeys(tab.getDisplayItems());"))
         assertTrue(tempDir.resolve("build.gradle").readText().contains("systemProperty 'modporter.benchmark.clientWorld'"))
         assertTrue(tempDir.resolve("build.gradle").readText().contains("systemProperty 'modporter.benchmark.modId', 'resmod'"))
+        assertTrue(
+            tempDir.resolve("build.gradle").readText().contains(
+                "systemProperty 'modporter.benchmark.clientBrowse.completed', 'false'"
+            )
+        )
+    }
+
+    @Test
+    fun `station client world validation stages three harnesses and coordinator properties`(
+        @TempDir tempDir: Path
+    ) {
+        tempDir.resolve("gradle.properties").writeText("mod_id=resmod\n")
+        tempDir.resolve("build.gradle").writeText(
+            """
+            neoForge {
+                runs {
+                    clientWorld {
+                        client()
+                    }
+                }
+            }
+            """.trimIndent()
+        )
+        val packageEntity = tempDir.resolve(
+            "src/main/java/com/simibubi/create/content/logistics/box/PackageEntity.java"
+        )
+        val change = Change(
+            file = packageEntity,
+            line = 1,
+            description = "fixture",
+            before = "before",
+            after = "after",
+            confidence = Confidence.HIGH,
+            ruleId = StrictSpawnValidationContract.RULE_ID
+        )
+        val profile = StrictSpawnSourceProfile(
+            repositoryRoot = tempDir,
+            inputProjectDir = tempDir.resolve("input"),
+            convertedBuildRoot = tempDir,
+            convertedModDir = tempDir,
+            inputPackageEntity = tempDir.resolve("input/PackageEntity.java"),
+            generatedPackageEntity = packageEntity,
+            accessTransformer = tempDir.resolve("src/main/resources/META-INF/accesstransformer.cfg"),
+            buildFiles = listOf(tempDir.resolve("build.gradle")),
+            gradleProperties = tempDir.resolve("gradle.properties"),
+            ruleSource = tempDir.resolve("LegacyClientSpawnFactories.kt"),
+            ruleTests = tempDir.resolve("LegacyClientSpawnFactoriesTest.kt"),
+            sourceLabel = "fixture",
+            change = change,
+            productBindings = emptyMap()
+        )
+        val request = StrictReviewRuntimeRequest(
+            profileId = StrictSpawnValidationContract.PROFILE_ID,
+            validationSessionId = "11111111-1111-1111-1111-111111111111",
+            manifestPath = tempDir.resolve("strict-manifest.json"),
+            receiptPath = tempDir.resolve(StrictSpawnValidationContract.RECEIPT_FILE_NAME),
+            stationReceiptPath = tempDir.resolve(
+                StrictSpawnValidationContract.STATION_RECEIPT_FILE_NAME
+            ),
+            coordinatorReceiptPath = tempDir.resolve(
+                StrictSpawnValidationContract.COORDINATOR_RECEIPT_FILE_NAME
+            ),
+            wrapperReceiptPath = tempDir.resolve("wrapper-receipt.json"),
+            evidenceDir = tempDir.resolve("evidence"),
+            runtimeDirectory = tempDir.resolve("run"),
+            profile = profile,
+            productBindings = emptyMap(),
+            stationMapRequired = true
+        )
+
+        val issues = stageClientWorldHarness(tempDir, request)
+        val sourceDir = tempDir.resolve(
+            "src/main/java/com/modporter/generated/resmod/benchmark"
+        )
+        val build = tempDir.resolve("build.gradle").readText()
+
+        assertTrue(issues.isEmpty(), "Expected station harness staging to succeed: $issues")
+        assertTrue(sourceDir.resolve(StrictSpawnValidationContract.GENERIC_HARNESS_FILE).exists())
+        assertTrue(sourceDir.resolve(StrictSpawnValidationContract.GENERATED_HARNESS_FILE).exists())
+        assertTrue(sourceDir.resolve(StrictSpawnValidationContract.STATION_HARNESS_FILE).exists())
+        assertTrue(
+            sourceDir.resolve(StrictSpawnValidationContract.GENERIC_HARNESS_FILE)
+                .readText()
+                .contains("Waiting for client-world coordinator before client exit")
+        )
+        for (property in listOf(
+            "modporter.strictStation.enabled",
+            "modporter.strictStation.profileId",
+            "modporter.strictStation.sessionId",
+            "modporter.strictStation.expectedBindings",
+            "modporter.strictStation.receipt",
+            "modporter.strictStation.evidenceDir",
+            "modporter.clientWorldValidation.enabled",
+            "modporter.clientWorldValidation.completed",
+            "modporter.clientWorldValidation.receipt"
+        )) {
+            assertTrue(build.contains("systemProperty '$property'"), "Missing $property in:\n$build")
+        }
+        val replacement = request.copy(
+            validationSessionId = "second-validation-session",
+            manifestPath = tempDir.resolve("second-manifest.json"),
+            receiptPath = tempDir.resolve("second-spawn.json"),
+            stationReceiptPath = tempDir.resolve("second-station.json"),
+            coordinatorReceiptPath = tempDir.resolve("second-coordinator.json")
+        )
+        assertTrue(stageClientWorldHarness(tempDir, replacement).isEmpty())
+        val restaged = tempDir.resolve("build.gradle").readText()
+        assertTrue(restaged.contains("second-validation-session"), restaged)
+        assertTrue(!restaged.contains(request.validationSessionId), restaged)
+        assertTrue(!restaged.contains(request.manifestPath.fileName.toString()), restaged)
+        assertEquals(1, Regex("systemProperty 'modporter.strictSpawn.sessionId'").findAll(restaged).count())
+        assertTrue(stageClientWorldHarness(tempDir, replacement).isEmpty())
+        assertEquals(restaged, tempDir.resolve("build.gradle").readText(), "restaging must preserve exact bytes")
+    }
+
+    @Test
+    fun `benchmark client world harness reaches a kotlin dsl module build`(@TempDir tempDir: Path) {
+        tempDir.resolve("gradle.properties").writeText("mod_id=resmod\n")
+        tempDir.resolve("build.gradle.kts").writeText(
+            """
+            neoForge {
+                runs {
+                    register("clientWorld") {
+                        client()
+                        programArguments.addAll("--quickPlayPath", "quickplay/modporter_smoke_world.json")
+                    }
+                }
+            }
+            """.trimIndent()
+        )
+
+        val issues = stageClientWorldHarness(tempDir)
+        val build = tempDir.resolve("build.gradle.kts").readText()
+
+        assertTrue(issues.isEmpty(), "Expected client-world harness staging to succeed: $issues")
+        assertTrue(build.contains("systemProperty(\"modporter.benchmark.clientWorld\", \"$CLIENT_SMOKE_WORLD\")"), build)
+        assertTrue(build.contains("systemProperty(\"modporter.benchmark.modId\", \"resmod\")"), build)
+        assertTrue(
+            build.contains(
+                "systemProperty(\"modporter.benchmark.clientBrowse.completed\", \"false\")"
+            ),
+            build
+        )
     }
 
     @Test
@@ -1271,6 +1653,28 @@ class RealModBenchmarkTest {
             reportsDir.resolve("example-fetch.log").readText().contains("resolvedCommit=$commit"),
             "fetch log should retain resolved git commit"
         )
+    }
+
+    @Test
+    fun `git helper drains large output and retains nonzero exit evidence`(@TempDir tempDir: Path) {
+        git(tempDir, "init")
+        val bulkDir = tempDir.resolve("bulk")
+        bulkDir.createDirectories()
+        repeat(4_000) { index ->
+            bulkDir.resolve("file-${index.toString().padStart(4, '0')}.txt").writeText("untracked\n")
+        }
+
+        val lastLine = git(tempDir, "status", "--short", "--untracked-files=all")
+        assertTrue(lastLine.endsWith("bulk/file-3999.txt"), "Expected complete large-output drain, got: $lastLine")
+
+        val failure = runCatching {
+            git(tempDir, "rev-parse", "--verify", "refs/heads/does-not-exist")
+        }.exceptionOrNull()
+        assertTrue(failure != null, "Expected nonzero git command to fail")
+        val message = failure.message.orEmpty()
+        assertTrue(message.contains("finished=true"), message)
+        assertTrue(Regex("""exitCode=(?!0\b)\d+""").containsMatchIn(message), message)
+        assertTrue(message.contains("output="), message)
     }
 
     @Test
@@ -1449,8 +1853,14 @@ class RealModBenchmarkTest {
             runClientWorld = CheckResult.notRun("not requested")
         )
 
-        val telemetry = renderTelemetry(listOf(outcome), strictBenchmarkOptions())
+        val options = strictBenchmarkOptions().copy(runId = "strict87-20261101")
+        val report = renderReport(listOf(outcome), options)
+        val telemetry = renderTelemetry(listOf(outcome), options)
 
+        assertTrue(report.contains("| runId | strict87-20261101 |"), report)
+        assertTrue(report.contains("| outputRoot | `build/real-mod-benchmark/runs/strict87-20261101` |"), report)
+        assertTrue(telemetry.contains("\"runId\": \"strict87-20261101\""), telemetry)
+        assertTrue(telemetry.contains("\"outputRoot\": \"build/real-mod-benchmark/runs/strict87-20261101\""), telemetry)
         assertTrue(telemetry.contains("\"id\": \"example\""), telemetry)
         assertTrue(telemetry.contains("\"passName\": \"Text Replacement\""), telemetry)
         assertTrue(telemetry.contains("\"changes\": 1"), telemetry)
@@ -1559,6 +1969,39 @@ class RealModBenchmarkTest {
             issues.any { it.contains("Converted source contains invalid migration artifacts") },
             "Expected invalid RecipeHolder<var> to fail converted-project validation; got: $issues"
         )
+    }
+
+    @Test
+    fun `converted project validation allows a project class sharing a forge class name`(@TempDir tempDir: Path) {
+        tempDir.resolve("src/main/resources/META-INF").createDirectories()
+        tempDir.resolve("src/main/resources/META-INF/neoforge.mods.toml").writeText("modLoader=\"javafml\"\n")
+        tempDir.resolve("build.gradle").writeText("plugins {\n    id 'net.neoforged.moddev'\n}\n")
+        val sourceDir = tempDir.resolve("src/main/java/com/example")
+        sourceDir.createDirectories()
+        sourceDir.resolve("ForgeRegistries.java").writeText(
+            """
+            package com.example;
+
+            class ForgeRegistries {
+                static final ForgeRegistries INSTANCE = new ForgeRegistries();
+            }
+            """.trimIndent()
+        )
+        sourceDir.resolve("Platform.java").writeText(
+            """
+            package com.example;
+
+            public class Platform {
+                Object registries() {
+                    return ForgeRegistries.INSTANCE;
+                }
+            }
+            """.trimIndent()
+        )
+
+        val issues = validateConvertedProject(tempDir, PipelineResult(emptyList(), dryRun = false))
+
+        assertTrue(issues.none { it.contains("Active Forge source references") }, "got: $issues")
     }
 
     @Test
@@ -1689,6 +2132,90 @@ class RealModBenchmarkTest {
         )
     }
 
+    /** Reuses an owned converted product for fast native debugging; emits no benchmark acceptance. */
+    @Test
+    @EnabledIfEnvironmentVariable(named = "MODPORTER_CREATE_CLIENT_DIAGNOSTIC", matches = "true")
+    fun `prepared Create client scenarios diagnostic`() {
+        val root = Path.of("").toAbsolutePath().normalize()
+        val output = Path.of(checkNotNull(System.getenv("MODPORTER_CREATE_DIAGNOSTIC_OUTPUT")))
+            .toAbsolutePath().normalize()
+        require(output.startsWith(root.resolve("build/real-mod-benchmark/runs")))
+        require(output.fileName.toString() == "create" && output.parent.fileName.toString() == "work" &&
+            output.parent.parent.fileName.toString() == "tmp")
+        val originalRun = output.parent.parent.parent
+        val id = checkNotNull(System.getenv("MODPORTER_CREATE_DIAGNOSTIC_ID"))
+        require(Regex("[a-z0-9][a-z0-9_-]{0,63}").matches(id))
+        val reports = root.resolve("build/real-mod-benchmark/diagnostics").createDirectories().resolve(id)
+        Files.createDirectory(reports)
+        val oldManifestPath = Files.list(originalRun.resolve("reports")).use { paths ->
+            paths.filter { it.fileName.toString().matches(Regex("strict-spawn-.*-manifest\\.json")) }
+                .toList().single()
+        }
+        val oldManifest = Json.parseToJsonElement(oldManifestPath.readText()).jsonObject
+        require(oldManifest["stationMapRequired"]?.jsonPrimitive?.content == "true")
+        val packageFile = output.resolve("src/main/java/com/simibubi/create/content/logistics/box/PackageEntity.java")
+        val prototype = Change(packageFile, 0,
+            "Preserve raw-join and deferred-lerp phases on the native spawn lifecycle",
+            "setCustomClientFactory(PackageEntity::spawn)",
+            "registered EntityFactory + recreateFromPacket + real readSpawnData prefix",
+            Confidence.MEDIUM, StrictSpawnValidationContract.RULE_ID)
+        val recordedChangeHash = oldManifest.getValue("bindings").jsonObject.getValue("rule.change.sha256")
+            .jsonPrimitive.content
+        fun changeHash(change: Change): String = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(listOf(change.ruleId, change.file.toString(), change.line.toString(), change.description,
+                change.before, change.after, change.confidence.name).joinToString("\u0000").toByteArray())
+            .joinToString("") { "%02x".format(it) }
+        // Recover the exact admitted conversion record rather than inventing a new MEDIUM signal.
+        val replay = (1..5000).map { prototype.copy(line = it) }
+            .singleOrNull { changeHash(it) == recordedChangeHash }
+            ?: error("The admitted source change cannot be replayed from its recorded hash")
+
+        // Only this diagnostic path republishes owned support templates into the prior test output.
+        val support = com.modporter.core.transforms.structural.LegacyRecipeIds::class.java.getDeclaredMethod(
+            "emitCompatSources", Path::class.java, String::class.java, String::class.java,
+            Boolean::class.javaPrimitiveType
+        ).apply { isAccessible = true }
+        support.invoke(com.modporter.core.transforms.structural.LegacyRecipeIds,
+            output.resolve("src/main/java"), "com.modporter.generated.create.compat", "create", false)
+        val source = Path.of(checkNotNull(System.getenv("MODPORTER_BENCHMARK_SOURCE_CREATE")))
+        val station = Change(output.resolve("src/main/java/com/simibubi/create/foundation/map/StationMapDecorationRenderer.java"),
+            1, "Replay the admitted native station-map requirement", "admitted station-map family",
+            "validate the same native station-map family", Confidence.HIGH, StrictSpawnValidationContract.STATION_RULE_ID)
+        val admission = StrictReviewValidationRegistry.admit(root, source, output, output,
+            PipelineResult(listOf(com.modporter.core.pipeline.PassResult("diagnostic replay", listOf(replay, station))), false),
+            "env:MODPORTER_BENCHMARK_SOURCE_CREATE", enforceHandsOff = true)
+        assertTrue(admission.fatalIssues.isEmpty(), admission.fatalIssues.joinToString("; "))
+        val prepared = StrictReviewValidationRegistry.createRuntimeRequest(admission, reports)
+        assertTrue(prepared.issues.isEmpty(), prepared.issues.joinToString("; "))
+        val request = checkNotNull(prepared.request)
+        assertTrue(stageClientWorldHarness(output, request).isEmpty())
+        val compiled = runGradleTask(output, reports, "create", "compileJava", 540)
+        assertTrue(compiled.status == CheckStatus.PASS, compiled.note)
+        val sealed = StrictReviewValidationRegistry.sealRuntimeManifest(request)
+        assertTrue(sealed.issues.isEmpty(), sealed.issues.joinToString("; "))
+        val active = checkNotNull(sealed.request)
+        val pristineWorld = originalRun.resolve("tmp/client-smoke-world/server/$CLIENT_SMOKE_WORLD")
+        assertTrue(stageClientSmokeWorld(output, pristineWorld).isEmpty())
+        reports.resolve("DIAGNOSTIC-ONLY.txt").writeText(
+            "Native client diagnostic only. No fresh conversion, datagen or all11 acceptance.\n" +
+                "Admitted change sha256=$recordedChangeHash; original run=$originalRun\n")
+        val runtime = runRuntimeGradleTask(output, reports, "create", "runClientWorld", 540,
+            RuntimeLogPolicy.clientWorld(true, 75, true, true), source, active)
+        val nativeLog = reports.resolve("create-runClientWorld.log").readText()
+        val preparationLine = nativeLog.indexOf("Runtime evidence prepared before world startup")
+        val worldStartLine = nativeLog.indexOf("Starting integrated minecraft server")
+        assertTrue(preparationLine >= 0 && worldStartLine > preparationLine,
+            "Immutable evidence must be prepared before the integrated world starts")
+        val stationPreparationLine = nativeLog.indexOf("Runtime fingerprint prepared before world startup")
+        assertTrue(stationPreparationLine >= 0 && worldStartLine > stationPreparationLine,
+            "Station immutable fingerprint must be prepared before the integrated world starts")
+        val verified = StrictReviewValidationRegistry.verifyFinal(admission, active,
+            runtime.status == CheckStatus.PASS, runtime.note, reports.resolve("create-runClientWorld.log"))
+        assertTrue(runtime.status == CheckStatus.PASS, runtime.note)
+        assertTrue(verified.state == "VALIDATED", verified.issues.joinToString("; "))
+        println("Prepared Create client diagnostic passed; fresh strict acceptance remains required: $reports")
+    }
+
     private fun runCase(
         case: BenchmarkCase,
         repoRoot: Path,
@@ -1717,33 +2244,140 @@ class RealModBenchmarkTest {
             copyProjectFiltered(prepared.path, outputDir)
 
             val pipelineResult = runPipeline(outputDir)
+            // Gradle tasks run from the build root; the mod's sources, resources and run directory
+            // belong to its module (the root itself for a single-project mod)
+            val modDir = GradleModLayout.modModule(outputDir)
             val structureIssues = validateConvertedProject(outputDir, pipelineResult, options)
 
-            val mediumChanges = pipelineResult.passResults.sumOf { it.mediumConfidence }
-            val lowChanges = pipelineResult.passResults.sumOf { it.lowConfidence }
-            val reviewChanges = mediumChanges + lowChanges
-            if (options.handsOff && reviewChanges > 0) {
-                structureIssues.add("Hands-off gate failed: $reviewChanges medium/low-confidence changes require review")
+            val strictReviewAdmission = StrictReviewValidationRegistry.admit(
+                repositoryRoot = repoRoot,
+                inputProjectDir = prepared.path,
+                convertedBuildRoot = outputDir,
+                convertedModDir = modDir,
+                result = pipelineResult,
+                sourceLabel = prepared.sourceLabel,
+                enforceHandsOff = options.handsOff
+            )
+            structureIssues.addAll(strictReviewAdmission.fatalIssues)
+            var strictReviewRequest: StrictReviewRuntimeRequest? = null
+            if ((strictReviewAdmission.pendingCount > 0 || strictReviewAdmission.stationMapRequired) &&
+                strictReviewAdmission.fatalIssues.isEmpty()
+            ) {
+                val preparation = StrictReviewValidationRegistry.createRuntimeRequest(
+                    strictReviewAdmission,
+                    reportsDir
+                )
+                structureIssues.addAll(preparation.issues)
+                strictReviewRequest = preparation.request
             }
             var compile = CheckResult.notRun("MODPORTER_BENCHMARK_COMPILE=false")
-            val compileSetupIssues = if (options.compile) {
-                stageBenchmarkDependencies(case, artifactRoot, outputDir)
-            } else {
-                emptyList()
+            if (structureIssues.isEmpty() && options.compile) {
+                structureIssues.addAll(stageBenchmarkDependencies(case, artifactRoot, modDir))
             }
-            structureIssues.addAll(compileSetupIssues)
-            if (compileSetupIssues.isEmpty() && options.compile) {
+            if (structureIssues.isEmpty() && options.compile) {
                 compile = runGradleTask(outputDir, reportsDir, case.id, "compileJava", options.timeoutSeconds)
             }
 
+            var dataGeneration = DataGenerationOutcome.notRun(
+                "pipeline did not request Create native data-map generation"
+            )
+            if (CreateDataGenerationEvidence.required(pipelineResult) &&
+                structureIssues.isEmpty() && compile.status == CheckStatus.PASS) {
+                val selectedRunId = options.runId
+                if (selectedRunId == null) {
+                    dataGeneration = DataGenerationOutcome(
+                        CheckResult(
+                            CheckStatus.FAIL,
+                            "Create native data-map generation requires a unique benchmark run id"
+                        )
+                    )
+                } else {
+                    val runData = runLeasedGradleTask(
+                        outputDir,
+                        reportsDir,
+                        case.id,
+                        "runData",
+                        options.timeoutSeconds,
+                        runtimeDirectory = modDir.resolve("run"),
+                        sessionReceipt =
+                            reportsDir.resolve("${case.id}-runData-session.json")
+                    )
+                    if (runData.status == CheckStatus.FAIL) {
+                        dataGeneration = DataGenerationOutcome(
+                            CheckResult(CheckStatus.FAIL, "runData failed: ${runData.note}")
+                        )
+                    } else {
+                        val processResources = runGradleTask(
+                            outputDir,
+                            reportsDir,
+                            case.id,
+                            "processResources",
+                            options.timeoutSeconds,
+                            additionalArguments = listOf("--rerun-tasks")
+                        )
+                        if (processResources.status == CheckStatus.FAIL) {
+                            dataGeneration = DataGenerationOutcome(
+                                CheckResult(
+                                    CheckStatus.FAIL,
+                                    "processResources --rerun-tasks failed: ${processResources.note}"
+                                )
+                            )
+                        } else {
+                            dataGeneration = try {
+                                val receipt = CreateDataGenerationEvidence.seal(
+                                    runId = selectedRunId,
+                                    caseId = case.id,
+                                    buildRoot = outputDir,
+                                    modDir = modDir,
+                                    reportsDir = reportsDir,
+                                    runDataLog = reportsDir.resolve("${case.id}-runData.log"),
+                                    runDataLeaseReceipt =
+                                        reportsDir.resolve("${case.id}-runData-session.json"),
+                                    processResourcesLog =
+                                        reportsDir.resolve("${case.id}-processResources.log")
+                                )
+                                DataGenerationOutcome(
+                                    CheckResult(
+                                        CheckStatus.PASS,
+                                        "Create native data maps generated, packaged and sealed"
+                                    ),
+                                    receipt
+                                )
+                            } catch (failure: Exception) {
+                                DataGenerationOutcome(
+                                    CheckResult(
+                                        CheckStatus.FAIL,
+                                        "Create data-generation evidence failed: " +
+                                            (failure.message ?: failure::class.java.simpleName)
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (dataGeneration.check.status == CheckStatus.PASS && strictReviewRequest != null) {
+                val refreshed = StrictReviewValidationRegistry.refreshGeneratedResourceBindingsAfterDataGeneration(
+                    strictReviewRequest,
+                    checkNotNull(options.runId),
+                    checkNotNull(dataGeneration.receipt)
+                )
+                structureIssues.addAll(refreshed.issues)
+                strictReviewRequest = refreshed.request ?: strictReviewRequest
+            }
+
             var artifactPublish = CheckResult.notRun("no benchmark dependents")
-            if (structureIssues.isEmpty() && options.compile && publishArtifacts && compile.status == CheckStatus.PASS) {
+            if (structureIssues.isEmpty() && options.compile && publishArtifacts &&
+                compile.status == CheckStatus.PASS && dataGeneration.check.passedOrNotRun) {
                 artifactPublish = publishBenchmarkArtifacts(case, outputDir, artifactRoot, reportsDir, options.timeoutSeconds)
             }
 
             var runServer = CheckResult.notRun("MODPORTER_BENCHMARK_RUNSERVER=false")
-            if (structureIssues.isEmpty() && compile.passedOrNotRun && artifactPublish.passedOrNotRun && options.runServer) {
-                prepareDedicatedServerRuntime(outputDir)
+            if (structureIssues.isEmpty() && compile.passedOrNotRun &&
+                dataGeneration.check.passedOrNotRun && artifactPublish.passedOrNotRun &&
+                options.runServer) {
+                prepareDedicatedServerRuntime(modDir)
                 runServer = runRuntimeGradleTask(
                     outputDir,
                     reportsDir,
@@ -1756,13 +2390,15 @@ class RealModBenchmarkTest {
             }
 
             var runGameTestServer = CheckResult.notRun("MODPORTER_BENCHMARK_RUNGAMETESTSERVER=false")
-            if (structureIssues.isEmpty() && compile.passedOrNotRun && artifactPublish.passedOrNotRun &&
+            if (structureIssues.isEmpty() && compile.passedOrNotRun &&
+                dataGeneration.check.passedOrNotRun && artifactPublish.passedOrNotRun &&
                 runServer.passedOrNotRun && options.runGameTestServer) {
-                structureIssues.addAll(stageBenchmarkGameTestSmoke(outputDir))
+                structureIssues.addAll(stageBenchmarkGameTestSmoke(modDir))
             }
-            if (structureIssues.isEmpty() && compile.passedOrNotRun && artifactPublish.passedOrNotRun &&
+            if (structureIssues.isEmpty() && compile.passedOrNotRun &&
+                dataGeneration.check.passedOrNotRun && artifactPublish.passedOrNotRun &&
                 runServer.passedOrNotRun && options.runGameTestServer) {
-                prepareDedicatedServerRuntime(outputDir)
+                prepareDedicatedServerRuntime(modDir)
                 runGameTestServer = runRuntimeGradleTask(
                     outputDir,
                     reportsDir,
@@ -1775,9 +2411,10 @@ class RealModBenchmarkTest {
             }
 
             var runClient = CheckResult.notRun("MODPORTER_BENCHMARK_RUNCLIENT=false")
-            if (structureIssues.isEmpty() && compile.passedOrNotRun && artifactPublish.passedOrNotRun &&
+            if (structureIssues.isEmpty() && compile.passedOrNotRun &&
+                dataGeneration.check.passedOrNotRun && artifactPublish.passedOrNotRun &&
                 runServer.passedOrNotRun && runGameTestServer.passedOrNotRun && options.runClient) {
-                stageClientRuntime(projectDir = outputDir)
+                stageClientRuntime(projectDir = modDir)
                 runClient = runRuntimeGradleTask(
                     outputDir,
                     reportsDir,
@@ -1790,37 +2427,67 @@ class RealModBenchmarkTest {
             }
 
             var runClientWorld = CheckResult.notRun("MODPORTER_BENCHMARK_RUNCLIENTWORLD=false")
-            if (structureIssues.isEmpty() && compile.passedOrNotRun && artifactPublish.passedOrNotRun &&
+            if (structureIssues.isEmpty() && compile.passedOrNotRun &&
+                dataGeneration.check.passedOrNotRun && artifactPublish.passedOrNotRun &&
                 runServer.passedOrNotRun && runGameTestServer.passedOrNotRun && runClient.passedOrNotRun &&
                 options.runClientWorld) {
                 if (clientSmokeWorldFixture.result.status == CheckStatus.FAIL || clientSmokeWorldFixture.path == null) {
                     runClientWorld = CheckResult(CheckStatus.FAIL, "Client smoke world fixture failed: ${clientSmokeWorldFixture.result.note}")
                 } else {
-                    val harnessIssues = stageClientWorldHarness(outputDir)
+                    val harnessIssues = stageClientWorldHarness(modDir, strictReviewRequest)
                     if (harnessIssues.isNotEmpty()) {
                         runClientWorld = CheckResult(CheckStatus.FAIL, harnessIssues.joinToString("; "))
                     } else {
-                        val worldIssues = stageClientSmokeWorld(outputDir, clientSmokeWorldFixture.path)
-                        if (worldIssues.isNotEmpty()) {
-                            runClientWorld = CheckResult(CheckStatus.FAIL, worldIssues.joinToString("; "))
+                        val sealedPreparation = if (strictReviewRequest == null) {
+                            StrictReviewRuntimePreparation(null, emptyList())
                         } else {
-                            runClientWorld = runRuntimeGradleTask(
-                                outputDir,
-                                reportsDir,
-                                case.id,
-                                "runClientWorld",
-                                options.timeoutSeconds,
-                                RuntimeLogPolicy.clientWorld(options.logClean, options.progressGraceSeconds),
-                                prepared.path
+                            StrictReviewValidationRegistry.sealRuntimeManifest(strictReviewRequest)
+                        }
+                        if (sealedPreparation.issues.isNotEmpty()) {
+                            runClientWorld = CheckResult(
+                                CheckStatus.FAIL,
+                                sealedPreparation.issues.joinToString("; ")
                             )
+                        } else {
+                            strictReviewRequest = sealedPreparation.request ?: strictReviewRequest
+                            val worldIssues = stageClientSmokeWorld(modDir, clientSmokeWorldFixture.path)
+                            if (worldIssues.isNotEmpty()) {
+                                runClientWorld = CheckResult(CheckStatus.FAIL, worldIssues.joinToString("; "))
+                            } else {
+                                runClientWorld = runRuntimeGradleTask(
+                                    outputDir,
+                                    reportsDir,
+                                    case.id,
+                                    "runClientWorld",
+                                    options.timeoutSeconds,
+                                    RuntimeLogPolicy.clientWorld(
+                                        options.logClean,
+                                        options.progressGraceSeconds,
+                                        strictReviewRequest != null,
+                                        strictReviewRequest?.stationMapRequired == true
+                                    ),
+                                    prepared.path,
+                                    strictReviewRequest
+                                )
+                            }
                         }
                     }
                 }
             }
 
+            val strictReviewValidation = StrictReviewValidationRegistry.verifyFinal(
+                admission = strictReviewAdmission,
+                request = strictReviewRequest,
+                runtimePassed = runClientWorld.status == CheckStatus.PASS,
+                runtimeNote = runClientWorld.note,
+                runtimeLog = reportsDir.resolve("${case.id}-runClientWorld.log")
+            )
             val failedChecks = mutableListOf<String>()
             failedChecks.addAll(structureIssues)
             if (compile.status == CheckStatus.FAIL) failedChecks.add("compileJava failed: ${compile.note}")
+            if (dataGeneration.check.status == CheckStatus.FAIL) {
+                failedChecks.add("Create data generation failed: ${dataGeneration.check.note}")
+            }
             if (artifactPublish.status == CheckStatus.FAIL) {
                 failedChecks.add("benchmark artifact publish failed: ${artifactPublish.note}")
             }
@@ -1831,6 +2498,18 @@ class RealModBenchmarkTest {
             if (runClient.status == CheckStatus.FAIL) failedChecks.add("runClient failed: ${runClient.note}")
             if (runClientWorld.status == CheckStatus.FAIL) {
                 failedChecks.add("runClientWorld failed: ${runClientWorld.note}")
+            }
+            if (strictReviewValidation.state == "FAILED") {
+                failedChecks.add(
+                    "Strict review final gate failed: state=${strictReviewValidation.state}, " +
+                        "unresolved=${strictReviewValidation.unresolvedCount}; " +
+                        strictReviewValidation.issues.joinToString("; ")
+                )
+            } else if (strictReviewValidation.unresolvedCount > 0) {
+                failedChecks.add(
+                    "Strict review final gate failed: ${strictReviewValidation.unresolvedCount} unresolved " +
+                        "MEDIUM/LOW change(s)"
+                )
             }
 
             val allowedRuntimeIssues = listOf(runServer, runGameTestServer, runClient, runClientWorld)
@@ -1850,10 +2529,12 @@ class RealModBenchmarkTest {
                 note = note,
                 pipelineResult = pipelineResult,
                 compile = compile,
+                dataGeneration = dataGeneration,
                 runServer = runServer,
                 runGameTestServer = runGameTestServer,
                 runClient = runClient,
-                runClientWorld = runClientWorld
+                runClientWorld = runClientWorld,
+                strictReviewValidation = strictReviewValidation
             )
         } finally {
             terminateScopedJavaProcesses(outputDir)
@@ -1987,31 +2668,19 @@ class RealModBenchmarkTest {
 
     private fun resolvedGitCommit(repo: Path): String? =
         runCatching {
-            val process = ProcessBuilder("git", "rev-parse", "HEAD")
-                .directory(repo.toFile())
-                .redirectErrorStream(true)
-                .start()
-            val finished = process.waitFor(10, TimeUnit.SECONDS)
-            if (!finished) {
-                terminateProcessTree(process, forcibly = true)
-                return@runCatching null
-            }
-            val output = process.inputStream.bufferedReader().readText().trim()
-            output.lineSequence().firstOrNull()?.trim()?.takeIf { it.matches(Regex("[0-9a-fA-F]{40}")) }
+            val result = BenchmarkOwnedProcesses.capture(listOf("git", "rev-parse", "HEAD"), repo, 10)
+            if (!result.finished || result.exitCode != 0) return@runCatching null
+            result.output.lineSequence().firstOrNull()?.trim()?.takeIf { it.matches(Regex("[0-9a-fA-F]{40}")) }
         }.getOrNull()
 
     private fun git(workingDir: Path, vararg args: String): String {
-        val process = ProcessBuilder(listOf("git") + args)
-            .directory(workingDir.toFile())
-            .redirectErrorStream(true)
-            .start()
-        val finished = process.waitFor(30, TimeUnit.SECONDS)
-        if (!finished) {
-            terminateProcessTree(process, forcibly = true)
-        }
-        val output = process.inputStream.bufferedReader().readText().trim()
-        assertTrue(finished && process.exitValue() == 0, "git ${args.joinToString(" ")} failed: $output")
-        return output.lineSequence().lastOrNull()?.trim().orEmpty()
+        val result = BenchmarkOwnedProcesses.capture(listOf("git") + args, workingDir, 30)
+        assertTrue(
+            result.finished && result.exitCode == 0,
+            "git ${args.joinToString(" ")} failed: finished=${result.finished}; exitCode=${result.exitCode ?: "<timeout>"}; " +
+                "parentPid=${result.pid}; outputDrain=closed-file; output=${result.output}"
+        )
+        return result.output.trim().lineSequence().lastOrNull()?.trim().orEmpty()
     }
 
     private fun resolveSubdir(root: Path, subdir: String): Path =
@@ -2029,11 +2698,12 @@ class RealModBenchmarkTest {
     }
 
     private fun validateConvertedProject(
-        projectDir: Path,
+        buildRoot: Path,
         result: PipelineResult,
         options: BenchmarkOptions = BenchmarkOptions.fromEnvironment()
     ): MutableList<String> {
         val issues = mutableListOf<String>()
+        val projectDir = GradleModLayout.modModule(buildRoot)
         if (result.totalErrors > 0) {
             issues.add("Pipeline reported ${result.totalErrors} errors")
         }
@@ -2071,7 +2741,8 @@ class RealModBenchmarkTest {
             }
         }
 
-        val buildFiles = listOf(projectDir.resolve("build.gradle"), projectDir.resolve("build.gradle.kts"))
+        val buildFiles = listOf(projectDir, buildRoot).distinct()
+            .flatMap { listOf(it.resolve("build.gradle"), it.resolve("build.gradle.kts")) }
             .filter { it.exists() }
         if (buildFiles.isEmpty()) {
             issues.add("No build.gradle or build.gradle.kts after conversion")
@@ -2127,21 +2798,25 @@ class RealModBenchmarkTest {
             "ForgeRegistries." to Regex("""(?<!Neo)\bForgeRegistries\.""")
         )
         val hits = mutableListOf<String>()
-        val stream = Files.walk(srcDir)
-        try {
-            stream
-                .filter { Files.isRegularFile(it) && it.toString().endsWith(".java") }
+        val javaFiles = Files.walk(srcDir).use { stream ->
+            stream.filter { Files.isRegularFile(it) && it.toString().endsWith(".java") }
                 .filter { !srcDir.relativize(it).toString().replace('\\', '/').startsWith("references/") }
-                .forEach { file ->
-                    val active = activeCode(file.readText())
-                    for ((label, pattern) in patterns) {
-                        if (pattern.containsMatchIn(active)) {
-                            hits.add("${srcDir.relativize(file)} contains $label")
-                        }
-                    }
+                .toList()
+        }
+        // a class of the mod's own that shares a Forge class name (WorldEdit's ForgeRegistries) is
+        // no Forge reference: the Forge class itself needs a net.minecraftforge import
+        val projectTypes = javaFiles.mapNotNull { file ->
+            val typeName = file.fileName.toString().removeSuffix(".java")
+            typeName.takeIf { Regex("""\b(?:class|interface|enum|record)\s+${Regex.escape(it)}\b""").containsMatchIn(activeCode(file.readText())) }
+        }.toSet()
+        for (file in javaFiles) {
+            val active = activeCode(file.readText())
+            for ((label, pattern) in patterns) {
+                if (label.removeSuffix(".") in projectTypes) continue
+                if (pattern.containsMatchIn(active)) {
+                    hits.add("${srcDir.relativize(file)} contains $label")
                 }
-        } finally {
-            stream.close()
+            }
         }
         return hits
     }
@@ -2254,14 +2929,58 @@ class RealModBenchmarkTest {
         reportsDir: Path,
         caseId: String,
         task: String,
-        timeoutSeconds: Long
+        timeoutSeconds: Long,
+        additionalArguments: List<String> = emptyList()
     ): CheckResult {
         val command = gradleCommand(projectDir)
             ?: return CheckResult(CheckStatus.FAIL, "No Gradle wrapper found in converted output")
         val logFile = reportsDir.resolve("$caseId-$task.log")
 
         return runProcess(
-            command + listOf(task, "--no-daemon", "--stacktrace"),
+            command + listOf(task) + additionalArguments + listOf("--no-daemon", "--stacktrace"),
+            projectDir,
+            logFile,
+            timeoutSeconds,
+            scopedProcessDir = projectDir
+        )
+    }
+
+    private fun runLeasedGradleTask(
+        projectDir: Path,
+        reportsDir: Path,
+        caseId: String,
+        task: String,
+        timeoutSeconds: Long,
+        runtimeDirectory: Path,
+        sessionReceipt: Path
+    ): CheckResult {
+        val command = gradleCommand(projectDir)
+            ?: return CheckResult(CheckStatus.FAIL, "No Gradle wrapper found in converted output")
+        val logFile = reportsDir.resolve("$caseId-$task.log")
+        if (Files.exists(sessionReceipt, LinkOption.NOFOLLOW_LINKS)) {
+            return CheckResult(
+                CheckStatus.FAIL,
+                "Refusing to overwrite runtime lease receipt: $sessionReceipt"
+            )
+        }
+        val normalizedRuntimeDirectory = runtimeDirectory.toAbsolutePath().normalize()
+        val guarded = MinecraftRuntimeLease.guard(
+            projectDir,
+            command + listOf(
+                task,
+                "--no-daemon",
+                "--stacktrace",
+                "--console=plain",
+                "-PminecraftModTestingRuntimeDirectory=$normalizedRuntimeDirectory"
+            ),
+            MinecraftRuntimeLease.kindForTask(task),
+            sessionReceipt = MinecraftRuntimeLease.SessionReceiptContract(
+                runtimeDirectory = normalizedRuntimeDirectory,
+                receiptPath = sessionReceipt
+            )
+        )
+        return runProcess(
+            guarded,
             projectDir,
             logFile,
             timeoutSeconds,
@@ -2276,19 +2995,49 @@ class RealModBenchmarkTest {
         task: String,
         timeoutSeconds: Long,
         runtimeLogPolicy: RuntimeLogPolicy,
-        inputSourceDir: Path? = null
+        inputSourceDir: Path? = null,
+        strictReviewRequest: StrictReviewRuntimeRequest? = null
     ): CheckResult {
         val command = gradleCommand(projectDir)
             ?: return CheckResult(CheckStatus.FAIL, "No Gradle wrapper found in converted output")
         val logFile = reportsDir.resolve("$caseId-$task.log")
-        return runRuntimeProcess(
-            command + listOf(task, "--no-daemon", "--stacktrace"),
+        val gameTestWorld = if (task == "runGameTestServer") {
+            try {
+                GameTestWorldIsolation.prepare(projectDir, reportsDir, caseId)
+            } catch (failure: Exception) {
+                return CheckResult(CheckStatus.FAIL, "GameTest world isolation failed: ${failure.message}")
+            }
+        } else null
+        val harnessReceipt = strictReviewRequest?.let { request ->
+            MinecraftRuntimeLease.HarnessReceiptContract(
+                runtimeDirectory = request.runtimeDirectory,
+                receiptPath = request.wrapperReceiptPath,
+                harnessReceiptPath = if (request.stationMapRequired) {
+                    request.coordinatorReceiptPath
+                } else {
+                    request.receiptPath
+                },
+                expectedScenarioCount = if (request.stationMapRequired) {
+                    StrictSpawnValidationContract.scenarioIds.size + 1
+                } else {
+                    StrictSpawnValidationContract.scenarioIds.size
+                }
+            )
+        }
+        val result = runRuntimeProcess(
+            MinecraftRuntimeLease.guard(
+                projectDir,
+                command + listOf(task, "--no-daemon", "--stacktrace") + gameTestWorld?.gradleArguments.orEmpty(),
+                MinecraftRuntimeLease.kindForTask(task),
+                harnessReceipt
+            ),
             projectDir,
             logFile,
             timeoutSeconds,
             runtimeLogPolicy,
             inputSourceDir
         )
+        return if (gameTestWorld == null) result else result.copy(note = "${result.note}; ${gameTestWorld.note}")
     }
 
     private fun runProcess(
@@ -2305,28 +3054,25 @@ class RealModBenchmarkTest {
             .redirectOutput(logFile.toFile())
         configureJavaHome(processBuilder)
 
-        val process = processBuilder.start()
-
-        val finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
-        if (!finished) {
-            terminateProcessTree(process, forcibly = true)
-            val terminated = scopedProcessDir?.let(::terminateScopedJavaProcesses).orEmpty()
-            return CheckResult(
-                CheckStatus.FAIL,
-                "Timed out after ${timeoutSeconds}s; log=$logFile${scopedCleanupNote(terminated)}"
-            )
-        }
-        settleRuntimeProcess(process)
-        val terminated = scopedProcessDir?.let(::terminateScopedJavaProcesses).orEmpty()
-
-        val exitCode = process.exitValue()
-        return if (exitCode == 0) {
-            CheckResult(CheckStatus.PASS, "Passed; log=$logFile${scopedCleanupNote(terminated)}")
-        } else {
-            CheckResult(
-                CheckStatus.FAIL,
-                "Exited $exitCode; log=$logFile${scopedCleanupNote(terminated)}; tail=${logTail(logFile)}"
-            )
+        return BenchmarkOwnedProcesses.use(processBuilder) { process ->
+            val finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+            if (!finished) {
+                terminateProcessTree(process, forcibly = true)
+                val terminated = scopedProcessDir?.let(::terminateScopedJavaProcesses).orEmpty()
+                settleRuntimeProcess(process, logFile)
+                CheckResult(CheckStatus.FAIL,
+                    "Timed out after ${timeoutSeconds}s; log=$logFile${scopedCleanupNote(terminated)}")
+            } else {
+                settleRuntimeProcess(process, logFile)
+                val terminated = scopedProcessDir?.let(::terminateScopedJavaProcesses).orEmpty()
+                val exitCode = process.exitValue()
+                if (exitCode == 0) {
+                    CheckResult(CheckStatus.PASS, "Passed; log=$logFile${scopedCleanupNote(terminated)}")
+                } else {
+                    CheckResult(CheckStatus.FAIL,
+                        "Exited $exitCode; log=$logFile${scopedCleanupNote(terminated)}; tail=${logTail(logFile)}")
+                }
+            }
         }
     }
 
@@ -2336,7 +3082,8 @@ class RealModBenchmarkTest {
         logFile: Path,
         timeoutSeconds: Long,
         runtimeLogPolicy: RuntimeLogPolicy,
-        inputSourceDir: Path? = null
+        inputSourceDir: Path? = null,
+        requiresScopedJavaCleanup: Boolean = true
     ): CheckResult {
         logFile.parent?.createDirectories()
         Files.deleteIfExists(logFile)
@@ -2346,7 +3093,21 @@ class RealModBenchmarkTest {
             .redirectOutput(logFile.toFile())
         configureJavaHome(processBuilder)
 
-        val process = processBuilder.start()
+        return BenchmarkOwnedProcesses.use(processBuilder) { process ->
+            runStartedRuntimeProcess(process, workingDir, logFile, timeoutSeconds, runtimeLogPolicy,
+                inputSourceDir, requiresScopedJavaCleanup)
+        }
+    }
+
+    private fun runStartedRuntimeProcess(
+        process: Process,
+        workingDir: Path,
+        logFile: Path,
+        timeoutSeconds: Long,
+        runtimeLogPolicy: RuntimeLogPolicy,
+        inputSourceDir: Path?,
+        requiresScopedJavaCleanup: Boolean
+    ): CheckResult {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds)
         var ready = false
         var stopSent = false
@@ -2355,9 +3116,11 @@ class RealModBenchmarkTest {
         var terminateRequestedAt: Long? = null
         var runtimeControlError: String? = null
         var scopedCleanup = emptyList<Long>()
+        var ownedDescendants = emptyList<OwnedProcessIdentity>()
 
         while (System.nanoTime() < deadline) {
             val now = System.nanoTime()
+            ownedDescendants = captureOwnedDescendants(process, ownedDescendants)
             if (!ready && runtimeLogPolicy.ready(logFile)) {
                 ready = true
                 if (runtimeLogPolicy.stopCommand != null) {
@@ -2370,10 +3133,10 @@ class RealModBenchmarkTest {
                         stopSent = true
                     } catch (ex: Exception) {
                         runtimeControlError = "Failed to send runtime stop command: ${ex.message}"
-                        terminateProcessTree(process, forcibly = false)
+                        ownedDescendants = terminateProcessTree(process, forcibly = false, ownedDescendants)
                     }
                 } else if (runtimeLogPolicy.terminateAfterReady) {
-                    terminateProcessTree(process, forcibly = false)
+                    ownedDescendants = terminateProcessTree(process, forcibly = false, ownedDescendants)
                     terminateRequestedAt = now
                 }
             } else if (!ready && progressReachedAt == null && runtimeLogPolicy.progress(logFile)) {
@@ -2383,7 +3146,9 @@ class RealModBenchmarkTest {
             if (ready && terminateRequestedAt == null && runtimeLogPolicy.terminateAfterShutdownChecks &&
                 runtimeLogPolicy.shutdown(logFile)
             ) {
-                terminateProcessTree(process, forcibly = false)
+                if (process.isAlive) {
+                    ownedDescendants = terminateProcessTree(process, forcibly = false, ownedDescendants)
+                }
                 terminateRequestedAt = now
             }
 
@@ -2393,14 +3158,17 @@ class RealModBenchmarkTest {
                 now - progressAt > TimeUnit.SECONDS.toNanos(progressGrace)
             ) {
                 progressTimeoutTriggered = true
-                terminateProcessTree(process, forcibly = false)
+                ownedDescendants = terminateProcessTree(process, forcibly = false, ownedDescendants)
                 terminateRequestedAt = now
             }
 
-            if (!process.isAlive) break
+            if (!process.isAlive) {
+                terminateCapturedDescendantsAfterParentExit(process, ownedDescendants)
+                break
+            }
             val terminateAt = terminateRequestedAt
             if (terminateAt != null && System.nanoTime() - terminateAt > TimeUnit.SECONDS.toNanos(20)) {
-                terminateProcessTree(process, forcibly = true)
+                ownedDescendants = terminateProcessTree(process, forcibly = true, ownedDescendants)
                 process.waitFor(5, TimeUnit.SECONDS)
                 break
             }
@@ -2408,11 +3176,15 @@ class RealModBenchmarkTest {
         }
 
         if (process.isAlive) {
-            terminateProcessTree(process, forcibly = true)
+            ownedDescendants = terminateProcessTree(process, forcibly = true, ownedDescendants)
             process.waitFor(5, TimeUnit.SECONDS)
-            scopedCleanup = terminateScopedJavaProcesses(workingDir)
+            scopedCleanup = if (requiresScopedJavaCleanup) {
+                terminateScopedJavaProcesses(workingDir)
+            } else {
+                emptyList()
+            }
             if (process.isAlive || !runtimeLogPolicy.terminateAfterReady || !ready) {
-                settleRuntimeProcess(process)
+                settleRuntimeProcess(process, logFile)
                 return CheckResult(
                     CheckStatus.FAIL,
                     "Timed out after ${timeoutSeconds}s; ready=$ready; stopSent=$stopSent; " +
@@ -2420,8 +3192,11 @@ class RealModBenchmarkTest {
                 )
             }
         }
-        settleRuntimeProcess(process)
-        scopedCleanup = (scopedCleanup + terminateScopedJavaProcesses(workingDir)).distinct()
+        terminateCapturedDescendantsAfterParentExit(process, ownedDescendants)
+        settleRuntimeProcess(process, logFile)
+        if (requiresScopedJavaCleanup) {
+            scopedCleanup = (scopedCleanup + terminateScopedJavaProcesses(workingDir)).distinct()
+        }
 
         if (runtimeControlError != null) {
             return CheckResult(
@@ -2481,11 +3256,58 @@ class RealModBenchmarkTest {
         )
     }
 
-    private fun settleRuntimeProcess(process: Process) {
+    private fun settleRuntimeProcess(process: Process, logFile: Path) {
         runCatching { process.outputStream.close() }
         runCatching { process.inputStream.close() }
         runCatching { process.errorStream.close() }
         runCatching { process.waitFor(2, TimeUnit.SECONDS) }
+        BenchmarkOwnedProcesses.finish(process)
+        if (!process.isAlive) {
+            awaitRuntimeLogRelease(logFile)
+        }
+    }
+
+    private fun awaitRuntimeLogRelease(logFile: Path) {
+        if (!logFile.exists()) return
+
+        val probe = logFile.resolveSibling(
+            ".${logFile.fileName}.release-probe-${ProcessHandle.current().pid()}-${System.nanoTime()}"
+        )
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+        var movedToProbe = false
+        var lastFailure: Exception? = null
+
+        while (System.nanoTime() < deadline) {
+            try {
+                if (!movedToProbe) {
+                    Files.move(logFile, probe)
+                    movedToProbe = true
+                }
+                Files.move(probe, logFile)
+                return
+            } catch (ex: Exception) {
+                lastFailure = ex
+                if (movedToProbe && !probe.exists() && logFile.exists()) {
+                    return
+                }
+                Thread.sleep(50)
+            }
+        }
+
+        if (movedToProbe && probe.exists() && !logFile.exists()) {
+            try {
+                Files.move(probe, logFile)
+                return
+            } catch (ex: Exception) {
+                lastFailure = ex
+            }
+        }
+
+        throw java.io.IOException(
+            "Runtime log handle did not settle within 2s; original=$logFile; probe=$probe; " +
+                "fileUsers=${WindowsRuntimeLogOwners.describe(if (movedToProbe && probe.exists()) probe else logFile)}",
+            lastFailure
+        )
     }
 
     private fun stalledClientWorldCommand(tempDir: Path): List<String> {
@@ -2538,6 +3360,86 @@ class RealModBenchmarkTest {
                     "\nsleep 20\n"
             )
             listOf("sh", script.toString())
+        }
+    }
+
+    private fun heldLogGameTestShutdownCommand(tempDir: Path, logFile: Path): List<String> {
+        val readyLine =
+            "[06:14:13] [Server thread/INFO] [net.minecraft.gametest.framework.GameTestServer/]: All 36 required tests passed :)"
+        val shutdownLine =
+            "[06:14:15] [Server thread/INFO] [minecraft/MinecraftServer]: Stopping server"
+        val isWindows = System.getProperty("os.name").lowercase().contains("win")
+        return if (isWindows) {
+            val childScript = tempDir.resolve("hold-gametest-log.ps1")
+            val childReady = tempDir.resolve("gametest-held-log-child.ready")
+            val escapedLog = logFile.toString().replace("'", "''")
+            val escapedReady = childReady.toString().replace("'", "''")
+            childScript.writeText(
+                """
+                ${'$'}stream = [System.IO.File]::Open(
+                    '$escapedLog',
+                    [System.IO.FileMode]::Open,
+                    [System.IO.FileAccess]::ReadWrite,
+                    [System.IO.FileShare]::ReadWrite
+                )
+                try {
+                    Set-Content -LiteralPath '$escapedReady' -Value 'ready'
+                    Start-Sleep -Seconds 20
+                } finally {
+                    ${'$'}stream.Dispose()
+                }
+                """.trimIndent() + System.lineSeparator()
+            )
+
+            val parentScript = tempDir.resolve("held-log-gametest-shutdown.ps1")
+            val escapedChildScript = childScript.toString().replace("'", "''")
+            val escapedPid = tempDir.resolve("gametest-held-log-descendant.pid").toString().replace("'", "''")
+            parentScript.writeText(
+                """
+                ${'$'}child = Start-Process -FilePath powershell.exe `
+                    -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','$escapedChildScript') `
+                    -WindowStyle Hidden -PassThru
+                Set-Content -LiteralPath '$escapedPid' -Value ${'$'}child.Id
+                ${'$'}deadline = (Get-Date).AddSeconds(5)
+                while (-not (Test-Path -LiteralPath '$escapedReady') -and (Get-Date) -lt ${'$'}deadline) {
+                    Start-Sleep -Milliseconds 50
+                }
+                if (-not (Test-Path -LiteralPath '$escapedReady')) {
+                    throw 'held-log child did not acquire the runtime log'
+                }
+                Write-Output '$readyLine'
+                Start-Sleep -Seconds 2
+                Write-Output '$shutdownLine'
+                """.trimIndent() + System.lineSeparator()
+            )
+            listOf("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", parentScript.toString())
+        } else {
+            val childScript = tempDir.resolve("hold-gametest-log.sh")
+            val childReady = tempDir.resolve("gametest-held-log-child.ready")
+            val escapedLog = logFile.toString().replace("'", "'\"'\"'")
+            val escapedReady = childReady.toString().replace("'", "'\"'\"'")
+            childScript.writeText(
+                "#!/bin/sh\n" +
+                    "exec 3<> '$escapedLog'\n" +
+                    "printf '%s\\n' ready > '$escapedReady'\n" +
+                    "sleep 20\n"
+            )
+            val parentScript = tempDir.resolve("held-log-gametest-shutdown.sh")
+            val escapedChild = childScript.toString().replace("'", "'\"'\"'")
+            val escapedPid = tempDir.resolve("gametest-held-log-descendant.pid").toString().replace("'", "'\"'\"'")
+            parentScript.writeText(
+                "#!/bin/sh\n" +
+                    "sh '$escapedChild' &\n" +
+                    "child=\$!\n" +
+                    "printf '%s\\n' \"\$child\" > '$escapedPid'\n" +
+                    "i=0\n" +
+                    "while [ ! -f '$escapedReady' ] && [ \"\$i\" -lt 100 ]; do sleep 0.05; i=\$((i + 1)); done\n" +
+                    "[ -f '$escapedReady' ] || exit 7\n" +
+                    "printf '%s\\n' '$readyLine'\n" +
+                    "sleep 2\n" +
+                    "printf '%s\\n' '$shutdownLine'\n"
+            )
+            listOf("sh", parentScript.toString())
         }
     }
 
@@ -2696,6 +3598,22 @@ class RealModBenchmarkTest {
         }
     }
 
+    private fun writeBlockstateVariantEvidence(projectDir: Path) {
+        val assets = projectDir.resolve("src/main/resources/assets/example")
+        assets.resolve("blockstates").createDirectories()
+        assets.resolve("models/block").createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=example\n")
+        assets.resolve("blockstates/server.json").writeText(
+            """{"variants":{"active=false,state=0":{"model":"example:block/server_off"},"active=false,state=1":{"model":"example:block/server_off"},"active=true,state=0":{"model":"example:block/server_on"},"active=true,state=1":{"model":"example:block/server_on"}}}""" + "\n"
+        )
+        assets.resolve("models/block/server_on.json").writeText(
+            """{"textures":{"1":"example:block/server_front_on","particle":"server_front_on"},"elements":[]}""" + "\n"
+        )
+        assets.resolve("models/block/server_off.json").writeText(
+            """{"textures":{"1":"example:block/server_front_off"},"elements":[]}""" + "\n"
+        )
+    }
+
     private fun writeTextureMipEvidence(projectDir: Path, width: Int, height: Int) {
         val textureDir = projectDir.resolve("src/main/resources/assets/example/textures/block/fluids")
         textureDir.createDirectories()
@@ -2762,24 +3680,79 @@ class RealModBenchmarkTest {
         """.trimIndent() + "\n")
     }
 
-    private fun terminateProcessTree(process: Process, forcibly: Boolean) {
-        val descendants = process.toHandle().descendants().iterator().asSequence().toList().asReversed()
-        for (handle in descendants) {
-            if (forcibly) {
-                handle.destroyForcibly()
-            } else {
-                handle.destroy()
-            }
-        }
-        for (handle in descendants) {
-            runCatching { handle.onExit().get(2, TimeUnit.SECONDS) }
+    private fun terminateProcessTree(
+        process: Process,
+        forcibly: Boolean,
+        capturedDescendants: List<OwnedProcessIdentity> = emptyList()
+    ): List<OwnedProcessIdentity> {
+        val parent = process.toHandle()
+        val descendants = captureOwnedDescendants(process, capturedDescendants)
+        for (identity in descendants) {
+            val handle = matchingLiveProcess(identity) ?: continue
+            if (forcibly) handle.destroyForcibly() else handle.destroy()
         }
         if (forcibly) {
             process.destroyForcibly()
         } else {
             process.destroy()
         }
-        runCatching { process.toHandle().onExit().get(2, TimeUnit.SECONDS) }
+        if (forcibly) {
+            awaitOwnedDescendantExit(descendants)
+            runCatching { parent.onExit().get(2, TimeUnit.SECONDS) }
+        } else {
+            runCatching { parent.onExit().get(2, TimeUnit.SECONDS) }
+            if (!process.isAlive) {
+                terminateCapturedDescendantsAfterParentExit(process, descendants)
+            }
+        }
+        return descendants
+    }
+
+    private fun captureOwnedDescendants(
+        process: Process,
+        captured: List<OwnedProcessIdentity>
+    ): List<OwnedProcessIdentity> {
+        val observed = runCatching {
+            val stream = process.toHandle().descendants()
+            try {
+                stream.iterator().asSequence()
+                    .mapNotNull { handle ->
+                        handle.info().startInstant().orElse(null)?.let { startedAt ->
+                            OwnedProcessIdentity(handle.pid(), startedAt)
+                        }
+                    }
+                    .toList()
+                    .asReversed()
+            } finally {
+                stream.close()
+            }
+        }.getOrDefault(emptyList())
+        return (captured + observed).distinctBy { it.pid to it.startedAt }
+    }
+
+    private fun terminateCapturedDescendantsAfterParentExit(
+        process: Process,
+        captured: List<OwnedProcessIdentity>
+    ) {
+        if (process.isAlive || captured.isEmpty()) return
+        captured.mapNotNull(::matchingLiveProcess).forEach(ProcessHandle::destroyForcibly)
+        awaitOwnedDescendantExit(captured)
+    }
+
+    private fun matchingLiveProcess(identity: OwnedProcessIdentity): ProcessHandle? {
+        val handle = ProcessHandle.of(identity.pid).orElse(null) ?: return null
+        val currentStart = handle.info().startInstant().orElse(null) ?: return null
+        return handle.takeIf { currentStart == identity.startedAt && it.isAlive }
+    }
+
+    private fun awaitOwnedDescendantExit(captured: List<OwnedProcessIdentity>) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+        for (identity in captured) {
+            val handle = matchingLiveProcess(identity) ?: continue
+            val remaining = deadline - System.nanoTime()
+            if (remaining <= 0) return
+            runCatching { handle.onExit().get(remaining, TimeUnit.NANOSECONDS) }
+        }
     }
 
     private fun terminateScopedJavaProcesses(scopeDir: Path): List<Long> {
@@ -3070,7 +4043,9 @@ class RealModBenchmarkTest {
             "skipMultiplayerWarning" to "true",
             "tutorialStep" to "none",
             "pauseOnLostFocus" to "false",
-            "fullscreen" to "false"
+            "fullscreen" to "false",
+            // the client runs hidden on its own desktop; it must also be silent
+            "soundCategory_master" to "0.0"
         )
         val existing = linkedMapOf<String, String>()
         if (optionsFile.exists()) {
@@ -3140,7 +4115,10 @@ class RealModBenchmarkTest {
                 }
             """.trimIndent() + "\n")
 
-            val structureDir = projectDir.resolve("src/main/resources/gameteststructures")
+            // 1.21.1 dev runs (SharedConstants.IS_RUNNING_IN_IDE) load SNBT test structures from
+            // StructureUtils.testStructuresDir, gameteststructures/ under the run's working directory;
+            // resources only provide data/<ns>/structure/*.nbt
+            val structureDir = projectDir.resolve("run/gameteststructures")
             structureDir.createDirectories()
             val structure = structureDir.resolve("modporter_benchmark_empty.snbt")
             if (!structure.exists()) {
@@ -3223,28 +4201,114 @@ class RealModBenchmarkTest {
         return null
     }
 
-    private fun stageClientWorldHarness(projectDir: Path): List<String> {
+    private fun stageClientWorldHarness(
+        projectDir: Path,
+        strictReviewRequest: StrictReviewRuntimeRequest? = null
+    ): List<String> {
         val issues = mutableListOf<String>()
         val harnessPackage = benchmarkHarnessPackage(projectDir)
+        val modId = detectBenchmarkModId(projectDir) ?: projectDir.fileName.toString()
         val sourceDir = projectDir.resolve("src/main/java/${harnessPackage.replace('.', '/')}")
         sourceDir.createDirectories()
-        sourceDir.resolve("ModPorterClientWorldHarness.java").writeText(clientWorldHarnessSource(harnessPackage))
+        sourceDir.resolve(StrictSpawnValidationContract.GENERIC_HARNESS_FILE)
+            .writeText(clientWorldHarnessSource(harnessPackage))
+        if (strictReviewRequest != null) {
+            sourceDir.resolve(StrictSpawnValidationContract.GENERATED_HARNESS_FILE)
+                .writeText(LegacyClientSpawnRuntimeHarnessSource.source(harnessPackage, modId))
+            if (strictReviewRequest.stationMapRequired) {
+                sourceDir.resolve(StrictSpawnValidationContract.STATION_HARNESS_FILE)
+                    .writeText(CreateStationMapRuntimeHarnessSource.source(harnessPackage, modId))
+            }
+        }
 
-        val buildFile = projectDir.resolve("build.gradle")
+        // a Groovy MDK build, or the Kotlin-DSL module of a multi-project build
+        val kotlinDsl = !projectDir.resolve("build.gradle").exists() && projectDir.resolve("build.gradle.kts").exists()
+        val buildFile = projectDir.resolve(if (kotlinDsl) "build.gradle.kts" else "build.gradle")
         if (!buildFile.exists()) {
             issues.add("runClientWorld benchmark harness requires generated build.gradle at $buildFile")
             return issues
         }
 
-        val modId = detectBenchmarkModId(projectDir) ?: projectDir.fileName.toString()
-        val marker = "systemProperty 'modporter.benchmark.clientWorld', '$CLIENT_SMOKE_WORLD'"
-        val modIdMarker = "systemProperty 'modporter.benchmark.modId', '$modId'"
-        val content = buildFile.readText()
-        if (content.contains(marker) && content.contains(modIdMarker)) return issues
-        val patched = content.replace(
-            Regex("""(?m)^(\s*clientWorld\s*\{\s*\r?\n\s*client\(\)\s*\r?\n)"""),
-            "\$1            $marker\r\n            $modIdMarker\r\n"
-        )
+        fun systemProperty(name: String, value: String): String {
+            val normalized = value.replace('\\', '/')
+            return if (kotlinDsl) {
+                val escaped = normalized.replace("\\", "\\\\").replace("\"", "\\\"")
+                "systemProperty(\"$name\", \"$escaped\")"
+            } else {
+                val escaped = normalized.replace("\\", "\\\\").replace("'", "\\'")
+                "systemProperty '$name', '$escaped'"
+            }
+        }
+        val properties = buildList {
+            add(systemProperty("modporter.benchmark.clientWorld", CLIENT_SMOKE_WORLD))
+            add(systemProperty("modporter.benchmark.modId", modId))
+            add(systemProperty("modporter.benchmark.clientBrowse.completed", "false"))
+            if (strictReviewRequest != null) {
+                add(systemProperty("modporter.strictSpawn.enabled", "true"))
+                add(systemProperty("modporter.strictSpawn.profileId", strictReviewRequest.profileId))
+                add(systemProperty("modporter.strictSpawn.sessionId", strictReviewRequest.validationSessionId))
+                add(systemProperty("modporter.strictSpawn.expectedBindings", strictReviewRequest.manifestPath.toString()))
+                add(systemProperty("modporter.strictSpawn.receipt", strictReviewRequest.receiptPath.toString()))
+                add(systemProperty("modporter.strictSpawn.evidenceDir", strictReviewRequest.evidenceDir.toString()))
+                if (strictReviewRequest.stationMapRequired) {
+                    add(systemProperty("modporter.strictStation.enabled", "true"))
+                    add(
+                        systemProperty(
+                            "modporter.strictStation.profileId",
+                            CreateStationMapRuntimeValidation.PROFILE_ID
+                        )
+                    )
+                    add(
+                        systemProperty(
+                            "modporter.strictStation.sessionId",
+                            strictReviewRequest.validationSessionId
+                        )
+                    )
+                    add(
+                        systemProperty(
+                            "modporter.strictStation.expectedBindings",
+                            strictReviewRequest.manifestPath.toString()
+                        )
+                    )
+                    add(
+                        systemProperty(
+                            "modporter.strictStation.receipt",
+                            strictReviewRequest.stationReceiptPath.toString()
+                        )
+                    )
+                    add(
+                        systemProperty(
+                            "modporter.strictStation.evidenceDir",
+                            strictReviewRequest.evidenceDir.toString()
+                        )
+                    )
+                    add(systemProperty("modporter.clientWorldValidation.enabled", "true"))
+                    add(systemProperty("modporter.clientWorldValidation.completed", "false"))
+                    add(
+                        systemProperty(
+                            "modporter.clientWorldValidation.receipt",
+                            strictReviewRequest.coordinatorReceiptPath.toString()
+                        )
+                    )
+                }
+            }
+        }
+        val previous = buildFile.readText()
+        val propertyNames = properties.map { property ->
+            Regex("""systemProperty(?:\s+['"]|\(['"])([^'"]+)['"]""")
+                .find(property)?.groupValues?.get(1) ?: error("Unknown benchmark property: $property")
+        }.toSet()
+        val ownedProperty = Regex("""(?m)^[ \t]*systemProperty(?:\s+['"]|\(['"])([^'"]+)['"][^\r\n]*(?:\r?\n|$)""")
+        val content = previous.replace(ownedProperty) { match ->
+            if (match.groupValues[1] in propertyNames) "" else match.value
+        }
+        val clientWorldRun = if (kotlinDsl) {
+            Regex("""(?m)^(\s*register\(\s*"clientWorld"\s*\)\s*\{\s*\r?\n\s*client\(\)\s*\r?\n)""")
+        } else {
+            Regex("""(?m)^(\s*clientWorld\s*\{\s*\r?\n\s*client\(\)\s*\r?\n)""")
+        }
+        val propertyBlock = properties.joinToString("\r\n") { "            $it" }
+        val patched = content.replace(clientWorldRun, "\$1$propertyBlock\r\n")
         if (patched == content) {
             issues.add("Could not inject runClientWorld benchmark system property into $buildFile")
         } else {
@@ -3349,7 +4413,9 @@ class RealModBenchmarkTest {
             .joinToString("\n") { it.readText() }
 
         val aliases = linkedSetOf<String>()
-        val coordinateRegex = Regex("""fg\.deobf\(\s*['"]([^:'"]+):([^:'"]+):([^'"]+)['"]\s*\)""")
+        // The converted script no longer wraps the coordinate in fg.deobf(...); any quoted
+        // group:artifact:version that names the dependency is staged under its flatDir names.
+        val coordinateRegex = Regex("""['"]([A-Za-z0-9_.\-]+):([A-Za-z0-9_.\-]+):([^'"\s]+)['"]""")
         coordinateRegex.findAll(buildText).forEach { match ->
             val group = match.groupValues[1]
             val artifact = match.groupValues[2]
@@ -3382,6 +4448,7 @@ class RealModBenchmarkTest {
     }
 
     private fun configureJavaHome(processBuilder: ProcessBuilder) {
+        OwnedJavaProcessEnvironment.configure(processBuilder)
         val javaExecutable = Path.of(java21Executable()).toAbsolutePath().normalize()
         val javaBin = requireNotNull(javaExecutable.parent) {
             "Resolved Java 21 executable has no parent directory: $javaExecutable"
@@ -3471,7 +4538,7 @@ class RealModBenchmarkTest {
 
     private fun serverReachedReadyState(logFile: Path): Boolean {
         if (!logFile.exists()) return false
-        val log = logFile.readText()
+        val log = StrictUtf8RuntimeLog.asciiSearchText(logFile)
         return log.contains("Done (") || log.contains("For help, type")
     }
 
@@ -3483,11 +4550,18 @@ class RealModBenchmarkTest {
     ): RuntimeLogAudit {
         if (!logFile.exists()) return RuntimeLogAudit(listOf("log file missing: $logFile"), emptyList())
 
+        val decoded = StrictUtf8RuntimeLog.decode(logFile)
+        if (decoded is StrictUtf8RuntimeLog.DecodeResult.Failure) {
+            return RuntimeLogAudit(listOf(decoded.note()), emptyList())
+        }
+        val lines = (decoded as StrictUtf8RuntimeLog.DecodeResult.Success).text.lines()
         val findings = mutableListOf<String>()
         val allowedIssues = mutableListOf<String>()
+        val flywheelJarJarEvidence =
+            if (failOnWarnings) projectDir?.let { FlywheelJarJarRuntimeEvidence.audit(it, lines) }
+            else null
         val evidenceCache = RuntimeLogEvidenceCache(projectDir, inputSourceDir)
         var clientShutdownStarted = false
-        val lines = logFile.readText().lines()
         lines.forEachIndexed { index, line ->
             if (line.contains("[minecraft/Minecraft]: Stopping!")) {
                 clientShutdownStarted = true
@@ -3497,7 +4571,9 @@ class RealModBenchmarkTest {
             val fatal = runtimeFatalPatterns.any { it.containsMatchIn(line) }
             val warning = failOnWarnings && runtimeWarningPatterns.any { it.containsMatchIn(line) }
             if (fatal || warning) {
-                val allowedIssue = allowedKnownUpstreamRuntimeIssue(lines, index, evidenceCache)
+                val allowedIssue =
+                    flywheelJarJarEvidence?.allowedIssueAt(index)
+                        ?: allowedKnownUpstreamRuntimeIssue(lines, index, evidenceCache)
                 if (allowedIssue != null) {
                     allowedIssues.add("line ${index + 1}: $allowedIssue")
                     return@forEachIndexed
@@ -3611,6 +4687,12 @@ class RealModBenchmarkTest {
         sourceInheritedMissingModelEvidence(lines[index], evidenceCache)?.let {
             return "source-inherited missing model warning ($it)"
         }
+        sourceInheritedMissingBlockstateVariantEvidence(lines[index], evidenceCache)?.let {
+            return "source-inherited missing blockstate variant warning ($it)"
+        }
+        sourceInheritedMissingModelTextureEvidence(lines, index, evidenceCache)?.let {
+            return "source-inherited missing model texture warning ($it)"
+        }
         sourceInheritedTextureMipEvidence(lines[index], evidenceCache)?.let {
             return "source-inherited texture mip warning ($it)"
         }
@@ -3619,6 +4701,9 @@ class RealModBenchmarkTest {
         }
         sourceInheritedGameTestServerLagEvidence(lines, index, evidenceCache)?.let {
             return "source-inherited GameTest server lag warning ($it)"
+        }
+        journeyMapSepiaColorModulatorEvidence(lines, index, evidenceCache)?.let {
+            return "pinned JourneyMap sepia shader metadata warning ($it)"
         }
         return null
     }
@@ -3948,6 +5033,242 @@ class RealModBenchmarkTest {
         val modelPath: String
     )
 
+
+    private fun journeyMapSepiaColorModulatorEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache,
+        expectedSha256: String = JOURNEYMAP_RUNTIME_SHA256,
+        expectedSize: Long = JOURNEYMAP_RUNTIME_SIZE,
+        requirePinnedMapping: Boolean = true
+    ): String? {
+        val loggedMessage = Regex(
+            """^\[[^\]\r\n]+]\s+\[Render thread/WARN]\s+\[minecraft/ShaderInstance]:\s+(.+)$"""
+        ).matchEntire(lines[index])?.groupValues?.get(1) ?: return null
+        val exactMessage = journeyMapSepiaColorModulatorMessages.singleOrNull {
+            loggedMessage == it
+        } ?: return null
+        val artifact = evidenceCache.journeyMapSepiaEvidence(
+            lines,
+            expectedSha256,
+            expectedSize,
+            requirePinnedMapping
+        ) ?: return null
+        return "$artifact; ${exactMessage.substringBefore(" could not find uniform")}"
+    }
+
+    private fun journeyMapSepiaArtifactEvidence(
+        lines: List<String>,
+        expectedSha256: String,
+        expectedSize: Long,
+        requirePinnedMapping: Boolean
+    ): String? {
+        if (requirePinnedMapping && !journeyMapRuntimePinMatches(expectedSha256)) return null
+        val loadPattern = Regex("""Loading mod file (.+?\.jar) with languages(?:\s|$)""")
+        val loadedJars = lines.mapNotNull { line ->
+            loadPattern.find(line)?.groupValues?.get(1)?.trim()?.trim('"')
+        }.mapNotNull { raw ->
+            runCatching { Path.of(raw).toAbsolutePath().normalize() }.getOrNull()
+        }.distinct().filter { jar ->
+            Files.isRegularFile(jar) && modIdFromJar(jar) == "journeymap"
+        }
+        if (loadedJars.size != 1) return null
+        val jar = loadedJars.single()
+        if (Files.size(jar) != expectedSize || sha256File(jar) != expectedSha256.lowercase()) {
+            return null
+        }
+
+        val vertexShader = readJarEntryText(
+            jar,
+            "assets/journeymap/shaders/core/jm_position_tex_color.vsh"
+        ) ?: return null
+        if (Regex("""\bColorModulator\b""").containsMatchIn(vertexShader)) return null
+        for (shaderIndex in 1..3) {
+            val base = "assets/journeymap/shaders/core/sepia_$shaderIndex"
+            val descriptor = readJarEntryText(jar, "$base.json") ?: return null
+            val fragmentShader = readJarEntryText(jar, "$base.fsh") ?: return null
+            if (!journeyMapSepiaDescriptorMatches(descriptor, shaderIndex)) return null
+            val colorModulatorCount =
+                Regex("""\bColorModulator\b""").findAll(fragmentShader).count()
+            if (shaderIndex < 3) {
+                if (
+                    colorModulatorCount != 1 ||
+                    !Regex("""(?m)^\s*uniform\s+vec4\s+ColorModulator\s*;\s*$""")
+                        .containsMatchIn(fragmentShader)
+                ) {
+                    return null
+                }
+            } else if (colorModulatorCount != 0) {
+                return null
+            }
+        }
+        return "unique loaded full JourneyMap jar ${jar.fileName} has sha256 ${expectedSha256.lowercase()} and exact sepia descriptor/shader ownership"
+    }
+
+    private fun journeyMapSepiaDescriptorMatches(text: String, shaderIndex: Int): Boolean =
+        runCatching {
+            val descriptor = Json.parseToJsonElement(text).jsonObject
+            if (
+                descriptor["vertex"]?.jsonPrimitive?.contentOrNull !=
+                "journeymap:jm_position_tex_color" ||
+                descriptor["fragment"]?.jsonPrimitive?.contentOrNull !=
+                "journeymap:sepia_$shaderIndex"
+            ) {
+                return@runCatching false
+            }
+            val uniforms = descriptor["uniforms"]?.jsonArray ?: return@runCatching false
+            val colorModulator = uniforms.map { it.jsonObject }.singleOrNull {
+                it["name"]?.jsonPrimitive?.contentOrNull == "ColorModulator"
+            } ?: return@runCatching false
+            colorModulator["type"]?.jsonPrimitive?.contentOrNull == "float" &&
+                colorModulator["count"]?.jsonPrimitive?.contentOrNull == "4" &&
+                colorModulator["values"]?.jsonArray?.let { values ->
+                    values.size == 4 &&
+                        values.all {
+                            it.jsonPrimitive.contentOrNull?.toDoubleOrNull() == 1.0
+                        }
+                } == true
+        }.getOrDefault(false)
+
+    private fun journeyMapRuntimePinMatches(expectedSha256: String): Boolean =
+        runCatching {
+            val mapping = Path.of(System.getProperty("user.dir"))
+                .resolve("src/main/resources/mappings/forge2neo/neoforge-deps.json")
+            val dependencies = Json.parseToJsonElement(mapping.readText())
+                .jsonObject
+                .getValue("dependencies")
+                .jsonArray
+            val staging = dependencies.mapNotNull { dependency ->
+                dependency.jsonObject["runtimeArtifactStaging"]?.jsonObject
+            }.singleOrNull {
+                it["id"]?.jsonPrimitive?.contentOrNull == "journeymap"
+            } ?: return@runCatching false
+            staging["coordinate"]?.jsonPrimitive?.contentOrNull ==
+                "maven.modrinth:journeymap:1.21.1-6.0.0-beta.54+neoforge" &&
+                staging["sha256"]?.jsonPrimitive?.contentOrNull ==
+                expectedSha256.lowercase() &&
+                staging["runtimeFileName"]?.jsonPrimitive?.contentOrNull ==
+                "journeymap-121d84332dba0910.jar"
+        }.getOrDefault(false)
+
+    private fun sha256File(path: Path): String =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(Files.readAllBytes(path))
+            .joinToString("") { "%02x".format(it) }
+
+    private val journeyMapSepiaColorModulatorMessages = setOf(
+        "Shader journeymap:sepia_1 could not find uniform named ColorModulator in the specified shader program.",
+        "Shader journeymap:sepia_2 could not find uniform named ColorModulator in the specified shader program.",
+        "Shader journeymap:sepia_3 could not find uniform named ColorModulator in the specified shader program."
+    )
+
+    private val JOURNEYMAP_RUNTIME_SHA256 =
+        "121d84332dba09100ea8c654a8c5b75bdf1257639d00aca1210c5dc31f36cb38"
+    private val JOURNEYMAP_RUNTIME_SIZE = 3_546_019L
+    /**
+     * `Exception loading blockstate definition: 'ns:blockstates/x.json' missing model for variant:
+     * 'ns:x#a=1,b=2'`: the mod's own definition when the input and converted blockstate files are
+     * the same JSON and none of their variants covers that state (1.20.1 resolved and warned about
+     * the same file the same way).
+     */
+    private fun sourceInheritedMissingBlockstateVariantEvidence(
+        line: String,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val warning = Regex(
+            """Exception loading blockstate definition: '([a-z0-9_.-]+):blockstates/([a-z0-9_./-]+)\.json' missing model for variant: '([a-z0-9_.-]+):([a-z0-9_./-]+)#([^']*)'"""
+        ).find(line) ?: return null
+        val (namespace, block, stateNamespace, stateBlock, properties) = warning.destructured
+        if (namespace != stateNamespace || block != stateBlock) return null
+        val project = evidenceCache.projectDir ?: return null
+        val sourceDir = evidenceCache.inputSourceDir ?: benchmarkInputSourceDir(project) ?: return null
+        if (namespace != (evidenceCache.targetMod ?: return null)) return null
+        val relative = "assets/$namespace/blockstates/$block.json"
+        val converted = resourceJsonObject(project, relative) ?: return null
+        val input = resourceJsonObject(sourceDir, relative) ?: return null
+        if (converted != input) return null
+        val variants = converted["variants"] as? JsonObject ?: return null
+        val state = blockStateProperties(properties) ?: return null
+        if (variants.keys.any { key -> blockStateProperties(key)?.all { (name, value) -> state[name] == value } == true }) return null
+        return "input and converted blockstate '$relative' are identical and none of their ${variants.size} variants covers '$properties'"
+    }
+
+    /**
+     * `Missing textures in model ns:x#a=1:` followed by indented `atlas:textures/atlas/blocks.png:tns:path`
+     * lines: the mod's own references when the input and converted blockstate map that state to the
+     * same model, that model's `textures` are the same in both, each listed texture is one of them
+     * (an unqualified name resolves to `minecraft`), and neither resource tree provides the file.
+     */
+    private fun sourceInheritedMissingModelTextureEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val header = Regex("""Missing textures in model ([a-z0-9_.-]+):([a-z0-9_./-]+)#([^:\s]*):\s*$""").find(lines[index]) ?: return null
+        val (namespace, block, properties) = header.destructured
+        val project = evidenceCache.projectDir ?: return null
+        val sourceDir = evidenceCache.inputSourceDir ?: benchmarkInputSourceDir(project) ?: return null
+        if (namespace != (evidenceCache.targetMod ?: return null)) return null
+        val listed = Regex("""^\s+[a-z0-9_.-]+:textures/atlas/[a-z0-9_./-]+\.png:([a-z0-9_.-]+):([a-z0-9_./-]+)\s*$""")
+        val textures = mutableListOf<Pair<String, String>>()
+        var next = index + 1
+        while (next < lines.size && lines[next].isNotBlank() && lines[next][0].isWhitespace()) {
+            val texture = listed.find(lines[next]) ?: return null
+            textures += texture.groupValues[1] to texture.groupValues[2]
+            next++
+        }
+        if (textures.isEmpty()) return null
+        val blockstate = "assets/$namespace/blockstates/$block.json"
+        val model = blockstateVariantModel(project, blockstate, properties) ?: return null
+        if (blockstateVariantModel(sourceDir, blockstate, properties) != model) return null
+        val modelRelative = "assets/${model.first}/models/${model.second}.json"
+        val convertedTextures = (resourceJsonObject(project, modelRelative)?.get("textures") as? JsonObject) ?: return null
+        val inputTextures = (resourceJsonObject(sourceDir, modelRelative)?.get("textures") as? JsonObject) ?: return null
+        if (convertedTextures != inputTextures) return null
+        val references = convertedTextures.values.mapNotNull { (it as? JsonPrimitive)?.takeIf { value -> value.isString }?.content }
+        val missing = textures.map { (textureNamespace, texturePath) ->
+            val referenced = references.any { it == "$textureNamespace:$texturePath" || (textureNamespace == "minecraft" && it == texturePath) }
+            if (!referenced) return null
+            val textureRelative = "assets/$textureNamespace/textures/$texturePath.png"
+            if (resourceFile(project, textureRelative) != null || resourceFile(sourceDir, textureRelative) != null) return null
+            textureRelative
+        }
+        return "input and converted model '$modelRelative' reference the same textures and neither provides ${missing.joinToString { "'$it'" }}"
+    }
+
+    /** `a=1,b=2` as a map; empty for the catch-all variant key; null for anything else. */
+    private fun blockStateProperties(text: String): Map<String, String>? {
+        if (text.isEmpty()) return emptyMap()
+        val properties = linkedMapOf<String, String>()
+        for (entry in text.split(',')) {
+            val separator = entry.indexOf('=')
+            if (separator <= 0 || separator == entry.length - 1) return null
+            properties[entry.substring(0, separator)] = entry.substring(separator + 1)
+        }
+        return properties
+    }
+
+    /** The one model (namespace to path) a blockstate's variants give a state, or null when none or several. */
+    private fun blockstateVariantModel(root: Path, relative: String, properties: String): Pair<String, String>? {
+        val variants = resourceJsonObject(root, relative)?.get("variants") as? JsonObject ?: return null
+        val state = blockStateProperties(properties) ?: return null
+        val models = variants.entries
+            .filter { (key, _) -> blockStateProperties(key)?.all { (name, value) -> state[name] == value } == true }
+            .flatMap { (_, value) -> if (value is JsonArray) value.toList() else listOf(value) }
+            .mapNotNull { ((it as? JsonObject)?.get("model") as? JsonPrimitive)?.takeIf { model -> model.isString }?.content }
+            .distinct()
+        val model = models.singleOrNull() ?: return null
+        return if (model.contains(':')) model.substringBefore(':') to model.substringAfter(':') else "minecraft" to model
+    }
+
+    private fun resourceFile(projectDir: Path, relative: String): Path? =
+        resourceRoots(projectDir).map { it.resolve(relative) }.firstOrNull { it.exists() }
+
+    private fun resourceJsonObject(projectDir: Path, relative: String): JsonObject? =
+        resourceFile(projectDir, relative)?.let { file ->
+            runCatching { Json.parseToJsonElement(file.readText()) as? JsonObject }.getOrNull()
+        }
+
     private fun sourceInheritedTextureMipEvidence(
         line: String,
         evidenceCache: RuntimeLogEvidenceCache
@@ -4249,7 +5570,8 @@ class RealModBenchmarkTest {
         private val textMemo = mutableMapOf<String, Boolean>()
         private val externalConfigMemo = mutableMapOf<String, String?>()
         private val dependencyIdMemo = mutableMapOf<String, Boolean>()
-
+        private val journeyMapSepiaMemo = mutableMapOf<String, String?>()
+        private val journeyMapSepiaComputed = mutableSetOf<String>()
         fun containsFileNamed(fileName: String): Boolean =
             fileNameMemo.getOrPut(fileName) {
                 projectDir?.let { projectContainsFileNamed(it, fileName) } == true ||
@@ -4277,6 +5599,23 @@ class RealModBenchmarkTest {
             dependencyIdMemo.getOrPut(id) {
                 projectDir?.let { activeBuildFileContainsDependencyId(it, id) } == true
             }
+        fun journeyMapSepiaEvidence(
+            lines: List<String>,
+            expectedSha256: String,
+            expectedSize: Long,
+            requirePinnedMapping: Boolean
+        ): String? {
+            val key = "$expectedSha256:$expectedSize:$requirePinnedMapping"
+            if (journeyMapSepiaComputed.add(key)) {
+                journeyMapSepiaMemo[key] = journeyMapSepiaArtifactEvidence(
+                    lines,
+                    expectedSha256,
+                    expectedSize,
+                    requirePinnedMapping
+                )
+            }
+            return journeyMapSepiaMemo[key]
+        }
     }
 
     private fun activeBuildFileContainsDependencyId(projectDir: Path, id: String): Boolean {
@@ -4584,7 +5923,11 @@ class RealModBenchmarkTest {
 
     private fun logTail(logFile: Path, lines: Int = 40): String {
         if (!logFile.exists()) return "(no log)"
-        return logFile.readText().lines().takeLast(lines).joinToString("\\n")
+        return when (val decoded = StrictUtf8RuntimeLog.decode(logFile)) {
+            is StrictUtf8RuntimeLog.DecodeResult.Success ->
+                decoded.text.lines().takeLast(lines).joinToString("\\n")
+            is StrictUtf8RuntimeLog.DecodeResult.Failure -> decoded.note()
+        }
     }
 
     private fun localSourceOverrideKey(id: String): String =
@@ -4688,6 +6031,121 @@ class RealModBenchmarkTest {
         return selected.values.toList()
     }
 
+    @Test
+    fun `benchmark run root reserves a unique repository child`(@TempDir tempDir: Path) {
+        val runRoot = prepareBenchmarkReportRoot(tempDir, "strict87-20261101")
+        val expected = tempDir.resolve("build/real-mod-benchmark/runs/strict87-20261101")
+            .toAbsolutePath()
+            .normalize()
+
+        assertTrue(runRoot == expected, "Expected $expected, got $runRoot")
+        assertTrue(runRoot.isDirectory(), "Expected isolated run root to be reserved")
+        assertTrue(!tempDir.resolve("build/real-mod-benchmark/tmp").exists(), "Shared tmp must remain untouched")
+        assertTrue(
+            runCatching { prepareBenchmarkReportRoot(tempDir, "strict87-20261101") }.isFailure,
+            "Reusing a run id must fail instead of resetting its evidence"
+        )
+    }
+
+    @Test
+    fun `benchmark run root keeps shared default and rejects path-shaped ids`(@TempDir tempDir: Path) {
+        val sharedRoot = prepareBenchmarkReportRoot(tempDir, null)
+        val expected = tempDir.resolve("build/real-mod-benchmark").toAbsolutePath().normalize()
+        assertTrue(sharedRoot == expected, "Expected unchanged shared default root")
+        assertTrue(!sharedRoot.exists(), "Resolving the default root must not reserve it")
+
+        listOf("", ".", "..", "../escape", "nested/run", """nested\run""", "has space", "C:escape").forEach { runId ->
+            assertTrue(
+                runCatching { prepareBenchmarkReportRoot(tempDir, runId) }.isFailure,
+                "Expected path-shaped run id to be rejected: '$runId'"
+            )
+        }
+    }
+
+    @Test
+    fun `benchmark run root rejects existing files`(@TempDir tempDir: Path) {
+        val runsRoot = tempDir.resolve("build/real-mod-benchmark/runs")
+        runsRoot.createDirectories()
+        runsRoot.resolve("existing-file").writeText("evidence")
+        assertTrue(
+            runCatching { prepareBenchmarkReportRoot(tempDir, "existing-file") }.isFailure,
+            "Existing files must not be reused as benchmark roots"
+        )
+    }
+
+    @Test
+    fun `benchmark run root rejects broken links`(@TempDir tempDir: Path) {
+        val runsRoot = tempDir.resolve("build/real-mod-benchmark/runs")
+        runsRoot.createDirectories()
+        val brokenLink = runsRoot.resolve("broken-link")
+        try {
+            Files.createSymbolicLink(brokenLink, runsRoot.resolve("missing-target"))
+        } catch (e: Exception) {
+            assumeTrue(false, "Symbolic-link creation is unavailable: ${e::class.simpleName}: ${e.message}")
+            return
+        }
+        assertTrue(
+            runCatching { prepareBenchmarkReportRoot(tempDir, "broken-link") }.isFailure,
+            "Broken links must count as existing evidence"
+        )
+    }
+
+    @Test
+    fun `benchmark run root rejects a filesystem link escaping the repository`(@TempDir tempDir: Path) {
+        val repoRoot = tempDir.resolve("repo").also { it.createDirectories() }
+        val outside = tempDir.resolve("outside").also { it.createDirectories() }
+        try {
+            Files.createSymbolicLink(repoRoot.resolve("build"), outside)
+        } catch (e: Exception) {
+            assumeTrue(false, "Symbolic-link creation is unavailable: ${e::class.simpleName}: ${e.message}")
+            return
+        }
+
+        assertTrue(
+            runCatching { prepareBenchmarkReportRoot(repoRoot, "strict87-escape") }.isFailure,
+            "A linked benchmark ancestor outside the repository must be rejected"
+        )
+    }
+
+    private fun prepareBenchmarkReportRoot(repoRoot: Path, runId: String?): Path {
+        val normalizedRepoRoot = repoRoot.toAbsolutePath().normalize()
+        val sharedRoot = normalizedRepoRoot.resolve("build/real-mod-benchmark")
+        if (runId == null) return sharedRoot
+
+        require(Regex("""[A-Za-z0-9][A-Za-z0-9_-]{0,79}""").matches(runId)) {
+            "MODPORTER_BENCHMARK_RUN_ID must be one path-safe segment"
+        }
+        val runsRoot = sharedRoot.resolve("runs")
+        val runRoot = runsRoot.resolve(runId).normalize()
+        require(runRoot.parent == runsRoot) { "Benchmark run root escaped its owned runs directory: $runRoot" }
+        require(!Files.exists(runRoot, LinkOption.NOFOLLOW_LINKS)) {
+            "Benchmark run id already exists; choose a unique id to preserve its evidence: $runRoot"
+        }
+
+        val realRepoRoot = normalizedRepoRoot.toRealPath()
+        var existingAncestor = runsRoot
+        while (!Files.exists(existingAncestor, LinkOption.NOFOLLOW_LINKS)) {
+            existingAncestor = existingAncestor.parent
+                ?: error("Benchmark output root has no existing ancestor: $runsRoot")
+        }
+        require(existingAncestor.toRealPath().startsWith(realRepoRoot)) {
+            "Benchmark output root resolves outside the repository: $runsRoot"
+        }
+
+        runsRoot.createDirectories()
+        require(runsRoot.toRealPath().startsWith(realRepoRoot)) {
+            "Benchmark output root resolves outside the repository: $runsRoot"
+        }
+        try {
+            Files.createDirectory(runRoot)
+        } catch (e: FileAlreadyExistsException) {
+            throw IllegalArgumentException(
+                "Benchmark run id was reserved concurrently; choose a unique id: $runRoot",
+                e
+            )
+        }
+        return runRoot
+    }
     private fun renderReport(outcomes: List<BenchmarkOutcome>, options: BenchmarkOptions): String =
         buildString {
             appendLine("# Real Mod Benchmark Report")
@@ -4705,13 +6163,15 @@ class RealModBenchmarkTest {
             appendLine("| logClean | ${options.logClean} |")
             appendLine("| keepWork | ${options.keepWork} |")
             appendLine("| updateReadme | ${options.updateReadme} |")
+            appendLine("| runId | ${options.runId ?: "shared-default"} |")
+            appendLine("| outputRoot | `${options.outputRootLabel()}` |")
             appendLine("| timeoutSeconds | ${options.timeoutSeconds} |")
             appendLine("| progressGraceSeconds | ${options.progressGraceSeconds} |")
             appendLine("| requested cases | ${options.caseIds?.joinToString(",") ?: "all"} |")
             appendLine("| resolved cases | ${outcomes.joinToString(",") { it.case.id }} |")
             appendLine()
-            appendLine("| Mod | Status | Changes | High | Medium | Low | Compile | runServer | runGameTestServer | runClient | runClientWorld | Note |")
-            appendLine("|-----|--------|---------|------|--------|-----|---------|-----------|-------------------|-----------|----------------|------|")
+            appendLine("| Mod | Status | Changes | High | Medium | Low | Review Raw | Validated | Unresolved | Compile | Data Maps | runServer | runGameTestServer | runClient | runClientWorld | Note |")
+            appendLine("|-----|--------|---------|------|--------|-----|------------|-----------|------------|---------|-----------|-----------|-------------------|-----------|----------------|------|")
             for (outcome in outcomes) {
                 val result = outcome.pipelineResult
                 appendLine("| ${outcome.case.displayName} | ${outcome.status} | " +
@@ -4719,7 +6179,10 @@ class RealModBenchmarkTest {
                     "${result?.passResults?.sumOf { it.highConfidence } ?: "-"} | " +
                     "${result?.passResults?.sumOf { it.mediumConfidence } ?: "-"} | " +
                     "${result?.passResults?.sumOf { it.lowConfidence } ?: "-"} | " +
-                    "${outcome.compile.status} | ${outcome.runServer.status} | " +
+                    "${outcome.rawReviewSignalCount()} | ${outcome.validatedReviewSignalCount()} | " +
+                    "${outcome.unresolvedReviewSignalCount()} | " +
+                    "${outcome.compile.status} | ${outcome.dataGeneration.check.status} | " +
+                    "${outcome.runServer.status} | " +
                     "${outcome.runGameTestServer.status} | ${outcome.runClient.status} | " +
                     "${outcome.runClientWorld.status} | ${outcome.note.replace("|", "\\|")} |")
             }
@@ -4788,6 +6251,8 @@ class RealModBenchmarkTest {
                 "logClean" to options.logClean,
                 "keepWork" to options.keepWork,
                 "updateReadme" to options.updateReadme,
+                "runId" to options.runId,
+                "outputRoot" to options.outputRootLabel(),
                 "timeoutSeconds" to options.timeoutSeconds,
                 "progressGraceSeconds" to options.progressGraceSeconds,
                 "requestedCases" to (options.caseIds ?: listOf("all")),
@@ -4805,7 +6270,10 @@ class RealModBenchmarkTest {
                 "low" to outcomes.sumOf { it.pipelineResult?.passResults?.sumOf { pass -> pass.lowConfidence } ?: 0 },
                 "skippedTransforms" to outcomes.sumOf { it.pipelineResult?.totalSkipped ?: 0 },
                 "errors" to outcomes.sumOf { it.pipelineResult?.totalErrors ?: 0 },
-                "reviewSignalCount" to outcomes.sumOf { it.reviewSignalCount() }
+                "reviewSignalCount" to outcomes.sumOf { it.reviewSignalCount() },
+                "rawReviewSignalCount" to outcomes.sumOf { it.rawReviewSignalCount() },
+                "validatedReviewSignalCount" to outcomes.sumOf { it.validatedReviewSignalCount() },
+                "unresolvedReviewSignalCount" to outcomes.sumOf { it.unresolvedReviewSignalCount() }
             )
         )
         return jsonValue(payload) + "\n"
@@ -4936,11 +6404,17 @@ class RealModBenchmarkTest {
             "skippedTransforms" to (result?.totalSkipped ?: 0),
             "errors" to (result?.totalErrors ?: 0),
             "reviewSignalCount" to reviewSignalCount(),
-            "manualInterventionRequired" to (reviewSignalCount() > 0),
+            "rawReviewSignalCount" to rawReviewSignalCount(),
+            "validatedReviewSignalCount" to validatedReviewSignalCount(),
+            "unresolvedReviewSignalCount" to unresolvedReviewSignalCount(),
+            "manualInterventionRequired" to
+                (unresolvedReviewSignalCount() + (result?.totalSkipped ?: 0) + (result?.totalErrors ?: 0) > 0),
+            "strictReviewValidation" to strictReviewValidation.toTelemetryMap(),
             "allowedRuntimeIssueClasses" to allowedRuntimeIssueClasses(),
             "passes" to passRows,
             "checks" to linkedMapOf(
                 "compileJava" to compile.toTelemetryMap(),
+                "dataGeneration" to dataGeneration.toTelemetryMap(),
                 "runServer" to runServer.toTelemetryMap(),
                 "runGameTestServer" to runGameTestServer.toTelemetryMap(),
                 "runClient" to runClient.toTelemetryMap(),
@@ -4955,6 +6429,21 @@ class RealModBenchmarkTest {
         return result.passResults.sumOf { it.mediumConfidence + it.lowConfidence + it.skipped.size + it.errors.size }
     }
 
+    private fun BenchmarkOutcome.rawReviewSignalCount(): Int {
+        val result = pipelineResult ?: return 0
+        return result.passResults.sumOf { it.mediumConfidence + it.lowConfidence }
+    }
+
+    private fun BenchmarkOutcome.validatedReviewSignalCount(): Int =
+        strictReviewValidation.validatedCount
+
+    private fun BenchmarkOutcome.unresolvedReviewSignalCount(): Int =
+        if (strictReviewValidation.state == "NOT_EVALUATED") {
+            rawReviewSignalCount()
+        } else {
+            strictReviewValidation.unresolvedCount
+        }
+
     private fun BenchmarkOutcome.allowedRuntimeIssueClasses(): List<String> {
         val classes = linkedSetOf<String>()
         if (note.contains("external dependency")) classes.add("external dependency")
@@ -4968,6 +6457,12 @@ class RealModBenchmarkTest {
             "status" to status.name,
             "note" to note,
             "allowedRuntimeIssueClasses" to allowedRuntimeIssueClasses(note)
+        )
+
+    private fun DataGenerationOutcome.toTelemetryMap(): Map<String, Any?> =
+        check.toTelemetryMap() + linkedMapOf(
+            "receiptPath" to receipt?.path?.toString(),
+            "receiptSha256" to receipt?.sha256
         )
 
     private fun allowedRuntimeIssueClasses(note: String): List<String> {
@@ -5063,7 +6558,8 @@ class RealModBenchmarkTest {
         val updateReadme: Boolean,
         val caseIds: List<String>?,
         val timeoutSeconds: Long,
-        val progressGraceSeconds: Long
+        val progressGraceSeconds: Long,
+        val runId: String? = null
     ) {
         companion object {
             fun fromEnvironment(): BenchmarkOptions {
@@ -5093,7 +6589,10 @@ class RealModBenchmarkTest {
                     timeoutSeconds = System.getenv("MODPORTER_BENCHMARK_TIMEOUT_SECONDS")?.toLongOrNull() ?: 180L,
                     progressGraceSeconds = System.getenv("MODPORTER_BENCHMARK_PROGRESS_GRACE_SECONDS")
                         ?.toLongOrNull()
-                        ?: 75L
+                        ?: 75L,
+                    runId = System.getenv("MODPORTER_BENCHMARK_RUN_ID")
+                        ?.trim()
+                        ?.takeIf { it.isNotEmpty() }
                 )
             }
 
@@ -5116,6 +6615,9 @@ class RealModBenchmarkTest {
         }
 
         fun telemetryFileName(): String = reportFileName().removeSuffix(".md") + ".json"
+
+        fun outputRootLabel(): String =
+            runId?.let { "build/real-mod-benchmark/runs/$it" } ?: "build/real-mod-benchmark"
     }
 
     private fun strictBenchmarkOptions(): BenchmarkOptions =
@@ -5143,6 +6645,11 @@ class RealModBenchmarkTest {
         val note: String
     )
 
+    private data class OwnedProcessIdentity(
+        val pid: Long,
+        val startedAt: java.time.Instant
+    )
+
     data class ResolvedGitSource(
         val url: String,
         val ref: String,
@@ -5162,11 +6669,32 @@ class RealModBenchmarkTest {
         val note: String,
         val pipelineResult: PipelineResult? = null,
         val compile: CheckResult = CheckResult.notRun("not requested"),
+        val dataGeneration: DataGenerationOutcome =
+            DataGenerationOutcome.notRun("not requested"),
         val runServer: CheckResult = CheckResult.notRun("not requested"),
         val runGameTestServer: CheckResult = CheckResult.notRun("not requested"),
         val runClient: CheckResult = CheckResult.notRun("not requested"),
-        val runClientWorld: CheckResult = CheckResult.notRun("not requested")
+        val runClientWorld: CheckResult = CheckResult.notRun("not requested"),
+        val strictReviewValidation: StrictReviewValidationSummary =
+            StrictReviewValidationSummary(
+                rawMediumCount = 0,
+                rawLowCount = 0,
+                pendingCount = 0,
+                validatedCount = 0,
+                unresolvedCount = 0,
+                state = "NOT_EVALUATED"
+            )
     )
+
+    data class DataGenerationOutcome(
+        val check: CheckResult,
+        val receipt: CreateDataGenerationEvidence.ReceiptReference? = null
+    ) {
+        companion object {
+            fun notRun(note: String): DataGenerationOutcome =
+                DataGenerationOutcome(CheckResult.notRun(note))
+        }
+    }
 
     data class CheckResult(
         val status: CheckStatus,
@@ -5221,7 +6749,7 @@ class RealModBenchmarkTest {
         private fun missingChecks(logFile: Path, checks: List<RuntimeMarkerCheck>): List<String> {
             if (checks.isEmpty()) return emptyList()
             if (!logFile.exists()) return checks.map { it.label }
-            val log = logFile.readText()
+            val log = StrictUtf8RuntimeLog.asciiSearchText(logFile)
             return checks.filterNot { check -> check.patterns.any { it.containsMatchIn(log) } }
                 .map { it.label }
         }
@@ -5273,16 +6801,45 @@ class RealModBenchmarkTest {
                     failOnWarnings = failOnWarnings
                 )
 
-            fun clientWorld(failOnWarnings: Boolean, progressGraceSeconds: Long): RuntimeLogPolicy =
+            fun clientWorld(
+                failOnWarnings: Boolean,
+                progressGraceSeconds: Long,
+                requireStrictSpawnReceipt: Boolean = false,
+                requireClientWorldCoordinator: Boolean = false
+            ): RuntimeLogPolicy =
                 RuntimeLogPolicy(
                     readyChecks = clientStartChecks + listOf(
                         RuntimeMarkerCheck("integrated server started", listOf(Regex("""Starting integrated minecraft server version"""))),
                         RuntimeMarkerCheck("spawn prepared", listOf(Regex("""Time elapsed: \d+ ms"""))),
                         RuntimeMarkerCheck("player joined loaded world", listOf(Regex("""logged in with entity id"""))),
                         RuntimeMarkerCheck("creative tab browse complete", listOf(Regex("""\[ModPorterBenchmark] Creative tab browse complete:""")))
-                    ),
-                    terminateAfterReady = true,
-                    requireZeroExit = false,
+                    ) + if (requireStrictSpawnReceipt) {
+                        listOf(
+                            RuntimeMarkerCheck(
+                                "strict spawn receipt sealed",
+                                listOf(Regex("""\[ModPorterStrictSpawn] Receipt sealed:"""))
+                            )
+                        )
+                    } else {
+                        emptyList()
+                    } + if (requireClientWorldCoordinator) {
+                        listOf(
+                            RuntimeMarkerCheck(
+                                "strict station-map receipt sealed",
+                                listOf(Regex("""\[ModPorterStrictStation] Receipt sealed:"""))
+                            ),
+                            RuntimeMarkerCheck(
+                                "client-world coordinator sealed",
+                                listOf(Regex("""\[ModPorterClientWorld] Coordinator sealed:"""))
+                            )
+                        )
+                    } else {
+                        emptyList()
+                    },
+                    terminateAfterReady =
+                        !requireStrictSpawnReceipt && !requireClientWorldCoordinator,
+                    requireZeroExit =
+                        requireStrictSpawnReceipt || requireClientWorldCoordinator,
                     failOnWarnings = failOnWarnings,
                     progressChecks = clientStartChecks,
                     progressLabel = "client start",
@@ -5354,6 +6911,7 @@ class RealModBenchmarkTest {
                 private static int stableMenuTicks;
                 private static int browsePass;
                 private static String currentTabName = "";
+                private static boolean strictSpawnWaitLogged;
 
                 private enum BrowseState {
                     WAITING_FOR_WORLD,
@@ -5426,6 +6984,7 @@ class RealModBenchmarkTest {
 
                 private static void runCreativeInventoryBrowse(Minecraft minecraft) {
                     if (browseState == BrowseState.COMPLETE || browseState == BrowseState.FAILED) {
+                        stopAfterStrictSpawn(minecraft);
                         return;
                     }
 
@@ -5471,6 +7030,16 @@ class RealModBenchmarkTest {
                             .filter(tab -> tabContainsNamespace(tab, modId))
                             .toList();
                         if (targetTabs.isEmpty()) {
+                            // a mod without items of its own (WorldEdit's wand is the vanilla axe) has no tab to browse
+                            boolean registersItems = net.minecraft.core.registries.BuiltInRegistries.ITEM.keySet().stream()
+                                .anyMatch(key -> key.getNamespace().equals(modId));
+                            if (!registersItems) {
+                                browseState = BrowseState.COMPLETE;
+                                System.out.println("[ModPorterBenchmark] Creative tab browse complete: tabs=0 (no items registered in namespace " + modId + ")");
+                            System.setProperty("modporter.benchmark.clientBrowse.completed", "true");
+                                stopAfterStrictSpawn(minecraft);
+                                return;
+                            }
                             fail("no non-empty creative tabs found containing item namespace '" + modId + "'");
                             return;
                         }
@@ -5592,7 +7161,8 @@ class RealModBenchmarkTest {
                     if (targetTabIndex >= targetTabs.size()) {
                         browseState = BrowseState.COMPLETE;
                         System.out.println("[ModPorterBenchmark] Creative tab browse complete: tabs=" + targetTabs.size());
-                        minecraft.stop();
+                        System.setProperty("modporter.benchmark.clientBrowse.completed", "true");
+                        stopAfterStrictSpawn(minecraft);
                     } else {
                         browseState = BrowseState.SELECT_TAB;
                     }
@@ -5637,7 +7207,27 @@ class RealModBenchmarkTest {
                     }
                     browseState = BrowseState.FAILED;
                     System.err.println("[ModPorterBenchmark] Creative tab browse failed: " + message);
-                    Minecraft.getInstance().stop();
+                    stopAfterStrictSpawn(Minecraft.getInstance());
+                }
+
+                private static void stopAfterStrictSpawn(Minecraft minecraft) {
+                    if (Boolean.getBoolean("modporter.clientWorldValidation.enabled")
+                        && !Boolean.getBoolean("modporter.clientWorldValidation.completed")) {
+                        if (!strictSpawnWaitLogged) {
+                            strictSpawnWaitLogged = true;
+                            System.out.println("[ModPorterBenchmark] Waiting for client-world coordinator before client exit");
+                        }
+                        return;
+                    }
+                    if (Boolean.getBoolean("modporter.strictSpawn.enabled")
+                        && !Boolean.getBoolean("modporter.strictSpawn.completed")) {
+                        if (!strictSpawnWaitLogged) {
+                            strictSpawnWaitLogged = true;
+                            System.out.println("[ModPorterBenchmark] Waiting for strict spawn receipt before client exit");
+                        }
+                        return;
+                    }
+                    minecraft.stop();
                 }
 
                 private static boolean dismissInitialScreen(Screen screen) {

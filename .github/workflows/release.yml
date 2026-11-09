@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test release
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: Publish developer preview
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Download verified Ubuntu package
+        uses: actions/download-artifact@v8
+        with:
+          name: modporter-package-ubuntu
+          path: dist
+
+      - name: Validate release inputs
+        id: release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:GITHUB_REF_NAME -notmatch '^v(?<version>\d+\.\d+\.\d+)$') {
+            throw "Release tag must have the form vMAJOR.MINOR.PATCH"
+          }
+          $version = $Matches.version
+          $notesPath = "docs/releases/$version.md"
+          $jarName = "modporter-$version-all.jar"
+          $jarPath = Join-Path "dist" $jarName
+          $checksumPath = Join-Path "dist" "SHA256SUMS"
+
+          if (-not (Test-Path $notesPath -PathType Leaf)) {
+            throw "Release notes are missing: $notesPath"
+          }
+          if (-not (Test-Path $jarPath -PathType Leaf)) {
+            throw "Versioned fat JAR is missing: $jarPath"
+          }
+          if (-not (Test-Path $checksumPath -PathType Leaf)) {
+            throw "Checksum file is missing: $checksumPath"
+          }
+
+          $files = @(Get-ChildItem "dist" -File)
+          $unexpected = @(
+            $files | Where-Object { $_.Name -notin @($jarName, "SHA256SUMS") }
+          )
+          if ($files.Count -ne 2 -or $unexpected.Count -ne 0) {
+            throw "Release artifact contains unexpected files"
+          }
+
+          $versionLine = Get-Content "build.gradle.kts" |
+            Where-Object { $_ -match '^\s*version\s*=\s*"([^"]+)"\s*$' } |
+            Select-Object -First 1
+          if (
+            -not $versionLine -or
+            $versionLine -notmatch '^\s*version\s*=\s*"([^"]+)"\s*$' -or
+            $Matches[1] -ne $version
+          ) {
+            throw "Tag version $version does not match build.gradle.kts"
+          }
+
+          $checksumLine = (Get-Content $checksumPath -Raw).Trim()
+          $actualHash = (Get-FileHash $jarPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expectedLine = "$actualHash  $jarName"
+          if ($checksumLine -cne $expectedLine) {
+            throw "SHA256SUMS does not match $jarName"
+          }
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "notes_path=$notesPath" >> $env:GITHUB_OUTPUT
+          "jar_path=$jarPath" >> $env:GITHUB_OUTPUT
+          "checksum_path=$checksumPath" >> $env:GITHUB_OUTPUT
+
+      - name: Publish prerelease
+        shell: pwsh
+        env:
+          RELEASE_JAR: ${{ steps.release.outputs.jar_path }}
+          RELEASE_CHECKSUMS: ${{ steps.release.outputs.checksum_path }}
+          RELEASE_NOTES: ${{ steps.release.outputs.notes_path }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          gh release create $env:GITHUB_REF_NAME `
+            $env:RELEASE_JAR `
+            $env:RELEASE_CHECKSUMS `
+            --verify-tag `
+            --prerelease `
+            --title "ModPorter $env:GITHUB_REF_NAME Developer Preview" `
+            --notes-file $env:RELEASE_NOTES

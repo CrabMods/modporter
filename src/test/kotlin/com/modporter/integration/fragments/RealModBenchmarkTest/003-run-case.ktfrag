@@ -1,0 +1,1147 @@
+
+    private fun runCase(
+        case: BenchmarkCase,
+        repoRoot: Path,
+        sourceRoot: Path,
+        workRoot: Path,
+        artifactRoot: Path,
+        reportsDir: Path,
+        options: BenchmarkOptions,
+        publishArtifacts: Boolean,
+        clientSmokeWorldFixture: ClientSmokeWorldFixture
+    ): BenchmarkOutcome {
+        val prepared = prepareSource(case, repoRoot, sourceRoot, reportsDir, options)
+        if (prepared.status != null || prepared.path == null) {
+            return BenchmarkOutcome(
+                case = case,
+                source = prepared.sourceLabel,
+                outputDir = null,
+                status = prepared.status ?: Status.FAIL,
+                note = prepared.note
+            )
+        }
+
+        val outputDir = workRoot.resolve(case.id)
+        return try {
+            resetDirectory(outputDir, workRoot)
+            copyProjectFiltered(prepared.path, outputDir)
+
+            val pipelineResult = runPipeline(outputDir)
+            // Gradle tasks run from the build root; the mod's sources, resources and run directory
+            // belong to its module (the root itself for a single-project mod)
+            val modDir = GradleModLayout.modModule(outputDir)
+            val structureIssues = validateConvertedProject(outputDir, pipelineResult, options)
+
+            val strictReviewAdmission = StrictReviewValidationRegistry.admit(
+                repositoryRoot = repoRoot,
+                inputProjectDir = prepared.path,
+                convertedBuildRoot = outputDir,
+                convertedModDir = modDir,
+                result = pipelineResult,
+                sourceLabel = prepared.sourceLabel,
+                enforceHandsOff = options.handsOff
+            )
+            structureIssues.addAll(strictReviewAdmission.fatalIssues)
+            var strictReviewRequest: StrictReviewRuntimeRequest? = null
+            if ((strictReviewAdmission.pendingCount > 0 || strictReviewAdmission.stationMapRequired) &&
+                strictReviewAdmission.fatalIssues.isEmpty()
+            ) {
+                val preparation = StrictReviewValidationRegistry.createRuntimeRequest(
+                    strictReviewAdmission,
+                    reportsDir
+                )
+                structureIssues.addAll(preparation.issues)
+                strictReviewRequest = preparation.request
+            }
+            var compile = CheckResult.notRun("MODPORTER_BENCHMARK_COMPILE=false")
+            if (structureIssues.isEmpty() && options.compile) {
+                structureIssues.addAll(stageBenchmarkDependencies(case, artifactRoot, modDir))
+            }
+            if (structureIssues.isEmpty() && options.compile) {
+                compile = runGradleTask(outputDir, reportsDir, case.id, "compileJava", options.timeoutSeconds)
+            }
+
+            var dataGeneration = DataGenerationOutcome.notRun(
+                "pipeline did not request Create native data-map generation"
+            )
+            if (CreateDataGenerationEvidence.required(pipelineResult) &&
+                structureIssues.isEmpty() && compile.status == CheckStatus.PASS) {
+                val selectedRunId = options.runId
+                if (selectedRunId == null) {
+                    dataGeneration = DataGenerationOutcome(
+                        CheckResult(
+                            CheckStatus.FAIL,
+                            "Create native data-map generation requires a unique benchmark run id"
+                        )
+                    )
+                } else {
+                    val runData = runLeasedGradleTask(
+                        outputDir,
+                        reportsDir,
+                        case.id,
+                        "runData",
+                        options.timeoutSeconds,
+                        runtimeDirectory = modDir.resolve("run"),
+                        sessionReceipt =
+                            reportsDir.resolve("${case.id}-runData-session.json")
+                    )
+                    if (runData.status == CheckStatus.FAIL) {
+                        dataGeneration = DataGenerationOutcome(
+                            CheckResult(CheckStatus.FAIL, "runData failed: ${runData.note}")
+                        )
+                    } else {
+                        val processResources = runGradleTask(
+                            outputDir,
+                            reportsDir,
+                            case.id,
+                            "processResources",
+                            options.timeoutSeconds,
+                            additionalArguments = listOf("--rerun-tasks")
+                        )
+                        if (processResources.status == CheckStatus.FAIL) {
+                            dataGeneration = DataGenerationOutcome(
+                                CheckResult(
+                                    CheckStatus.FAIL,
+                                    "processResources --rerun-tasks failed: ${processResources.note}"
+                                )
+                            )
+                        } else {
+                            dataGeneration = try {
+                                val receipt = CreateDataGenerationEvidence.seal(
+                                    runId = selectedRunId,
+                                    caseId = case.id,
+                                    buildRoot = outputDir,
+                                    modDir = modDir,
+                                    reportsDir = reportsDir,
+                                    runDataLog = reportsDir.resolve("${case.id}-runData.log"),
+                                    runDataLeaseReceipt =
+                                        reportsDir.resolve("${case.id}-runData-session.json"),
+                                    processResourcesLog =
+                                        reportsDir.resolve("${case.id}-processResources.log")
+                                )
+                                DataGenerationOutcome(
+                                    CheckResult(
+                                        CheckStatus.PASS,
+                                        "Create native data maps generated, packaged and sealed"
+                                    ),
+                                    receipt
+                                )
+                            } catch (failure: Exception) {
+                                DataGenerationOutcome(
+                                    CheckResult(
+                                        CheckStatus.FAIL,
+                                        "Create data-generation evidence failed: " +
+                                            (failure.message ?: failure::class.java.simpleName)
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (dataGeneration.check.status == CheckStatus.PASS && strictReviewRequest != null) {
+                val refreshed = StrictReviewValidationRegistry.refreshGeneratedResourceBindingsAfterDataGeneration(
+                    strictReviewRequest,
+                    checkNotNull(options.runId),
+                    checkNotNull(dataGeneration.receipt)
+                )
+                structureIssues.addAll(refreshed.issues)
+                strictReviewRequest = refreshed.request ?: strictReviewRequest
+            }
+
+            var artifactPublish = CheckResult.notRun("no benchmark dependents")
+            if (structureIssues.isEmpty() && options.compile && publishArtifacts &&
+                compile.status == CheckStatus.PASS && dataGeneration.check.passedOrNotRun) {
+                artifactPublish = publishBenchmarkArtifacts(case, outputDir, artifactRoot, reportsDir, options.timeoutSeconds)
+            }
+
+            var runServer = CheckResult.notRun("MODPORTER_BENCHMARK_RUNSERVER=false")
+            if (structureIssues.isEmpty() && compile.passedOrNotRun &&
+                dataGeneration.check.passedOrNotRun && artifactPublish.passedOrNotRun &&
+                options.runServer) {
+                prepareDedicatedServerRuntime(modDir)
+                runServer = runRuntimeGradleTask(
+                    outputDir,
+                    reportsDir,
+                    case.id,
+                    "runServer",
+                    options.timeoutSeconds,
+                    RuntimeLogPolicy.serverReady(options.logClean),
+                    prepared.path
+                )
+            }
+
+            var runGameTestServer = CheckResult.notRun("MODPORTER_BENCHMARK_RUNGAMETESTSERVER=false")
+            if (structureIssues.isEmpty() && compile.passedOrNotRun &&
+                dataGeneration.check.passedOrNotRun && artifactPublish.passedOrNotRun &&
+                runServer.passedOrNotRun && options.runGameTestServer) {
+                structureIssues.addAll(stageBenchmarkGameTestSmoke(modDir))
+            }
+            if (structureIssues.isEmpty() && compile.passedOrNotRun &&
+                dataGeneration.check.passedOrNotRun && artifactPublish.passedOrNotRun &&
+                runServer.passedOrNotRun && options.runGameTestServer) {
+                prepareDedicatedServerRuntime(modDir)
+                runGameTestServer = runRuntimeGradleTask(
+                    outputDir,
+                    reportsDir,
+                    case.id,
+                    "runGameTestServer",
+                    options.timeoutSeconds,
+                    RuntimeLogPolicy.gameTestServer(options.logClean),
+                    prepared.path
+                )
+            }
+
+            var runClient = CheckResult.notRun("MODPORTER_BENCHMARK_RUNCLIENT=false")
+            if (structureIssues.isEmpty() && compile.passedOrNotRun &&
+                dataGeneration.check.passedOrNotRun && artifactPublish.passedOrNotRun &&
+                runServer.passedOrNotRun && runGameTestServer.passedOrNotRun && options.runClient) {
+                stageClientRuntime(projectDir = modDir)
+                runClient = runRuntimeGradleTask(
+                    outputDir,
+                    reportsDir,
+                    case.id,
+                    "runClient",
+                    options.timeoutSeconds,
+                    RuntimeLogPolicy.clientStart(options.logClean),
+                    prepared.path
+                )
+            }
+
+            var runClientWorld = CheckResult.notRun("MODPORTER_BENCHMARK_RUNCLIENTWORLD=false")
+            if (structureIssues.isEmpty() && compile.passedOrNotRun &&
+                dataGeneration.check.passedOrNotRun && artifactPublish.passedOrNotRun &&
+                runServer.passedOrNotRun && runGameTestServer.passedOrNotRun && runClient.passedOrNotRun &&
+                options.runClientWorld) {
+                if (clientSmokeWorldFixture.result.status == CheckStatus.FAIL || clientSmokeWorldFixture.path == null) {
+                    runClientWorld = CheckResult(CheckStatus.FAIL, "Client smoke world fixture failed: ${clientSmokeWorldFixture.result.note}")
+                } else {
+                    val harnessIssues = stageClientWorldHarness(modDir, strictReviewRequest)
+                    if (harnessIssues.isNotEmpty()) {
+                        runClientWorld = CheckResult(CheckStatus.FAIL, harnessIssues.joinToString("; "))
+                    } else {
+                        val sealedPreparation = if (strictReviewRequest == null) {
+                            StrictReviewRuntimePreparation(null, emptyList())
+                        } else {
+                            StrictReviewValidationRegistry.sealRuntimeManifest(strictReviewRequest)
+                        }
+                        if (sealedPreparation.issues.isNotEmpty()) {
+                            runClientWorld = CheckResult(
+                                CheckStatus.FAIL,
+                                sealedPreparation.issues.joinToString("; ")
+                            )
+                        } else {
+                            strictReviewRequest = sealedPreparation.request ?: strictReviewRequest
+                            val worldIssues = stageClientSmokeWorld(modDir, clientSmokeWorldFixture.path)
+                            if (worldIssues.isNotEmpty()) {
+                                runClientWorld = CheckResult(CheckStatus.FAIL, worldIssues.joinToString("; "))
+                            } else {
+                                runClientWorld = runRuntimeGradleTask(
+                                    outputDir,
+                                    reportsDir,
+                                    case.id,
+                                    "runClientWorld",
+                                    options.timeoutSeconds,
+                                    RuntimeLogPolicy.clientWorld(
+                                        options.logClean,
+                                        options.progressGraceSeconds,
+                                        strictReviewRequest != null,
+                                        strictReviewRequest?.stationMapRequired == true
+                                    ),
+                                    prepared.path,
+                                    strictReviewRequest
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            val strictReviewValidation = StrictReviewValidationRegistry.verifyFinal(
+                admission = strictReviewAdmission,
+                request = strictReviewRequest,
+                runtimePassed = runClientWorld.status == CheckStatus.PASS,
+                runtimeNote = runClientWorld.note,
+                runtimeLog = reportsDir.resolve("${case.id}-runClientWorld.log")
+            )
+            val failedChecks = mutableListOf<String>()
+            failedChecks.addAll(structureIssues)
+            if (compile.status == CheckStatus.FAIL) failedChecks.add("compileJava failed: ${compile.note}")
+            if (dataGeneration.check.status == CheckStatus.FAIL) {
+                failedChecks.add("Create data generation failed: ${dataGeneration.check.note}")
+            }
+            if (artifactPublish.status == CheckStatus.FAIL) {
+                failedChecks.add("benchmark artifact publish failed: ${artifactPublish.note}")
+            }
+            if (runServer.status == CheckStatus.FAIL) failedChecks.add("runServer failed: ${runServer.note}")
+            if (runGameTestServer.status == CheckStatus.FAIL) {
+                failedChecks.add("runGameTestServer failed: ${runGameTestServer.note}")
+            }
+            if (runClient.status == CheckStatus.FAIL) failedChecks.add("runClient failed: ${runClient.note}")
+            if (runClientWorld.status == CheckStatus.FAIL) {
+                failedChecks.add("runClientWorld failed: ${runClientWorld.note}")
+            }
+            if (strictReviewValidation.state == "FAILED") {
+                failedChecks.add(
+                    "Strict review final gate failed: state=${strictReviewValidation.state}, " +
+                        "unresolved=${strictReviewValidation.unresolvedCount}; " +
+                        strictReviewValidation.issues.joinToString("; ")
+                )
+            } else if (strictReviewValidation.unresolvedCount > 0) {
+                failedChecks.add(
+                    "Strict review final gate failed: ${strictReviewValidation.unresolvedCount} unresolved " +
+                        "MEDIUM/LOW change(s)"
+                )
+            }
+
+            val allowedRuntimeIssues = listOf(runServer, runGameTestServer, runClient, runClientWorld)
+                .mapNotNull { it.allowedRuntimeIssueNote() }
+            val status = if (failedChecks.isEmpty()) Status.PASS else Status.FAIL
+            val note = if (failedChecks.isEmpty()) {
+                if (allowedRuntimeIssues.isEmpty()) "OK" else "OK; ${allowedRuntimeIssues.joinToString("; ")}"
+            } else {
+                failedChecks.joinToString("; ")
+            }
+
+            BenchmarkOutcome(
+                case = case,
+                source = prepared.sourceLabel,
+                outputDir = outputDir.toString(),
+                status = status,
+                note = note,
+                pipelineResult = pipelineResult,
+                compile = compile,
+                dataGeneration = dataGeneration,
+                runServer = runServer,
+                runGameTestServer = runGameTestServer,
+                runClient = runClient,
+                runClientWorld = runClientWorld,
+                strictReviewValidation = strictReviewValidation
+            )
+        } finally {
+            terminateScopedJavaProcesses(outputDir)
+        }
+    }
+
+    private fun prepareSource(
+        case: BenchmarkCase,
+        repoRoot: Path,
+        sourceRoot: Path,
+        reportsDir: Path,
+        options: BenchmarkOptions
+    ): PreparedSource {
+        val localOverride = System.getenv(localSourceOverrideKey(case.id))?.takeIf { it.isNotBlank() }
+        if (localOverride != null) {
+            return prepareLocalSource(case, repoRoot, localOverride, "env:${localSourceOverrideKey(case.id)}")
+        }
+
+        val gitOverride = System.getenv(gitOverrideKey(case.id))?.takeIf { it.isNotBlank() }
+        if (gitOverride != null) {
+            val ref = System.getenv(refOverrideKey(case.id))?.takeIf { it.isNotBlank() } ?: case.ref
+            return prepareGitSource(case, gitOverride, ref, sourceRoot, reportsDir, options.timeoutSeconds)
+        }
+
+        return when (case.provider) {
+            "local" -> prepareLocalSource(case, repoRoot, case.location, "local:${case.location}")
+            "git" -> prepareGitSource(case, case.location, case.ref, sourceRoot, reportsDir, options.timeoutSeconds)
+            "missing" -> {
+                val status = if (case.required) Status.FAIL else Status.SKIP
+                PreparedSource(null, "missing:${case.id}", status, "No source provider configured")
+            }
+            else -> PreparedSource(null, case.provider, Status.FAIL, "Unknown source provider '${case.provider}'")
+        }
+    }
+
+    private fun prepareLocalSource(
+        case: BenchmarkCase,
+        repoRoot: Path,
+        rawPath: String,
+        label: String
+    ): PreparedSource {
+        val path = Path.of(rawPath)
+        val source = if (path.isAbsolute) path.normalize() else repoRoot.resolve(path).normalize()
+        if (!source.exists() || !source.isDirectory()) {
+            val status = if (case.required) Status.FAIL else Status.SKIP
+            return PreparedSource(null, label, status, "Source missing: $source")
+        }
+        val subdir = resolveSubdir(source, case.subdir)
+        return if (subdir.exists() && subdir.isDirectory()) {
+            PreparedSource(subdir, label, null, "OK")
+        } else {
+            PreparedSource(null, label, Status.FAIL, "Configured subdir missing: $subdir")
+        }
+    }
+
+    private fun prepareGitSource(
+        case: BenchmarkCase,
+        url: String,
+        ref: String,
+        sourceRoot: Path,
+        reportsDir: Path,
+        timeoutSeconds: Long
+    ): PreparedSource {
+        val cloneDir = sourceRoot.resolve(case.id)
+        resetDirectory(cloneDir, sourceRoot)
+        val logFile = reportsDir.resolve("${case.id}-fetch.log")
+        val result = runGitSourceCheckout(url, ref, cloneDir, sourceRoot, logFile, timeoutSeconds)
+        if (result.status != CheckStatus.PASS) {
+            return PreparedSource(
+                path = null,
+                sourceLabel = "git:$url#$ref",
+                status = Status.FAIL,
+                note = "git clone failed: ${result.note}"
+            )
+        }
+        val commit = resolvedGitCommit(cloneDir)
+        if (commit != null) {
+            logFile.toFile().appendText("\n[ModPorterBenchmark] resolvedCommit=$commit\n")
+        } else {
+            logFile.toFile().appendText("\n[ModPorterBenchmark] resolvedCommit=<unavailable>\n")
+        }
+        val sourceLabel = if (commit != null) "git:$url#$ref@$commit" else "git:$url#$ref"
+
+        val subdir = resolveSubdir(cloneDir, case.subdir)
+        return if (subdir.exists() && subdir.isDirectory()) {
+            PreparedSource(subdir, sourceLabel, null, "OK")
+        } else {
+            PreparedSource(null, sourceLabel, Status.FAIL, "Configured subdir missing: $subdir")
+        }
+    }
+
+    private fun runGitSourceCheckout(
+        url: String,
+        ref: String,
+        cloneDir: Path,
+        sourceRoot: Path,
+        logFile: Path,
+        timeoutSeconds: Long
+    ): CheckResult {
+        val exactCommit = Regex("[0-9a-fA-F]{40}").matches(ref)
+        val commands = if (exactCommit) {
+            listOf(
+                listOf("git", "init", cloneDir.toString()),
+                listOf("git", "-C", cloneDir.toString(), "remote", "add", "origin", url),
+                listOf("git", "-C", cloneDir.toString(), "fetch", "--depth", "1", "origin", ref),
+                listOf("git", "-C", cloneDir.toString(), "checkout", "--detach", "FETCH_HEAD")
+            )
+        } else {
+            listOf(buildList {
+                addAll(listOf("git", "clone", "--depth", "1"))
+                if (ref != "-") addAll(listOf("--branch", ref))
+                addAll(listOf(url, cloneDir.toString()))
+            })
+        }
+
+        Files.deleteIfExists(logFile)
+        commands.forEachIndexed { index, command ->
+            val stepLog = logFile.resolveSibling("${logFile.fileName}.step-$index")
+            val result = runProcess(command, sourceRoot, stepLog, timeoutSeconds)
+            logFile.toFile().appendText("[ModPorterBenchmark] command=${command.joinToString(" ")}\n")
+            if (stepLog.exists()) {
+                logFile.toFile().appendText(stepLog.readText())
+                Files.deleteIfExists(stepLog)
+            }
+            if (result.status != CheckStatus.PASS) {
+                return CheckResult(result.status, "${result.note}; command=${command.joinToString(" ")}")
+            }
+        }
+        return CheckResult(CheckStatus.PASS, "Passed")
+    }
+
+    private fun resolvedGitCommit(repo: Path): String? =
+        runCatching {
+            val result = BenchmarkOwnedProcesses.capture(listOf("git", "rev-parse", "HEAD"), repo, 10)
+            if (!result.finished || result.exitCode != 0) return@runCatching null
+            result.output.lineSequence().firstOrNull()?.trim()?.takeIf { it.matches(Regex("[0-9a-fA-F]{40}")) }
+        }.getOrNull()
+
+    private fun git(workingDir: Path, vararg args: String): String {
+        val result = BenchmarkOwnedProcesses.capture(listOf("git") + args, workingDir, 30)
+        assertTrue(
+            result.finished && result.exitCode == 0,
+            "git ${args.joinToString(" ")} failed: finished=${result.finished}; exitCode=${result.exitCode ?: "<timeout>"}; " +
+                "parentPid=${result.pid}; outputDrain=closed-file; output=${result.output}"
+        )
+        return result.output.trim().lineSequence().lastOrNull()?.trim().orEmpty()
+    }
+
+    private fun resolveSubdir(root: Path, subdir: String): Path =
+        if (subdir == "." || subdir == "-") root else root.resolve(subdir).normalize()
+
+    private fun runPipeline(projectDir: Path): PipelineResult {
+        val pipelineDef = PipelineRegistry.get("forge2neo")
+            ?: error("forge2neo pipeline is not registered")
+        val mappingDb = MappingDatabase.load(pipelineDef.mappingsPrefix)
+        return Pipeline(
+            passes = pipelineDef.passFactory(mappingDb, PipelineOptions()),
+            dryRun = false,
+            pipelineName = pipelineDef.displayName
+        ).run(projectDir)
+    }
+
+    private fun validateConvertedProject(
+        buildRoot: Path,
+        result: PipelineResult,
+        options: BenchmarkOptions = BenchmarkOptions.fromEnvironment()
+    ): MutableList<String> {
+        val issues = mutableListOf<String>()
+        val projectDir = GradleModLayout.modModule(buildRoot)
+        if (result.totalErrors > 0) {
+            issues.add("Pipeline reported ${result.totalErrors} errors")
+        }
+        if (options.strict || options.handsOff) {
+            val skippedTransforms = result.passResults.flatMap { passResult ->
+                passResult.skipped.map { skipped -> "${passResult.passName}: $skipped" }
+            }
+            if (skippedTransforms.isNotEmpty()) {
+                issues.add(
+                    "Strict source-shape gate failed: migration passes skipped parsing/transforms " +
+                        "(${skippedTransforms.size}): ${skippedTransforms.take(8).joinToString(", ")}"
+                )
+            }
+        }
+
+        val srcDir = projectDir.resolve("src")
+        if (srcDir.exists()) {
+            val forgeHits = findActiveForgeReferences(srcDir)
+            if (forgeHits.isNotEmpty()) {
+                issues.add("Active Forge source references remain: ${forgeHits.take(5).joinToString(", ")}")
+            }
+            val bypassMarkers = findCommentedBypassMarkers(projectDir.resolve("src/main/java"))
+            if (bypassMarkers.isNotEmpty()) {
+                issues.add(
+                    "Converted source contains bypassed or commented-out logic (${bypassMarkers.size}): " +
+                        bypassMarkers.take(8).joinToString(", ")
+                )
+            }
+            val invalidMigrationArtifacts = findInvalidSourceMigrationArtifacts(projectDir.resolve("src/main/java"))
+            if (invalidMigrationArtifacts.isNotEmpty()) {
+                issues.add(
+                    "Converted source contains invalid migration artifacts (${invalidMigrationArtifacts.size}): " +
+                        invalidMigrationArtifacts.take(8).joinToString(", ")
+                )
+            }
+        }
+
+        val buildFiles = listOf(projectDir, buildRoot).distinct()
+            .flatMap { listOf(it.resolve("build.gradle"), it.resolve("build.gradle.kts")) }
+            .filter { it.exists() }
+        if (buildFiles.isEmpty()) {
+            issues.add("No build.gradle or build.gradle.kts after conversion")
+        } else {
+            val buildPlaceholders = findBuildMigrationPlaceholders(projectDir, buildFiles)
+            if (buildPlaceholders.isNotEmpty()) {
+                issues.add(
+                    "Build files contain migration placeholders (${buildPlaceholders.size}): " +
+                        buildPlaceholders.take(8).joinToString(", ")
+                )
+            }
+            val activeBuild = buildFiles.joinToString("\n") { activeCode(it.readText()) }
+            if (!activeBuild.contains("net.neoforged.moddev") && !activeBuild.contains("neoForge")) {
+                issues.add("Build file does not reference NeoForge ModDev")
+            }
+            if (activeBuild.contains("net.minecraftforge.gradle") || activeBuild.contains("net.minecraftforge:forge")) {
+                issues.add("Build file still references ForgeGradle/Forge dependency")
+            }
+            val excludedMainSources = mainSourceExcludes(activeBuild)
+            if (excludedMainSources.isNotEmpty()) {
+                issues.add(
+                    "Build file excludes main Java sources (${excludedMainSources.size}): " +
+                        excludedMainSources.take(8).joinToString(", ")
+                )
+            }
+        }
+
+        val metaInf = projectDir.resolve("src/main/resources/META-INF")
+        val oldModsToml = metaInf.resolve("mods.toml")
+        val neoModsToml = metaInf.resolve("neoforge.mods.toml")
+        if (oldModsToml.exists()) {
+            issues.add("mods.toml was not renamed to neoforge.mods.toml")
+        }
+        if (metaInf.exists() && !neoModsToml.exists()) {
+            issues.add("neoforge.mods.toml is missing")
+        }
+
+        return issues
+    }
+
+    private fun mainSourceExcludes(buildText: String): List<String> =
+        Regex("""exclude\s+['"]([^'"]+\.java|[^'"]+/\*\*)['"]""")
+            .findAll(buildText)
+            .map { it.groupValues[1] }
+            .filterNot { it.startsWith("references/") }
+            .distinct()
+            .toList()
+
+    private fun findActiveForgeReferences(srcDir: Path): List<String> {
+        val patterns = listOf(
+            "net.minecraftforge" to Regex("""\bnet\.minecraftforge\b"""),
+            "MinecraftForge." to Regex("""\bMinecraftForge\."""),
+            "ForgeRegistries." to Regex("""(?<!Neo)\bForgeRegistries\.""")
+        )
+        val hits = mutableListOf<String>()
+        val javaFiles = Files.walk(srcDir).use { stream ->
+            stream.filter { Files.isRegularFile(it) && it.toString().endsWith(".java") }
+                .filter { !srcDir.relativize(it).toString().replace('\\', '/').startsWith("references/") }
+                .toList()
+        }
+        // a class of the mod's own that shares a Forge class name (WorldEdit's ForgeRegistries) is
+        // no Forge reference: the Forge class itself needs a net.minecraftforge import
+        val projectTypes = javaFiles.mapNotNull { file ->
+            val typeName = file.fileName.toString().removeSuffix(".java")
+            typeName.takeIf { Regex("""\b(?:class|interface|enum|record)\s+${Regex.escape(it)}\b""").containsMatchIn(activeCode(file.readText())) }
+        }.toSet()
+        for (file in javaFiles) {
+            val active = activeCode(file.readText())
+            for ((label, pattern) in patterns) {
+                if (label.removeSuffix(".") in projectTypes) continue
+                if (pattern.containsMatchIn(active)) {
+                    hits.add("${srcDir.relativize(file)} contains $label")
+                }
+            }
+        }
+        return hits
+    }
+
+    private fun findCommentedBypassMarkers(srcDir: Path): List<String> {
+        if (!srcDir.exists()) return emptyList()
+        val markerPatterns = listOf(
+            Regex("""//\s*\[forge2neo]""", RegexOption.IGNORE_CASE),
+            Regex("""//\s*TODO:\s*\[forge2neo]""", RegexOption.IGNORE_CASE),
+            Regex("""//\s*TODO:\s*(NetworkHooks|DeserializationContext|BowlFoodItem|MissingMappingsEvent|IIngredientSerializer|GuiOverlayManager|RenderGuiOverlayEvent).*removed""", RegexOption.IGNORE_CASE),
+            Regex("""/\*\s*TODO:\s*[^*]*(removed|forge2neo)[^*]*\*/""", RegexOption.IGNORE_CASE),
+            Regex("""//\s*Phase check removed""", RegexOption.IGNORE_CASE),
+            Regex("""//\s*\[forge2neo].*(excluded|unavailable|fallback|SimpleChannel removed|Phase check removed|REMOVED|TODO)""", RegexOption.IGNORE_CASE),
+            Regex("""//\s*\[forge2neo]\s*(import|return|if|for|while|switch|try|catch|@Override|\w+\s*\()""")
+        )
+        val hits = mutableListOf<String>()
+        val stream = Files.walk(srcDir)
+        try {
+            stream
+                .filter { Files.isRegularFile(it) && it.toString().endsWith(".java") }
+                .filter { !srcDir.relativize(it).toString().replace('\\', '/').startsWith("references/") }
+                .forEach { file ->
+                    val text = file.readText()
+                    Regex("""(?s)/\*.*?\*/""").findAll(text).forEach { block ->
+                        val codeLikeBypass = Regex("""@\s*SubscribeEvent|\[forge2neo]|BrewingRecipesEvent|BrewingRecipeRegister""")
+                            .containsMatchIn(block.value) &&
+                            Regex("""\b(public|private|protected|if|return|event\.|import)\b""")
+                                .containsMatchIn(block.value)
+                        if (codeLikeBypass) {
+                            val lineNumber = text.substring(0, block.range.first).count { it == '\n' } + 1
+                            hits.add("${srcDir.relativize(file)}:$lineNumber")
+                        }
+                    }
+                    text.lines().forEachIndexed { index, line ->
+                        if (markerPatterns.any { it.containsMatchIn(line) }) {
+                            hits.add("${srcDir.relativize(file)}:${index + 1}")
+                        }
+                    }
+                }
+        } finally {
+            stream.close()
+        }
+        return hits
+    }
+
+    private fun findInvalidSourceMigrationArtifacts(srcDir: Path): List<String> {
+        if (!srcDir.exists()) return emptyList()
+        val markerPatterns = listOf(
+            "RecipeHolder<var>" to Regex("""\bRecipeHolder\s*<\s*var\s*>""")
+        )
+        val hits = mutableListOf<String>()
+        val stream = Files.walk(srcDir)
+        try {
+            stream
+                .filter { Files.isRegularFile(it) && it.toString().endsWith(".java") }
+                .filter { !srcDir.relativize(it).toString().replace('\\', '/').startsWith("references/") }
+                .forEach { file ->
+                    val active = activeCode(file.readText())
+                    for ((label, pattern) in markerPatterns) {
+                        pattern.findAll(active).forEach { match ->
+                            val lineNumber = active.substring(0, match.range.first).count { it == '\n' } + 1
+                            hits.add("${srcDir.relativize(file)}:$lineNumber contains $label")
+                        }
+                    }
+                    active.lines().forEachIndexed { index, line ->
+                        val match = Regex("""^public\s+(?:abstract\s+|final\s+)?(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)\b""")
+                            .find(line)
+                            ?: return@forEachIndexed
+                        val publicType = match.groupValues[1]
+                        val fileStem = file.fileName.toString().substringBeforeLast('.')
+                        if (publicType != fileStem) {
+                            hits.add("${srcDir.relativize(file)}:${index + 1} public type $publicType does not match file $fileStem")
+                        }
+                    }
+                }
+        } finally {
+            stream.close()
+        }
+        return hits
+    }
+
+    private fun findBuildMigrationPlaceholders(projectDir: Path, buildFiles: List<Path>): List<String> {
+        val markerPatterns = listOf(
+            Regex("""TODO:\s*Update for NeoForge""", RegexOption.IGNORE_CASE),
+            Regex("""\[(?:forge2neo|modporter)\]""", RegexOption.IGNORE_CASE),
+            Regex("""//\s*(implementation|compileOnly|runtimeOnly|annotationProcessor)\b.*\b(excluded|unavailable|removed)\b""", RegexOption.IGNORE_CASE)
+        )
+        return buildFiles.flatMap { file ->
+            file.readText().lines().mapIndexedNotNull { index, line ->
+                if (markerPatterns.any { it.containsMatchIn(line) }) {
+                    "${projectDir.relativize(file)}:${index + 1}"
+                } else {
+                    null
+                }
+            }
+        }
+    }
+
+    private fun activeCode(text: String): String =
+        text.replace(Regex("""(?s)/\*.*?\*/"""), "")
+            .lines()
+            .filterNot { line ->
+                val trimmed = line.trimStart()
+                trimmed.startsWith("//") || trimmed.startsWith("*")
+            }
+            .joinToString("\n")
+
+    private fun runGradleTask(
+        projectDir: Path,
+        reportsDir: Path,
+        caseId: String,
+        task: String,
+        timeoutSeconds: Long,
+        additionalArguments: List<String> = emptyList()
+    ): CheckResult {
+        val command = gradleCommand(projectDir)
+            ?: return CheckResult(CheckStatus.FAIL, "No Gradle wrapper found in converted output")
+        val logFile = reportsDir.resolve("$caseId-$task.log")
+
+        return runProcess(
+            command + listOf(task) + additionalArguments + listOf("--no-daemon", "--stacktrace"),
+            projectDir,
+            logFile,
+            timeoutSeconds,
+            scopedProcessDir = projectDir
+        )
+    }
+
+    private fun runLeasedGradleTask(
+        projectDir: Path,
+        reportsDir: Path,
+        caseId: String,
+        task: String,
+        timeoutSeconds: Long,
+        runtimeDirectory: Path,
+        sessionReceipt: Path
+    ): CheckResult {
+        val command = gradleCommand(projectDir)
+            ?: return CheckResult(CheckStatus.FAIL, "No Gradle wrapper found in converted output")
+        val logFile = reportsDir.resolve("$caseId-$task.log")
+        if (Files.exists(sessionReceipt, LinkOption.NOFOLLOW_LINKS)) {
+            return CheckResult(
+                CheckStatus.FAIL,
+                "Refusing to overwrite runtime lease receipt: $sessionReceipt"
+            )
+        }
+        val normalizedRuntimeDirectory = runtimeDirectory.toAbsolutePath().normalize()
+        val guarded = MinecraftRuntimeLease.guard(
+            projectDir,
+            command + listOf(
+                task,
+                "--no-daemon",
+                "--stacktrace",
+                "--console=plain",
+                "-PminecraftModTestingRuntimeDirectory=$normalizedRuntimeDirectory"
+            ),
+            MinecraftRuntimeLease.kindForTask(task),
+            sessionReceipt = MinecraftRuntimeLease.SessionReceiptContract(
+                runtimeDirectory = normalizedRuntimeDirectory,
+                receiptPath = sessionReceipt
+            )
+        )
+        return runProcess(
+            guarded,
+            projectDir,
+            logFile,
+            timeoutSeconds,
+            scopedProcessDir = projectDir
+        )
+    }
+
+    private fun runRuntimeGradleTask(
+        projectDir: Path,
+        reportsDir: Path,
+        caseId: String,
+        task: String,
+        timeoutSeconds: Long,
+        runtimeLogPolicy: RuntimeLogPolicy,
+        inputSourceDir: Path? = null,
+        strictReviewRequest: StrictReviewRuntimeRequest? = null
+    ): CheckResult {
+        val command = gradleCommand(projectDir)
+            ?: return CheckResult(CheckStatus.FAIL, "No Gradle wrapper found in converted output")
+        val logFile = reportsDir.resolve("$caseId-$task.log")
+        val gameTestWorld = if (task == "runGameTestServer") {
+            try {
+                GameTestWorldIsolation.prepare(projectDir, reportsDir, caseId)
+            } catch (failure: Exception) {
+                return CheckResult(CheckStatus.FAIL, "GameTest world isolation failed: ${failure.message}")
+            }
+        } else null
+        val harnessReceipt = strictReviewRequest?.let { request ->
+            MinecraftRuntimeLease.HarnessReceiptContract(
+                runtimeDirectory = request.runtimeDirectory,
+                receiptPath = request.wrapperReceiptPath,
+                harnessReceiptPath = if (request.stationMapRequired) {
+                    request.coordinatorReceiptPath
+                } else {
+                    request.receiptPath
+                },
+                expectedScenarioCount = if (request.stationMapRequired) {
+                    StrictSpawnValidationContract.scenarioIds.size + 1
+                } else {
+                    StrictSpawnValidationContract.scenarioIds.size
+                }
+            )
+        }
+        val result = runRuntimeProcess(
+            MinecraftRuntimeLease.guard(
+                projectDir,
+                command + listOf(task, "--no-daemon", "--stacktrace") + gameTestWorld?.gradleArguments.orEmpty(),
+                MinecraftRuntimeLease.kindForTask(task),
+                harnessReceipt
+            ),
+            projectDir,
+            logFile,
+            timeoutSeconds,
+            runtimeLogPolicy,
+            inputSourceDir
+        )
+        return if (gameTestWorld == null) result else result.copy(note = "${result.note}; ${gameTestWorld.note}")
+    }
+
+    private fun runProcess(
+        command: List<String>,
+        workingDir: Path,
+        logFile: Path,
+        timeoutSeconds: Long,
+        scopedProcessDir: Path? = null
+    ): CheckResult {
+        logFile.parent?.createDirectories()
+        val processBuilder = ProcessBuilder(command)
+            .directory(workingDir.toFile())
+            .redirectErrorStream(true)
+            .redirectOutput(logFile.toFile())
+        configureJavaHome(processBuilder)
+
+        return BenchmarkOwnedProcesses.use(processBuilder) { process ->
+            val finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+            if (!finished) {
+                terminateProcessTree(process, forcibly = true)
+                val terminated = scopedProcessDir?.let(::terminateScopedJavaProcesses).orEmpty()
+                settleRuntimeProcess(process, logFile)
+                CheckResult(CheckStatus.FAIL,
+                    "Timed out after ${timeoutSeconds}s; log=$logFile${scopedCleanupNote(terminated)}")
+            } else {
+                settleRuntimeProcess(process, logFile)
+                val terminated = scopedProcessDir?.let(::terminateScopedJavaProcesses).orEmpty()
+                val exitCode = process.exitValue()
+                if (exitCode == 0) {
+                    CheckResult(CheckStatus.PASS, "Passed; log=$logFile${scopedCleanupNote(terminated)}")
+                } else {
+                    CheckResult(CheckStatus.FAIL,
+                        "Exited $exitCode; log=$logFile${scopedCleanupNote(terminated)}; tail=${logTail(logFile)}")
+                }
+            }
+        }
+    }
+
+    private fun runRuntimeProcess(
+        command: List<String>,
+        workingDir: Path,
+        logFile: Path,
+        timeoutSeconds: Long,
+        runtimeLogPolicy: RuntimeLogPolicy,
+        inputSourceDir: Path? = null,
+        requiresScopedJavaCleanup: Boolean = true
+    ): CheckResult {
+        logFile.parent?.createDirectories()
+        Files.deleteIfExists(logFile)
+        val processBuilder = ProcessBuilder(command)
+            .directory(workingDir.toFile())
+            .redirectErrorStream(true)
+            .redirectOutput(logFile.toFile())
+        configureJavaHome(processBuilder)
+
+        return BenchmarkOwnedProcesses.use(processBuilder) { process ->
+            runStartedRuntimeProcess(process, workingDir, logFile, timeoutSeconds, runtimeLogPolicy,
+                inputSourceDir, requiresScopedJavaCleanup)
+        }
+    }
+
+    private fun runStartedRuntimeProcess(
+        process: Process,
+        workingDir: Path,
+        logFile: Path,
+        timeoutSeconds: Long,
+        runtimeLogPolicy: RuntimeLogPolicy,
+        inputSourceDir: Path?,
+        requiresScopedJavaCleanup: Boolean
+    ): CheckResult {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds)
+        var ready = false
+        var stopSent = false
+        var progressReachedAt: Long? = null
+        var progressTimeoutTriggered = false
+        var terminateRequestedAt: Long? = null
+        var runtimeControlError: String? = null
+        var scopedCleanup = emptyList<Long>()
+        var ownedDescendants = emptyList<OwnedProcessIdentity>()
+
+        while (System.nanoTime() < deadline) {
+            val now = System.nanoTime()
+            ownedDescendants = captureOwnedDescendants(process, ownedDescendants)
+            if (!ready && runtimeLogPolicy.ready(logFile)) {
+                ready = true
+                if (runtimeLogPolicy.stopCommand != null) {
+                    try {
+                        process.outputStream.bufferedWriter().use { writer ->
+                            writer.write(runtimeLogPolicy.stopCommand)
+                            writer.newLine()
+                            writer.flush()
+                        }
+                        stopSent = true
+                    } catch (ex: Exception) {
+                        runtimeControlError = "Failed to send runtime stop command: ${ex.message}"
+                        ownedDescendants = terminateProcessTree(process, forcibly = false, ownedDescendants)
+                    }
+                } else if (runtimeLogPolicy.terminateAfterReady) {
+                    ownedDescendants = terminateProcessTree(process, forcibly = false, ownedDescendants)
+                    terminateRequestedAt = now
+                }
+            } else if (!ready && progressReachedAt == null && runtimeLogPolicy.progress(logFile)) {
+                progressReachedAt = now
+            }
+
+            if (ready && terminateRequestedAt == null && runtimeLogPolicy.terminateAfterShutdownChecks &&
+                runtimeLogPolicy.shutdown(logFile)
+            ) {
+                if (process.isAlive) {
+                    ownedDescendants = terminateProcessTree(process, forcibly = false, ownedDescendants)
+                }
+                terminateRequestedAt = now
+            }
+
+            val progressAt = progressReachedAt
+            val progressGrace = runtimeLogPolicy.progressGraceSeconds
+            if (!ready && !progressTimeoutTriggered && progressAt != null && progressGrace != null &&
+                now - progressAt > TimeUnit.SECONDS.toNanos(progressGrace)
+            ) {
+                progressTimeoutTriggered = true
+                ownedDescendants = terminateProcessTree(process, forcibly = false, ownedDescendants)
+                terminateRequestedAt = now
+            }
+
+            if (!process.isAlive) {
+                terminateCapturedDescendantsAfterParentExit(process, ownedDescendants)
+                break
+            }
+            val terminateAt = terminateRequestedAt
+            if (terminateAt != null && System.nanoTime() - terminateAt > TimeUnit.SECONDS.toNanos(20)) {
+                ownedDescendants = terminateProcessTree(process, forcibly = true, ownedDescendants)
+                process.waitFor(5, TimeUnit.SECONDS)
+                break
+            }
+            Thread.sleep(500)
+        }
+
+        if (process.isAlive) {
+            ownedDescendants = terminateProcessTree(process, forcibly = true, ownedDescendants)
+            process.waitFor(5, TimeUnit.SECONDS)
+            scopedCleanup = if (requiresScopedJavaCleanup) {
+                terminateScopedJavaProcesses(workingDir)
+            } else {
+                emptyList()
+            }
+            if (process.isAlive || !runtimeLogPolicy.terminateAfterReady || !ready) {
+                settleRuntimeProcess(process, logFile)
+                return CheckResult(
+                    CheckStatus.FAIL,
+                    "Timed out after ${timeoutSeconds}s; ready=$ready; stopSent=$stopSent; " +
+                        "log=$logFile${scopedCleanupNote(scopedCleanup)}; tail=${logTail(logFile)}"
+                )
+            }
+        }
+        terminateCapturedDescendantsAfterParentExit(process, ownedDescendants)
+        settleRuntimeProcess(process, logFile)
+        if (requiresScopedJavaCleanup) {
+            scopedCleanup = (scopedCleanup + terminateScopedJavaProcesses(workingDir)).distinct()
+        }
+
+        if (runtimeControlError != null) {
+            return CheckResult(
+                CheckStatus.FAIL,
+                "$runtimeControlError; log=$logFile${scopedCleanupNote(scopedCleanup)}; tail=${logTail(logFile)}"
+            )
+        }
+
+        val audit = auditRuntimeLog(logFile, runtimeLogPolicy.failOnWarnings, workingDir, inputSourceDir)
+        if (audit.findings.isNotEmpty()) {
+            return CheckResult(
+                CheckStatus.FAIL,
+                "Runtime log gate failed; log=$logFile${scopedCleanupNote(scopedCleanup)}; " +
+                    "findings=${audit.findings.joinToString(" | ")}"
+            )
+        }
+
+        val missingReady = runtimeLogPolicy.missingReadyChecks(logFile)
+        if (missingReady.isNotEmpty()) {
+            val progressNote = if (progressTimeoutTriggered) {
+                " after progress gate '${runtimeLogPolicy.progressLabel}' waited ${runtimeLogPolicy.progressGraceSeconds}s"
+            } else {
+                ""
+            }
+            return CheckResult(
+                CheckStatus.FAIL,
+                "Runtime did not reach required marker(s)$progressNote: ${missingReady.joinToString(", ")}; " +
+                    "log=$logFile${scopedCleanupNote(scopedCleanup)}; tail=${logTail(logFile)}"
+            )
+        }
+
+        val missingShutdown = runtimeLogPolicy.missingShutdownChecks(logFile)
+        if (missingShutdown.isNotEmpty()) {
+            return CheckResult(
+                CheckStatus.FAIL,
+                "Runtime did not reach shutdown marker(s): ${missingShutdown.joinToString(", ")}; " +
+                    "log=$logFile${scopedCleanupNote(scopedCleanup)}; tail=${logTail(logFile)}"
+            )
+        }
+
+        val exitCode = process.exitValue()
+        if (exitCode != 0 && runtimeLogPolicy.requireZeroExit) {
+            return CheckResult(
+                CheckStatus.FAIL,
+                "Exited $exitCode; log=$logFile${scopedCleanupNote(scopedCleanup)}; tail=${logTail(logFile)}"
+            )
+        }
+
+        val allowedIssueNote = if (audit.allowedIssues.isEmpty()) {
+            ""
+        } else {
+            "; allowedRuntimeIssues=${audit.allowedIssues.joinToString(" | ")}"
+        }
+        return CheckResult(
+            CheckStatus.PASS,
+            "Runtime gate passed; log=$logFile${scopedCleanupNote(scopedCleanup)}$allowedIssueNote"
+        )
+    }
+
+    private fun settleRuntimeProcess(process: Process, logFile: Path) {
+        runCatching { process.outputStream.close() }
+        runCatching { process.inputStream.close() }
+        runCatching { process.errorStream.close() }
+        runCatching { process.waitFor(2, TimeUnit.SECONDS) }
+        BenchmarkOwnedProcesses.finish(process)
+        if (!process.isAlive) {
+            awaitRuntimeLogRelease(logFile)
+        }
+    }
+
+    private fun awaitRuntimeLogRelease(logFile: Path) {
+        if (!logFile.exists()) return
+
+        val probe = logFile.resolveSibling(
+            ".${logFile.fileName}.release-probe-${ProcessHandle.current().pid()}-${System.nanoTime()}"
+        )
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+        var movedToProbe = false
+        var lastFailure: Exception? = null
+
+        while (System.nanoTime() < deadline) {
+            try {
+                if (!movedToProbe) {
+                    Files.move(logFile, probe)
+                    movedToProbe = true
+                }
+                Files.move(probe, logFile)
+                return
+            } catch (ex: Exception) {
+                lastFailure = ex
+                if (movedToProbe && !probe.exists() && logFile.exists()) {
+                    return
+                }
+                Thread.sleep(50)
+            }
+        }
+
+        if (movedToProbe && probe.exists() && !logFile.exists()) {
+            try {
+                Files.move(probe, logFile)
+                return
+            } catch (ex: Exception) {
+                lastFailure = ex
+            }
+        }
+
+        throw java.io.IOException(
+            "Runtime log handle did not settle within 2s; original=$logFile; probe=$probe; " +
+                "fileUsers=${WindowsRuntimeLogOwners.describe(if (movedToProbe && probe.exists()) probe else logFile)}",
+            lastFailure
+        )
+    }
+
+    private fun stalledClientWorldCommand(tempDir: Path): List<String> {
+        val lines = listOf(
+            "[Render thread/INFO] [minecraft/ReloadableResourceManager]: Reloading ResourceManager: vanilla, mod_resources",
+            "[Render thread/INFO] [mojang/Library]: OpenAL initialized on device Test",
+            "[Render thread/INFO] [minecraft/SoundEngine]: Sound engine started"
+        )
+        val isWindows = System.getProperty("os.name").lowercase().contains("win")
+        return if (isWindows) {
+            val script = tempDir.resolve("stall-client-world.ps1")
+            script.writeText(
+                lines.joinToString(System.lineSeparator()) { "Write-Output '$it'" } +
+                    System.lineSeparator() +
+                    "Start-Sleep -Seconds 20" +
+                    System.lineSeparator()
+            )
+            listOf("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script.toString())
+        } else {
+            val script = tempDir.resolve("stall-client-world.sh")
+            script.writeText(
+                "#!/bin/sh\n" +
+                    lines.joinToString("\n") { "printf '%s\\n' '$it'" } +
+                    "\nsleep 20\n"
+            )
+            listOf("sh", script.toString())
+        }
+    }
+
+    private fun stalledGameTestShutdownCommand(tempDir: Path): List<String> {
+        val lines = listOf(
+            "[06:14:13] [Server thread/INFO] [net.minecraft.gametest.framework.GameTestServer/]: All 36 required tests passed :)",
+            "[06:14:13] [Server thread/INFO] [minecraft/MinecraftServer]: Stopping server"
+        )
+        val isWindows = System.getProperty("os.name").lowercase().contains("win")
+        return if (isWindows) {
+            val script = tempDir.resolve("stall-gametest-shutdown.ps1")
+            script.writeText(
+                lines.joinToString(System.lineSeparator()) { "Write-Output '$it'" } +
+                    System.lineSeparator() +
+                    "Start-Sleep -Seconds 20" +
+                    System.lineSeparator()
+            )
+            listOf("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script.toString())
+        } else {
+            val script = tempDir.resolve("stall-gametest-shutdown.sh")
+            script.writeText(
+                "#!/bin/sh\n" +
+                    lines.joinToString("\n") { "printf '%s\\n' '$it'" } +
+                    "\nsleep 20\n"
+            )
+            listOf("sh", script.toString())
+        }
+    }

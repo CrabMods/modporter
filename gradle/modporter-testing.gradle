@@ -1,0 +1,237 @@
+import java.lang.management.ManagementFactory
+
+abstract class ModporterRuntimeLeaseParameters implements
+        org.gradle.api.services.BuildServiceParameters {
+    abstract org.gradle.api.file.RegularFileProperty getLockFile()
+    abstract org.gradle.api.file.RegularFileProperty getProcessInventory()
+    abstract org.gradle.api.provider.Property<String> getRuntimeDirectory()
+}
+
+abstract class ModporterRuntimeLeaseService implements
+        org.gradle.api.services.BuildService<ModporterRuntimeLeaseParameters>,
+        AutoCloseable {
+    private java.nio.channels.FileChannel channel
+    private java.nio.channels.FileLock lock
+
+    private void assertNoExistingRuntime() {
+        def currentPid = ManagementFactory.runtimeMXBean.name.split('@')[0]
+        def command = [
+                'pwsh', '-NoProfile', '-File',
+                parameters.processInventory.get().asFile.absolutePath,
+                '-FailIfDetected',
+                '-ExcludeProcessIdsCsv', currentPid,
+                '-IncludePathMarkersCsv',
+                parameters.runtimeDirectory.get()
+        ]
+        def process = new ProcessBuilder(command)
+                .redirectErrorStream(true)
+                .start()
+        def output = process.inputStream.getText('UTF-8').trim()
+        def exitCode = process.waitFor()
+        if (exitCode != 0) {
+            throw new GradleException(
+                    "ModPorter scoped runtime preflight failed (${exitCode}): ${output}")
+        }
+    }
+
+    synchronized void acquire() {
+        if (lock != null) {
+            return
+        }
+        def path = parameters.lockFile.get().asFile.toPath()
+        try {
+            java.nio.file.Files.createDirectories(path.parent)
+            channel = java.nio.channels.FileChannel.open(
+                    path,
+                    java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.WRITE)
+            lock = channel.tryLock()
+            if (lock == null) {
+                throw new GradleException(
+                        'another Minecraft runtime holds this runtime-directory lease')
+            }
+            assertNoExistingRuntime()
+        } catch (Exception error) {
+            releaseAll()
+            throw new GradleException(
+                    'cannot acquire the ModPorter runtime-directory lease',
+                    error)
+        }
+    }
+
+    private void releaseAll() {
+        if (lock != null) {
+            lock.release()
+            lock = null
+        }
+        if (channel != null) {
+            channel.close()
+            channel = null
+        }
+    }
+
+    @Override
+    synchronized void close() {
+        releaseAll()
+    }
+}
+
+def modporterTestingEnsure = tasks.register('modporterTestingEnsure') {
+    group = 'verification'
+    description = 'Run the project-owned public ModPorter preflight.'
+    doLast {
+        def required = [
+                file('scripts/run_gradle.py'),
+                file('scripts/modporter_build.py'),
+                file('scripts/Invoke-ModporterRuntimeSession.ps1'),
+                file('scripts/runtime_process_inventory.ps1'),
+                file('gradle/modporter-testing.gradle')
+        ]
+        def missing = required.findAll { !it.isFile() }
+        if (!missing.isEmpty()) {
+            throw new GradleException(
+                    'Public ModPorter runtime adapter is incomplete: ' +
+                            missing.collect { it.absolutePath }.join(', '))
+        }
+        def configuredPython = System.getenv('PYTHON')
+        def pythonCommand = configuredPython != null &&
+                !configuredPython.trim().isEmpty()
+                ? configuredPython
+                : (System.getProperty('os.name')
+                        .toLowerCase(java.util.Locale.ROOT)
+                        .contains('windows') ? 'python' : 'python3')
+        project.exec {
+            workingDir project.projectDir
+            commandLine pythonCommand,
+                    file('scripts/run_gradle.py').absolutePath,
+                    'ensure'
+        }
+    }
+}
+
+def minecraftModTestingEnsure = tasks.register(
+        'minecraftModTestingEnsure') {
+    group = 'verification'
+    description = 'Compatibility alias for the public ModPorter adapter check.'
+    dependsOn modporterTestingEnsure
+}
+
+def runtimeDirectoryProperty = providers.gradleProperty(
+        'modporterRuntimeDirectory')
+def legacyRuntimeDirectoryProperty = providers.gradleProperty(
+        'minecraftModTestingRuntimeDirectory')
+def modporterRuntimeDirectory = runtimeDirectoryProperty
+        .orElse(legacyRuntimeDirectoryProperty)
+        .map { value -> project.file(value.toString()).canonicalFile }
+        .orElse(layout.projectDirectory.asFile)
+def modporterIsWindows = System.getProperty('os.name')
+        .toLowerCase(java.util.Locale.ROOT)
+        .contains('windows')
+def modporterCanonicalResourceText = { File path ->
+    def canonical = path.canonicalPath
+    modporterIsWindows
+            ? canonical.toLowerCase(java.util.Locale.ROOT)
+            : canonical
+}
+def modporterRuntimeHash = modporterRuntimeDirectory.map { runtimeDir ->
+    def digest = java.security.MessageDigest.getInstance('SHA-256')
+    digest.digest(modporterCanonicalResourceText(runtimeDir)
+            .getBytes(java.nio.charset.StandardCharsets.UTF_8))
+            .collect { value -> String.format('%02x', value & 0xff) }
+            .join('').toString()
+}
+def modporterRuntimeLockFile = modporterRuntimeHash.map { hash ->
+    new File(
+            new File(System.getProperty('java.io.tmpdir'),
+                    'modporter-testing'),
+            "runtime-${hash}.lock")
+}
+
+def modporterRuntimeLeaseService = gradle.sharedServices.registerIfAbsent(
+        'modporterRuntimeLeaseService',
+        ModporterRuntimeLeaseService) {
+    parameters.lockFile.set(
+            layout.file(providers.provider {
+                modporterRuntimeLockFile.get()
+            }))
+    parameters.processInventory.set(
+            layout.projectDirectory.file(
+                    'scripts/runtime_process_inventory.ps1'))
+    parameters.runtimeDirectory.set(modporterRuntimeDirectory.map {
+        runtimeDir -> runtimeDir.absolutePath
+    })
+    maxParallelUsages.set(1)
+}
+
+def modporterRuntimeLease = tasks.register('modporterRuntimeLease') {
+    group = 'verification'
+    description = 'Hold the declared runtime-directory lease until this Gradle build finishes.'
+    dependsOn modporterTestingEnsure
+    onlyIf {
+        if (System.getenv('MODPORTER_RUNTIME_SESSION_ACTIVE') != '1') {
+            return true
+        }
+        def outerSessionId = System.getenv(
+                'MINECRAFT_MOD_TEST_SESSION_ID')
+        def outerDirectory = System.getenv(
+                'MODPORTER_RUNTIME_SESSION_DIRECTORY')
+        def ownerProcessIdText = System.getenv(
+                'MODPORTER_RUNTIME_SESSION_OWNER_PID')
+        if (outerSessionId == null || outerSessionId.trim().isEmpty() ||
+                outerDirectory == null || outerDirectory.trim().isEmpty() ||
+                ownerProcessIdText == null ||
+                ownerProcessIdText.trim().isEmpty()) {
+            return true
+        }
+        long ownerProcessId
+        try {
+            ownerProcessId = Long.parseLong(ownerProcessIdText.trim())
+        } catch (NumberFormatException ignored) {
+            return true
+        }
+        def cursor = ProcessHandle.current()
+        boolean ownerIsLiveAncestor = false
+        while (cursor != null) {
+            if (cursor.pid() == ownerProcessId && cursor.isAlive()) {
+                ownerIsLiveAncestor = true
+                break
+            }
+            def parent = cursor.parent()
+            cursor = parent.isPresent() ? parent.get() : null
+        }
+        if (!ownerIsLiveAncestor) {
+            return true
+        }
+        return modporterCanonicalResourceText(new File(outerDirectory)) !=
+                modporterCanonicalResourceText(modporterRuntimeDirectory.get())
+    }
+    usesService modporterRuntimeLeaseService
+    doLast {
+        modporterRuntimeLeaseService.get().acquire()
+    }
+}
+
+tasks.configureEach { candidate ->
+    if (candidate.name in [
+            'modporterTestingEnsure',
+            'minecraftModTestingEnsure',
+            'modporterRuntimeLease']) {
+        return
+    }
+    boolean runtimeGuarded = candidate.name.startsWith('runClient') ||
+            candidate.name.startsWith('runServer') ||
+            candidate.name.startsWith('runGameTestServer') ||
+            candidate.name.startsWith('runValidationClient') ||
+            candidate.name.startsWith('runValidationServer') ||
+            candidate.name.startsWith('runData')
+    boolean publicChecked = candidate instanceof org.gradle.api.tasks.testing.Test || candidate.name in [
+            'build', 'check', 'test', 'assemble'] || runtimeGuarded
+    if (publicChecked) {
+        candidate.dependsOn modporterTestingEnsure
+    }
+    if (runtimeGuarded) {
+        candidate.dependsOn modporterRuntimeLease
+    }
+}
+
+

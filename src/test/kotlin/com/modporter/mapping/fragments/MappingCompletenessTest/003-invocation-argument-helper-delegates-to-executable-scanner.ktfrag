@@ -1,10 +1,7 @@
 
     @Test
     fun `invocation argument helper delegates to executable scanner`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun rewriteJavaInvocationArguments(")
         assertTrue(start >= 0, "rewriteJavaInvocationArguments is missing")
         val end = source.indexOf("private fun rewriteExecutableJavaInvocationArguments", start + 1).let {
@@ -29,10 +26,7 @@
 
     @Test
     fun `offset invocation argument helper delegates to executable scanner`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun rewriteJavaInvocationArgumentsWithOffset(")
         assertTrue(start >= 0, "rewriteJavaInvocationArgumentsWithOffset is missing")
         val executableStart = source.indexOf("private fun rewriteExecutableJavaInvocationArgumentsWithOffset", start + 1)
@@ -62,10 +56,7 @@
 
     @Test
     fun `constructor helper delegates to executable scanner`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun rewriteJavaNew(")
         assertTrue(start >= 0, "rewriteJavaNew is missing")
         val end = source.indexOf("private fun rewriteExecutableJavaNew", start + 1).let {
@@ -89,10 +80,7 @@
 
     @Test
     fun `super constructor helper delegates to executable scanner`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun rewriteSuperConstructorCalls(")
         assertTrue(start >= 0, "rewriteSuperConstructorCalls is missing")
         val end = source.indexOf("private fun rewriteExecutableSuperConstructorCalls", start + 1).let {
@@ -117,10 +105,7 @@
 
     @Test
     fun `entity getLevel accessor migration uses executable structural evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateEntityLevelAccessorCalls")
         assertTrue(start >= 0, "migrateEntityLevelAccessorCalls is missing")
         val end = source.indexOf("private fun findMatchingBrace", start + 1).let {
@@ -159,10 +144,7 @@
 
     @Test
     fun `structural brace matching ignores Java comments and literals`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val braceStart = source.indexOf("private fun findMatchingBrace")
         assertTrue(braceStart >= 0, "findMatchingBrace is missing")
         val braceEnd = source.indexOf("private fun migrateEventBusSubscriberStaticMethodsSource", braceStart + 1).let {
@@ -594,10 +576,7 @@
 
     @Test
     fun `recipe book category finder migration uses executable call evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateRecipeBookCategoryFinderRecipeHolders")
         assertTrue(start >= 0, "migrateRecipeBookCategoryFinderRecipeHolders is missing")
         val end = source.indexOf("private fun migrateRecipeManagerCraftingInputSource", start + 1).let {
@@ -628,10 +607,7 @@
 
     @Test
     fun `furnace can burn accessor migration uses executable binding evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val migrateStart = source.indexOf("private fun migrateLegacyAbstractFurnaceCanBurnInvokerBoundary")
         assertTrue(migrateStart >= 0, "migrateLegacyAbstractFurnaceCanBurnInvokerBoundary is missing")
         val migrateEnd = source.indexOf("private fun nearestFurnaceCanBurnAccessorCast", migrateStart + 1).let {
@@ -670,10 +646,7 @@
 
     @Test
     fun `unbound level registry access migration uses executable token edits`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateUnboundLevelRegistryAccessCalls")
         assertTrue(start >= 0, "migrateUnboundLevelRegistryAccessCalls is missing")
         val end = source.indexOf("private fun migrateFoodComponentAccess", start + 1).let {
@@ -766,10 +739,7 @@
 
     @Test
     fun `entity level accessor migration does not use global simple type fallback`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateEntityLevelAccessorCalls")
         assertTrue(start >= 0, "migrateEntityLevelAccessorCalls is missing")
         val end = source.indexOf("\n    private fun ", start + 1).let {
@@ -824,9 +794,7 @@
 
     @Test
     fun `mmlib block loot constructor migration uses executable source evidence`() {
-        val source = Path.of("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .toAbsolutePath()
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateMmlibBlockLootConstructor")
         assertTrue(start >= 0, "migrateMmlibBlockLootConstructor is missing")
         val end = source.indexOf("private fun findMatchingParen", start + 1).let {
@@ -866,10 +834,7 @@
 
     @Test
     fun `legacy doEnchant damage effect migration does not use nearby damage source fallback`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         assertTrue(
             !source.contains("inferDamageSourceForDoEnchantDamageEffects"),
             "Legacy doEnchantDamageEffects migration must not infer damage sources from nearby declarations"
@@ -896,10 +861,7 @@
 
     @Test
     fun `legacy damage bonus migration does not use method wide client side fallback`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         assertTrue(
             !source.contains("inferServerLevelExpressionForMethod"),
             "Legacy getDamageBonus migration must not infer ServerLevel from whole-method client-side scans"
@@ -928,10 +890,7 @@
 
     @Test
     fun `legacy item stack random hurt migration does not use whole file server level fallback`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         assertTrue(
             !source.contains("inferServerLevelExpression("),
             "Legacy ItemStack.hurt migration must not infer ServerLevel from whole-source declarations"
@@ -958,10 +917,7 @@
 
     @Test
     fun `legacy damage bonus migration binds damage source to target hurt`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         assertTrue(
             !source.contains("firstHurtDamageSourceArgument"),
             "Legacy getDamageBonus migration must not use the first or only hurt call from the whole method"
@@ -988,10 +944,7 @@
 
     @Test
     fun `legacy mob custom damage source attack migration uses executable doHurtTarget method range`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyMobCustomDamageSourceAttacks")
         assertTrue(start >= 0, "migrateLegacyMobCustomDamageSourceAttacks is missing")
         val end = source.indexOf("private fun migrateLegacyMobCustomDamageSourceUtilityAttacks", start + 1).let {
@@ -1027,10 +980,7 @@
 
     @Test
     fun `legacy passenger attachment migration uses executable method ranges`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyPassengerAttachmentOverrides")
         assertTrue(start >= 0, "migrateLegacyPassengerAttachmentOverrides is missing")
         val end = source.indexOf("private fun migrateLegacyEntityOverrideSignatures", start + 1).let {
@@ -1067,10 +1017,7 @@
 
     @Test
     fun `legacy custom portal block migration uses executable method ranges`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyCustomPortalBlockProtocol")
         assertTrue(start >= 0, "migrateLegacyCustomPortalBlockProtocol is missing")
         val end = source.indexOf("private fun migrateLegacyConcretePowderConcreteAccessor", start + 1).let {
@@ -1112,10 +1059,7 @@
 
     @Test
     fun `legacy projectile weapon migration uses executable finishUsingItem method range`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyProjectileWeaponFinishUsingItemSource")
         assertTrue(start >= 0, "migrateLegacyProjectileWeaponFinishUsingItemSource is missing")
         val parserStart = source.indexOf("private fun parseLegacyProjectileWeaponShape", start + 1)
@@ -1179,5 +1123,40 @@
         assertTrue(
             offenders.isEmpty(),
             "Loot condition codec migrations must derive getters from serializer writes, not synthesize members from JSON keys: $offenders"
+        )
+    }
+
+    @Test
+    fun `loot type registry codec migrations require proven codec owners`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLootTypeRegistryCodecConstructors")
+        assertTrue(start >= 0, "migrateLootTypeRegistryCodecConstructors is missing")
+        val end = source.indexOf("private fun lootCodecOwnerIsAvailable", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "unconditional condition codec replacement" to """.replace(result, "new LootItemConditionType($1.CODEC)")""",
+            "unconditional function codec replacement" to """.replace(result, "new LootItemFunctionType<>($1.CODEC)")""",
+            "raw result function type scan" to """result.contains("new LootItemFunctionType<>(")""",
+            "raw function register replacement" to """"DeferredRegister<LootItemFunctionType> FUNCTIONS""""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "loot type registry codec migration contains $label" }
+
+        assertTrue(
+            body.contains("lootCodecOwnerIsAvailable") &&
+                body.contains("replaceExecutableRegex(result, conditionTypePattern)") &&
+                body.contains("replaceExecutableRegex(result, functionTypePattern)") &&
+                body.contains("maskJavaCommentsAndLiterals(result).contains(\"new LootItemFunctionType<>(\")") &&
+                body.contains("replaceCommentMaskedRegex(result, functionHolderPattern)"),
+            "Loot type registry codec migrations must check project-proven CODEC owners before replacing serializer constructors"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Loot type registry codec migrations must not reference CODEC fields unless the owner migration was proven: $offenders"
         )
     }

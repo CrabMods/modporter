@@ -1,0 +1,25 @@
+/*
+ * Copyright (c) Forge Development LLC and contributors
+ * SPDX-License-Identifier: LGPL-2.1-only
+ */
+
+package @PACKAGE@;
+
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.block.state.BlockState;
+
+/**
+ * Canonical shared Forge 1.20.1 plant contract for every converted mod.
+ *
+ * The package and containing Jar-in-Jar coordinate are fixed. Converted dependencies therefore
+ * implement this same runtime type rather than a per-mod generated ABI. Verified vanilla target
+ * singleton blocks are adapted without wrappers, so their object identity is retained.
+ */
+public interface IPlantable {
+    default PlantType getPlantType(BlockGetter level, BlockPos pos) {
+        return LegacyPlantables.defaultPlantType(this, level, pos);
+    }
+
+    BlockState getPlant(BlockGetter level, BlockPos pos);
+}

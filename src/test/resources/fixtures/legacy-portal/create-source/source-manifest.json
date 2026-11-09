@@ -1,0 +1,22 @@
+[
+  {
+    "sourceRelativePath": "src/main/java/com/simibubi/create/content/contraptions/glue/SuperGlueEntity.java",
+    "fixture": "SuperGlueEntity.java.fixture",
+    "sha256": "a05361adcec40851b3dc5dc86180af800a7b5467ab4daa6678943b239e8c30cf"
+  },
+  {
+    "sourceRelativePath": "src/main/java/com/simibubi/create/api/contraption/train/PortalTrackProvider.java",
+    "fixture": "PortalTrackProvider.java.fixture",
+    "sha256": "1ce8fc6eec5415d0cb749e9cc12bebe39e0b63ff6a0f5604a9a846d935a344ac"
+  },
+  {
+    "sourceRelativePath": "src/main/java/com/simibubi/create/content/trains/track/AllPortalTracks.java",
+    "fixture": "AllPortalTracks.java.fixture",
+    "sha256": "54f2c6dcd9641964316609f9c6de1787db9ee3d30b73f69a908abfcababaaa8b"
+  },
+  {
+    "sourceRelativePath": "src/main/java/com/simibubi/create/compat/betterend/BetterEndPortalCompat.java",
+    "fixture": "BetterEndPortalCompat.java.fixture",
+    "sha256": "28d16db7e1591f692d15974eb94c76938442d47a311322600510dc9fc8bc1f67"
+  }
+]

@@ -1,0 +1,1007 @@
+
+    @Test
+    fun `command function cacheable function migrates to split cacheable type`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.commands.CommandFunction;
+
+            public class FunctionUse {
+                CacheableTarget target(CommandFunction.CacheableFunction function) {
+                    return new CacheableTarget(function, CommandFunction.CacheableFunction.NONE);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.commands.CacheableFunction;"))
+        assertTrue(transformed.contains("import net.minecraft.commands.functions.CommandFunction;"))
+        assertTrue(transformed.contains("CacheableTarget target(CacheableFunction function)"))
+        assertTrue(transformed.contains("new CacheableTarget(function, java.util.Optional.empty())"))
+        assertFalse(transformed.contains("CommandFunction.CacheableFunction"))
+        assertFalse(transformed.contains("import net.minecraft.commands.CommandFunction;"))
+    }
+
+    @Test
+    fun `removed tag manager item access migrates to registry holders`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.item.Item;
+            import net.neoforged.neoforge.registries.tags.ITagManager;
+
+            public class TagAccess {
+                public static void add(TagKey<Item> itemTag, int burnTime) {
+                    ITagManager<Item> tags = BuiltInRegistries.ITEM.tags();
+                    if (tags != null) {
+                        tags.getTag(itemTag).stream().forEach((item) -> getMap().put(item, burnTime));
+                    }
+                }
+
+                public static boolean empty(TagKey<Item> itemTag) {
+                    boolean flag = true;
+                    ITagManager<Item> itemTags = BuiltInRegistries.ITEM.tags();
+                    if (itemTags != null) {
+                        if (itemTags.getTag(itemTag).isEmpty()) {
+                            flag = false;
+                        }
+                    }
+                    return flag;
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertFalse(transformed.contains("ITagManager"))
+        assertFalse(transformed.contains("net.neoforged.neoforge.registries.tags"))
+        assertTrue(transformed.contains("BuiltInRegistries.ITEM.getTagOrEmpty(itemTag).forEach"), transformed)
+        assertTrue(transformed.contains("Holder<Item> itemHolder"), transformed)
+        assertTrue(transformed.contains("Item item = itemHolder.value();"), transformed)
+        assertTrue(transformed.contains("getMap().put(item, burnTime);"), transformed)
+        assertTrue(transformed.contains("if (!BuiltInRegistries.ITEM.getTagOrEmpty(itemTag).iterator().hasNext()) {"), transformed)
+    }
+
+    @Test
+    fun `removed tag manager migration ignores comments text blocks and unsupported shapes`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.item.Item;
+            import net.neoforged.neoforge.registries.tags.ITagManager;
+
+            public class TagAccess {
+                private static final String DOC = ${"\"\"\""}
+                    ITagManager<Item> tags = BuiltInRegistries.ITEM.tags();
+                    if (tags != null) {
+                        tags.getTag(itemTag).stream().forEach((item) -> getMap().put(item, burnTime));
+                    }
+                    ${"\"\"\""};
+
+                // ITagManager<Item> commented = BuiltInRegistries.ITEM.tags();
+
+                public static void unsupported(TagKey<Item> itemTag) {
+                    ITagManager<Item> tags = BuiltInRegistries.ITEM.tags();
+                    if (tags != null) {
+                        use(tags.getTag(itemTag));
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.neoforged.neoforge.registries.tags.ITagManager;"), transformed)
+        assertTrue(transformed.contains("ITagManager<Item> tags = BuiltInRegistries.ITEM.tags();"), transformed)
+        assertTrue(transformed.contains("use(tags.getTag(itemTag));"), transformed)
+        assertTrue(transformed.contains("tags.getTag(itemTag).stream().forEach((item) -> getMap().put(item, burnTime));"), transformed)
+        assertFalse(transformed.contains("BuiltInRegistries.ITEM.getTagOrEmpty(itemTag).forEach"), transformed)
+    }
+
+    @Test
+    fun `network hooks open screen handles nested simple menu provider lambda`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraftforge.network.NetworkHooks;
+
+            public class TestMod {
+                public void open(ServerPlayer serverPlayer) {
+                    NetworkHooks.openScreen(serverPlayer, new SimpleMenuProvider((id, inventory, playerEntity) -> new LoreBookMenu(id, inventory), Component.translatable("menu.example.book")));
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(transformed.contains("(serverPlayer).openMenu(new SimpleMenuProvider((id, inventory, playerEntity) -> new LoreBookMenu(id, inventory), Component.translatable(\"menu.example.book\")));"), transformed)
+        assertFalse(transformed.contains("buf.writeBlockPos(inventory, playerEntity)"), transformed)
+        assertFalse(transformed.contains("NetworkHooks.openScreen"), transformed)
+        assertFalse(transformed.contains("import net.minecraftforge.network.NetworkHooks;"), transformed)
+    }
+
+    @Test
+    fun `network hooks open screen migration ignores comments and string literals`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraftforge.network.NetworkHooks;
+
+            public class TestMod {
+                private static final String DOC = "NetworkHooks.openScreen(player, menu, payload)";
+
+                /*
+                 NetworkHooks.openScreen(player, menu, payload);
+                 */
+
+                public void open(ServerPlayer player, MenuProvider menu) {
+                    NetworkHooks.openScreen(player, menu);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(transformed.contains("(player).openMenu(menu);"), transformed)
+        assertTrue(transformed.contains("private static final String DOC = \"NetworkHooks.openScreen(player, menu, payload)\";"), transformed)
+        assertTrue(transformed.contains("NetworkHooks.openScreen(player, menu, payload);"), transformed)
+        assertFalse(transformed.contains("import net.minecraftforge.network.NetworkHooks;"), transformed)
+        assertFalse(transformed.contains("DOC = \"(player).openMenu"), transformed)
+    }
+
+    @Test
+    fun `network hooks open screen rejects untyped third argument instead of guessing`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraftforge.network.NetworkHooks;
+
+            public class TestMod {
+                public void open(ServerPlayer player, MenuProvider menu, Object payload) {
+                    NetworkHooks.openScreen(player, menu, payload);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.errors.any { it.contains("Cannot safely migrate NetworkHooks.openScreen") }, result.errors.joinToString("\n"))
+        assertTrue(transformed.contains("NetworkHooks.openScreen(player, menu, payload);"), transformed)
+        assertTrue(transformed.contains("import net.neoforged.neoforge.network.NetworkHooks;") ||
+            transformed.contains("import net.minecraftforge.network.NetworkHooks;"), transformed)
+    }
+
+    @Test
+    fun `network hooks open screen ignores commented third argument type evidence`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraftforge.network.NetworkHooks;
+
+            public class TestMod {
+                /*
+                 BlockPos payload;
+                 */
+
+                public void open(ServerPlayer player, MenuProvider menu, Object payload) {
+                    NetworkHooks.openScreen(player, menu, payload);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.errors.any { it.contains("Cannot safely migrate NetworkHooks.openScreen") }, result.errors.joinToString("\n"))
+        assertTrue(transformed.contains("NetworkHooks.openScreen(player, menu, payload);"), transformed)
+        assertFalse(transformed.contains("buf.writeBlockPos(payload)"), transformed)
+    }
+
+    @Test
+    fun `sakura gui tags bucket event and vertex APIs migrate to 1_21 surfaces`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            public class TestMod {
+                public void screen(GuiGraphics ms, int mouseX, int mouseY, float partialTicks, BucketItem bucketItem) {
+                    this.renderBackground(ms);
+                    Fluid fluid = bucketItem.getFluid();
+                }
+
+                public void event(BlockToolModificationEvent event) {
+                    ItemAbility ability = event.getToolAction();
+                }
+
+                public void tags() {
+                    Object itemTags = List.of(Tags.Items.COBBLESTONE, Tags.Items.GRAVEL, Tags.Items.GLASS, Tags.Items.STRING, Tags.Items.STONE, Tags.Items.SAND);
+                    Object blockTags = List.of(Tags.Blocks.COBBLESTONE, Tags.Blocks.GRAVEL, Tags.Blocks.GLASS, Tags.Blocks.STONE, Tags.Blocks.SAND);
+                }
+
+                public void render(VertexConsumer builder, Matrix4f matrix, Matrix3f normal, float x, float y, float z, float u, float v, int packedLight, float nx, float ny, float nz) {
+                    builder.vertex(matrix, x, y, z).setUv(u, v).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).setNormal(normal, nx, ny, nz).endVertex();
+                    builder.vertex(matrix, x, y, z).overlayCoords(0, 10).uv2(packedLight).endVertex();
+                    mesh.vertex(x, y, z);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("this.renderBackground(ms, mouseX, mouseY, partialTicks);"))
+        assertTrue(transformed.contains("Fluid fluid = bucketItem.content;"))
+        assertTrue(transformed.contains("ItemAbility ability = event.getItemAbility();"))
+        assertTrue(transformed.contains("Tags.Items.COBBLESTONES"))
+        assertTrue(transformed.contains("Tags.Items.GRAVELS"))
+        assertTrue(transformed.contains("Tags.Items.GLASS_BLOCKS"))
+        assertTrue(transformed.contains("Tags.Items.STRINGS"))
+        assertTrue(transformed.contains("Tags.Items.STONES"))
+        assertTrue(transformed.contains("Tags.Items.SANDS"))
+        assertTrue(transformed.contains("Tags.Blocks.COBBLESTONES"))
+        assertTrue(transformed.contains("Tags.Blocks.GRAVELS"))
+        assertTrue(transformed.contains("Tags.Blocks.GLASS_BLOCKS"))
+        assertTrue(transformed.contains("Tags.Blocks.STONES"))
+        assertTrue(transformed.contains("Tags.Blocks.SANDS"))
+        assertTrue(transformed.contains("builder.addVertex(matrix, x, y, z).setUv(u, v).setOverlay(OverlayTexture.NO_OVERLAY).setLight(packedLight).setNormal(nx, ny, nz);"))
+        assertTrue(transformed.contains("builder.addVertex(matrix, x, y, z).setOverlay(OverlayTexture.NO_OVERLAY).setLight(packedLight);"))
+        assertTrue(transformed.contains("mesh.vertex(x, y, z);"))
+        assertFalse(transformed.contains("bucketItem.getFluid()"))
+        assertFalse(transformed.contains("event.getToolAction()"))
+        assertFalse(transformed.contains("builder.vertex("))
+        assertFalse(transformed.contains(".overlayCoords("))
+        assertFalse(transformed.contains(".uv2("))
+        assertFalse(transformed.contains(".endVertex()"))
+    }
+
+    @Test
+    fun `sakura effect particle fluid and nested event migrations compile against 1_21 APIs`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.core.particles.SimpleParticleType;
+            import net.minecraft.world.level.material.FlowingFluid;
+            import net.neoforged.neoforge.event.entity.living.LivingDamageEvent.Post;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class TestMod {
+                public static final DeferredHolder<SimpleParticleType, SimpleParticleType> LEAF = PARTICLES.register("leaf", () -> new SimpleParticleType(false));
+                public static final DeferredHolder<FlowingFluid, FlowingFluid> SAKE = FLUIDS.register("sake", () -> new BaseFlowingFluid.Source(PROPS));
+
+                public void onLivingHurt(LivingDamageEvent.Post event, Player player, MobEffectInstance instance) {
+                    if (player.hasEffect(EffectRegistry.FIRE_BLADE.get())) {
+                        int amplifier = player.getEffect(EffectRegistry.EXP_UP.get()).getAmplifier();
+                    }
+                    boolean bad = instance.getEffect().isBeneficial();
+                    Object effect = new MobEffectInstance(EffectRegistry.GOLDEN_HEART.get(), 20, 0);
+                    Object bucket = new BucketItem(FluidRegistry.SAKE_STILL, props);
+                    Object block = new LiquidBlock(FluidRegistry.SAKE_FLOWING, props);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.core.particles.ParticleType;"))
+        assertTrue(transformed.contains("import net.minecraft.world.level.material.Fluid;"))
+        assertTrue(transformed.contains("import net.neoforged.neoforge.event.entity.living.LivingDamageEvent;"))
+        assertTrue(transformed.contains("import net.neoforged.neoforge.event.entity.living.LivingDamageEvent.Post;"))
+        assertFalse(transformed.contains("import net.neoforged.neoforge.event.entity.living.Post;"))
+        assertTrue(transformed.contains("DeferredHolder<ParticleType<?>, SimpleParticleType> LEAF"))
+        assertTrue(transformed.contains("DeferredHolder<Fluid, FlowingFluid> SAKE"))
+        assertTrue(transformed.contains("public void onLivingHurt(Post event"))
+        assertTrue(transformed.contains("player.hasEffect(EffectRegistry.FIRE_BLADE)"))
+        assertTrue(transformed.contains("player.getEffect(EffectRegistry.EXP_UP)"))
+        assertTrue(transformed.contains("instance.getEffect().value().isBeneficial()"))
+        assertTrue(transformed.contains("new MobEffectInstance(EffectRegistry.GOLDEN_HEART, 20, 0)"))
+        assertTrue(transformed.contains("new BucketItem(FluidRegistry.SAKE_STILL.get(), props)"))
+        assertTrue(transformed.contains("new LiquidBlock(FluidRegistry.SAKE_FLOWING.get(), props)"))
+        assertFalse(transformed.contains("DeferredHolder<SimpleParticleType, SimpleParticleType>"))
+        assertFalse(transformed.contains("EffectRegistry.FIRE_BLADE.get()"))
+        assertFalse(transformed.contains("getEffect().isBeneficial()"))
+    }
+
+    @Test
+    fun `block override signature rules migrate common 1_21 methods`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import javax.annotation.Nullable;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class TestMod {
+                @Override
+                @SuppressWarnings("deprecation")
+                @Override
+                protected InteractionResult useWithoutItem(BlockState state, Level world, BlockPos pos, Player player, BlockHitResult hit) {
+                    return InteractionResult.PASS;
+                }
+
+                @Override
+                public boolean isBed(BlockState state, BlockGetter level, BlockPos pos, @Nullable Entity player) {
+                    return true;
+                }
+
+                @Override
+                public void playerWillDestroy(Level level, BlockPos pos, BlockState state, Player player) {
+                    super.playerWillDestroy(level, pos, state, player);
+                }
+
+                @Override
+                public ItemStack getCloneItemStack(BlockGetter level, BlockPos pos, BlockState state) {
+                    return ItemStack.EMPTY;
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertFalse(transformed.contains("@Override\n                @SuppressWarnings"))
+        assertTrue(transformed.contains("isBed(BlockState state, BlockGetter level, BlockPos pos, @Nullable LivingEntity player)"))
+        assertTrue(transformed.contains("import net.minecraft.world.entity.LivingEntity;"))
+        assertTrue(transformed.contains("public BlockState playerWillDestroy(Level level, BlockPos pos, BlockState state, Player player)"))
+        assertTrue(transformed.contains("return super.playerWillDestroy(level, pos, state, player);"))
+        assertTrue(transformed.contains("getCloneItemStack(BlockGetter level, BlockPos pos, BlockState state)"))
+        assertFalse(transformed.contains("getCloneItemStack(LevelReader level, BlockPos pos, BlockState state)"))
+        assertFalse(transformed.contains("import net.minecraft.world.level.LevelReader;"))
+    }
+
+    @Test
+    fun `effect tick signature migration defers trailing return to structural pass`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            public class TestMod extends MobEffect {
+                @Override
+                public void applyEffectTick(LivingEntity entity, int amplifier) {
+                    entity.getActiveEffects().stream()
+                        .filter(e -> !e.getEffect().isBeneficial())
+                        .map(MobEffectInstance::getEffect)
+                        .toList()
+                        .forEach(entity::removeEffect);
+                }
+
+                @Override
+                public boolean isDurationEffectTick(int duration, int amplifier) {
+                    return (duration & 1) == 0;
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val afterText = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(afterText.contains("public boolean applyEffectTick(LivingEntity entity, int amplifier)"))
+        assertFalse(afterText.contains("return true;"))
+        assertTrue(afterText.contains("shouldApplyEffectTickThisTick(int duration, int amplifier)"))
+        assertFalse(afterText.contains("public void applyEffectTick"))
+        assertFalse(afterText.contains("isDurationEffectTick("))
+
+        StructuralRefactorPass().apply(projectDir)
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("return true;"))
+    }
+
+    @Test
+    fun `hotbath holder tooltip and mapcodec migrations compile against 1_21 APIs`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.mojang.serialization.MapCodec;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectCategory;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.TooltipFlag;
+
+            public class TestMod extends Item {
+                public static final Codec<BaseFields> BASE_CODEC = RecordCodecBuilder.create(instance -> instance.group(
+                    EffectEntry.CODEC.listOf().optionalFieldOf("effects", List.of()).forGetter(BaseFields::effects)
+                ).apply(instance, BaseFields::new));
+
+                public void appendHoverText(@NotNull ItemStack stack, @org.jetbrains.annotations.Nullable net.minecraft.world.level.Level level, @NotNull List<Component> tooltipComponents, @NotNull TooltipFlag tooltipFlag) {
+                    super.appendHoverText(stack, level, tooltipComponents, tooltipFlag);
+                }
+
+                public int getUseDuration(@NotNull ItemStack stack) {
+                    return 32;
+                }
+
+                public MobEffectInstance toMobEffectInstance(ResourceLocation effect) {
+                    MobEffect mobEffect = BuiltInRegistries.MOB_EFFECT.get(effect);
+                    if (mobEffect == null) {
+                        return null;
+                    }
+                    return new MobEffectInstance(mobEffect, 20, 0, false, true, true);
+                }
+
+                private static boolean isHarmfulEffect(MobEffect effect) {
+                    return effect.getCategory() == MobEffectCategory.HARMFUL && effect != MobEffects.BAD_OMEN;
+                }
+
+                void remove(MobEffectInstance effectInstance, ServerPlayer player) {
+                    MobEffect effectHolder = effectInstance.getEffect();
+                    if (isHarmfulEffect(effectHolder) && effectHolder != MobEffects.UNLUCK) {
+                        player.removeEffect(effectHolder);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.core.Holder;"))
+        assertTrue(transformed.contains("EffectEntry.CODEC.codec().listOf()"))
+        assertTrue(transformed.contains("appendHoverText(@NotNull ItemStack stack, Item.TooltipContext level,"))
+        assertTrue(transformed.contains("super.appendHoverText(stack, level, tooltipComponents, tooltipFlag);"))
+        assertTrue(transformed.contains("public int getUseDuration(ItemStack stack, net.minecraft.world.entity.LivingEntity entity)"))
+        assertTrue(transformed.contains("Holder<MobEffect> mobEffect = BuiltInRegistries.MOB_EFFECT.getHolder(net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.MOB_EFFECT, effect)).orElse(null);"))
+        assertTrue(transformed.contains("return new MobEffectInstance(mobEffect, 20, 0, false, true, true);"))
+        assertTrue(transformed.contains("private static boolean isHarmfulEffect(Holder<MobEffect> effect)"))
+        assertTrue(transformed.contains("return effect.value().getCategory() == MobEffectCategory.HARMFUL"))
+        assertTrue(transformed.contains("Holder<MobEffect> effectHolder = effectInstance.getEffect();"))
+        assertTrue(transformed.contains("player.removeEffect(effectHolder);"))
+    }
+
+    @Test
+    fun `requirements strategy migrates while plant ownership evidence remains available`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.advancements.RequirementsStrategy;
+            import net.neoforged.neoforge.common.IPlantable;
+            import net.neoforged.neoforge.common.PlantType;
+
+            public class TestMod implements RequirementsStrategy {
+                IPlantable plantable;
+                PlantType plantType;
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.advancements.AdvancementRequirements;"))
+        assertTrue(transformed.contains("implements AdvancementRequirements.Strategy"))
+        assertTrue(transformed.contains("import net.neoforged.neoforge.common.IPlantable;"))
+        assertTrue(transformed.contains("import net.neoforged.neoforge.common.PlantType;"))
+        assertFalse(transformed.contains("PlantType removed"))
+        assertFalse(transformed.contains("TODO"))
+    }
+
+    @Test
+    fun `tool item constructors and durability callbacks migrate to 1_21 APIs`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.item.DiggerItem;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.ShovelItem;
+            import net.minecraft.world.item.SwordItem;
+            import net.minecraft.world.item.Tier;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.neoforged.neoforge.common.SimpleTier;
+
+            public class TestMod extends SwordItem {
+                public TestMod(Tier tier, int attackDamageModifier, float attackSpeedModifier, Properties properties) {
+                    super(tier, attackDamageModifier, attackSpeedModifier, properties);
+                }
+
+                void combat(ItemStack stack, Player player, LivingEntity entityLiving, int timeLeft, Player targetPlayer) {
+                    int ticksUsed = getUseDuration(stack) - timeLeft;
+                    float sweepRatio = EnchantmentHelper.getSweepingDamageRatio(player);
+                    float enchantBonus = EnchantmentHelper.getDamageBonus(stack, entityLiving.getMobType()) / 1.2F;
+                    targetPlayer.disableShield(false);
+                    stack.hurtAndBreak(2, player, (p) -> p.onEquippedItemBroken(EquipmentSlot.MAINHAND));
+                    ItemStack blade = ItemStack.of(tag.getCompound(TAG_BLADE));
+                }
+
+                ItemStack remainder(ItemStack stack) {
+                    ItemStack copy = stack.copy();
+                    if (copy.hurt(1, net.minecraft.util.RandomSource.create(), null)) {
+                        return ItemStack.EMPTY;
+                    }
+                    return copy;
+                }
+            }
+
+            class BroomItem extends ShovelItem {
+                public BroomItem(Tier tier, float attackDamage, float attackSpeed, Properties properties) {
+                    super(tier, attackDamage, attackSpeed, properties);
+                }
+
+                void damage(UseOnContext context) {
+                    context.getItemInHand().hurtAndBreak(1, context.getPlayer(),
+                        p -> p.onEquippedItemBroken(context.getHand()));
+                }
+            }
+
+            class HammerItem extends DiggerItem {
+                public HammerItem(Tier tier, float attackDamage, float attackSpeed, Properties properties) {
+                    super(attackDamage, attackSpeed, tier, SakuraBlockTags.MINEABLE_WITH_HAMMER, properties);
+                }
+            }
+
+            class Tiers {
+                public static final Tier TACHI = new SimpleTier(3, 457, 7.0F, 3.0F, 18,
+                        BlockTags.NEEDS_DIAMOND_TOOL, () -> Ingredient.EMPTY);
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("super(tier, properties.attributes(createAttributes(tier, attackDamageModifier, attackSpeedModifier)));"))
+        assertTrue(transformed.contains("super(tier, properties.attributes(createAttributes(tier, attackDamage, attackSpeed)));"))
+        assertTrue(transformed.contains("super(tier, SakuraBlockTags.MINEABLE_WITH_HAMMER, properties.attributes(DiggerItem.createAttributes(tier, attackDamage, attackSpeed)));"))
+        assertTrue(transformed.contains("new SimpleTier(BlockTags.NEEDS_DIAMOND_TOOL, 457, 7.0F, 3.0F, 18, () -> Ingredient.EMPTY)"))
+        assertTrue(transformed.contains("getUseDuration(stack, entityLiving) - timeLeft"))
+        assertTrue(transformed.contains("float sweepRatio = EnchantmentHelper.getSweepingDamageRatio(player);"))
+        assertFalse(transformed.contains("float sweepRatio = 0.5F;"))
+        assertTrue(transformed.contains("float enchantBonus = EnchantmentHelper.getDamageBonus(stack, entityLiving.getMobType()) / 1.2F;"))
+        assertTrue(transformed.contains("targetPlayer.disableShield();"))
+        assertTrue(transformed.contains("stack.hurtAndBreak(2, player, EquipmentSlot.MAINHAND);"))
+        assertTrue(transformed.contains("context.getItemInHand().hurtAndBreak(1, context.getPlayer(), EquipmentSlot.MAINHAND);"))
+        assertTrue(transformed.contains("ItemStack blade = ItemStack.of(tag.getCompound(TAG_BLADE));"))
+        assertTrue(transformed.contains("copy.setDamageValue(copy.getDamageValue() + 1);"))
+        assertTrue(transformed.contains("if (copy.getDamageValue() >= copy.getMaxDamage())"))
+        assertFalse(transformed.contains("copy.hurt(1, net.minecraft.util.RandomSource.create(), null)"))
+    }
+
+    @Test
+    fun `custom particle options migrate to codec and stream codec APIs`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.mojang.brigadier.StringReader;
+            import com.mojang.brigadier.exceptions.CommandSyntaxException;
+            import com.mojang.serialization.Codec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.core.particles.ParticleOptions;
+            import net.minecraft.core.particles.ParticleType;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            import javax.annotation.Nonnull;
+
+            public class LeafParticleData implements ParticleOptions {
+                public final int r;
+                public final int g;
+                public final int b;
+
+                public LeafParticleData(int r, int g, int b) {
+                    this.r = r;
+                    this.g = g;
+                    this.b = b;
+                }
+
+                @Nonnull
+                @Override
+                public ParticleType<?> getType() {
+                    return TFParticleType.FALLEN_LEAF.get();
+                }
+
+                public static Codec<LeafParticleData> codecLeaf() {
+                    return RecordCodecBuilder.create((instance) -> instance.group(
+                            Codec.INT.fieldOf("r").forGetter((obj) -> obj.r),
+                            Codec.INT.fieldOf("g").forGetter((obj) -> obj.g),
+                            Codec.INT.fieldOf("b").forGetter((obj) -> obj.b))
+                            .apply(instance, LeafParticleData::new));
+                }
+
+                @Override
+                public void writeToNetwork(@Nonnull FriendlyByteBuf buf) {
+                    buf.writeVarInt(r);
+                    buf.writeVarInt(g);
+                    buf.writeVarInt(b);
+                }
+
+                @Nonnull
+                @Override
+                public String writeToString() {
+                    return String.format("%d %d %d", r, g, b);
+                }
+
+                public static class Deserializer implements ParticleOptions.Deserializer<LeafParticleData> {
+                    @Nonnull
+                    @Override
+                    public LeafParticleData fromCommand(@Nonnull ParticleType<LeafParticleData> type, @Nonnull StringReader reader) throws CommandSyntaxException {
+                        return new LeafParticleData(reader.readInt(), reader.readInt(), reader.readInt());
+                    }
+
+                    @Nonnull
+                    @Override
+                    public LeafParticleData fromNetwork(@Nonnull ParticleType<LeafParticleData> type, FriendlyByteBuf buf) {
+                        return new LeafParticleData(buf.readVarInt(), buf.readVarInt(), buf.readVarInt());
+                    }
+                }
+            }
+
+            class TFParticleType {
+                public static final DeferredHolder<ParticleType<LeafParticleData>, ParticleType<LeafParticleData>> FALLEN_LEAF =
+                        PARTICLES.register("fallen_leaf", () -> new ParticleType<>(false, new LeafParticleData.Deserializer()) {
+                            @Override
+                            public Codec<LeafParticleData> codec() {
+                                return LeafParticleData.codecLeaf();
+                            }
+                        });
+            }
+
+            class ParticlePacket {
+                public ParticlePacket(FriendlyByteBuf buf) {
+                    ParticleType<?> type = null;
+                    readParticle(type, buf);
+                }
+
+                private <T extends ParticleOptions> T readParticle(ParticleType<T> particleType, FriendlyByteBuf buf) {
+                    return particleType.getDeserializer().fromNetwork(particleType, buf);
+                }
+
+                public void encode(FriendlyByteBuf buf) {
+                    QueuedParticle queuedParticle = null;
+                    queuedParticle.particleOptions.writeToNetwork(buf);
+                }
+
+                private record QueuedParticle(ParticleOptions particleOptions) {
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import com.mojang.serialization.MapCodec;"))
+        assertTrue(transformed.contains("import net.minecraft.network.RegistryFriendlyByteBuf;"))
+        assertTrue(transformed.contains("import net.minecraft.network.codec.ByteBufCodecs;"))
+        assertTrue(transformed.contains("import net.minecraft.network.codec.StreamCodec;"))
+        assertTrue(transformed.contains("public record LeafParticleData(int r, int g, int b) implements ParticleOptions"))
+        assertTrue(transformed.contains("public static MapCodec<LeafParticleData> CODEC = RecordCodecBuilder.mapCodec"))
+        assertTrue(transformed.contains("public static StreamCodec<? super RegistryFriendlyByteBuf, LeafParticleData> STREAM_CODEC = StreamCodec.composite"))
+        assertTrue(transformed.contains("ByteBufCodecs.VAR_INT, p -> p.r"))
+        assertTrue(transformed.contains("DeferredHolder<ParticleType<?>, ParticleType<LeafParticleData>> FALLEN_LEAF"))
+        assertTrue(transformed.contains("new ParticleType<>(false)"))
+        assertTrue(transformed.contains("public MapCodec<LeafParticleData> codec()"))
+        assertTrue(transformed.contains("return LeafParticleData.CODEC;"))
+        assertTrue(transformed.contains("public StreamCodec<? super RegistryFriendlyByteBuf, LeafParticleData> streamCodec()"))
+        assertTrue(transformed.contains("return LeafParticleData.STREAM_CODEC;"))
+        assertTrue(transformed.contains("ParticlePacket(RegistryFriendlyByteBuf buf)"))
+        assertTrue(transformed.contains("return particleType.streamCodec().decode(buf);"))
+        assertTrue(transformed.contains("private <T extends ParticleOptions> void writeParticle(T particleOptions, RegistryFriendlyByteBuf buf)"))
+        assertTrue(transformed.contains("particleType.streamCodec().encode(buf, particleOptions);"))
+        assertTrue(transformed.contains("writeParticle(queuedParticle.particleOptions, buf);"))
+        assertFalse(transformed.contains("ParticleOptions.Deserializer"))
+        assertFalse(transformed.contains("writeToNetwork"))
+        assertFalse(transformed.contains("writeToString"))
+        assertFalse(transformed.contains("getDeserializer()"))
+        assertFalse(transformed.contains("new LeafParticleData.Deserializer()"))
+        assertFalse(transformed.contains("codecLeaf()"))
+        assertFalse(transformed.contains("import net.minecraft.network.FriendlyByteBuf;"))
+    }
+
+    @Test
+    fun `custom particle options migration ignores comments and string literals`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            public class ParticleDocs {
+                /*
+                public class LeafParticleData implements ParticleOptions {
+                    public final int r;
+
+                    public void writeToNetwork(FriendlyByteBuf buf) {
+                        buf.writeVarInt(r);
+                    }
+
+                    public static class Deserializer implements ParticleOptions.Deserializer<LeafParticleData> {
+                    }
+                }
+                */
+                private static final String DOC = "ParticleOptions.Deserializer implements ParticleOptions writeToNetwork public final int g;";
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "particle-options-codec-streamcodec" }, result.changes.joinToString("\n"))
+        assertFalse(transformed.contains("public record LeafParticleData"), transformed)
+        assertFalse(transformed.contains("MapCodec<LeafParticleData>"), transformed)
+        assertTrue(transformed.contains("public class LeafParticleData implements ParticleOptions"), transformed)
+        assertTrue(transformed.contains("public final int r;"), transformed)
+        assertTrue(transformed.contains("ParticleOptions.Deserializer implements ParticleOptions writeToNetwork"), transformed)
+    }
+
+    @Test
+    fun `custom particle options migration preserves commented legacy samples beside real code`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.core.particles.ParticleOptions;
+            import net.minecraft.core.particles.ParticleType;
+            import net.minecraft.network.FriendlyByteBuf;
+
+            public class ParticleDocs {
+                /*
+                legacy sample:
+                public class LeafParticleData implements ParticleOptions {
+                    public final int r;
+                    public LeafParticleData(int r) {
+                        this.r = r;
+                    }
+                    public static Codec<LeafParticleData> codecLeaf() {
+                        return RecordCodecBuilder.create((instance) -> instance.group(
+                                Codec.INT.fieldOf("r").forGetter((obj) -> obj.r))
+                                .apply(instance, LeafParticleData::new));
+                    }
+                    @Override
+                    public void writeToNetwork(FriendlyByteBuf buf) {
+                        buf.writeVarInt(r);
+                    }
+                    public static class Deserializer implements ParticleOptions.Deserializer<LeafParticleData> {
+                    }
+                }
+                */
+            }
+
+            public class LeafParticleData implements ParticleOptions {
+                public final int r;
+
+                public LeafParticleData(int r) {
+                    this.r = r;
+                }
+
+                public static Codec<LeafParticleData> codecLeaf() {
+                    return RecordCodecBuilder.create((instance) -> instance.group(
+                            Codec.INT.fieldOf("r").forGetter((obj) -> obj.r))
+                            .apply(instance, LeafParticleData::new));
+                }
+
+                @Override
+                public ParticleType<?> getType() {
+                    return null;
+                }
+
+                @Override
+                public void writeToNetwork(FriendlyByteBuf buf) {
+                    buf.writeVarInt(r);
+                }
+
+                public static class Deserializer implements ParticleOptions.Deserializer<LeafParticleData> {
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "particle-options-codec-streamcodec" }, result.changes.joinToString("\n"))
+        assertTrue(transformed.contains("public record LeafParticleData(int r) implements ParticleOptions"), transformed)
+        assertTrue(transformed.contains("public static MapCodec<LeafParticleData> CODEC = RecordCodecBuilder.mapCodec"), transformed)
+        assertTrue(transformed.contains("legacy sample:"), transformed)
+        assertTrue(transformed.contains("public class LeafParticleData implements ParticleOptions"), transformed)
+        assertTrue(transformed.contains("public final int r;"), transformed)
+        assertTrue(transformed.contains("public static class Deserializer implements ParticleOptions.Deserializer<LeafParticleData>"), transformed)
+    }
+
+    @Test
+    fun `custom particle type registration migration ignores comments and string literals`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            public class ParticleTypeDocs {
+                /*
+                public static final DeferredHolder<ParticleType<LeafParticleData>, ParticleType<LeafParticleData>> FALLEN_LEAF =
+                        PARTICLES.register("fallen_leaf", () -> new ParticleType<>(false, new LeafParticleData.Deserializer()) {
+                            @Override
+                            public Codec<LeafParticleData> codec() {
+                                return LeafParticleData.codecLeaf();
+                            }
+                        });
+                */
+                private static final String DOC = "new ParticleType<>(false, new LeafParticleData.Deserializer())";
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "particle-type-codec-streamcodec" }, result.changes.joinToString("\n"))
+        assertTrue(transformed.contains("new ParticleType<>(false, new LeafParticleData.Deserializer())"), transformed)
+        assertTrue(transformed.contains("DeferredHolder<ParticleType<LeafParticleData>, ParticleType<LeafParticleData>>"), transformed)
+        assertFalse(transformed.contains("DeferredHolder<ParticleType<?>, ParticleType<LeafParticleData>>"), transformed)
+        assertFalse(transformed.contains("LeafParticleData.STREAM_CODEC"), transformed)
+    }
+
+    @Test
+    fun `custom particle network migration ignores comments and string literals`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            public class ParticleNetworkDocs {
+                /*
+                private <T extends ParticleOptions> T readParticle(ParticleType<T> particleType, FriendlyByteBuf buf) {
+                    return particleType.getDeserializer().fromNetwork(particleType, buf);
+                }
+
+                public void encode(FriendlyByteBuf buf) {
+                    queuedParticle.particleOptions.writeToNetwork(buf);
+                }
+                */
+                private static final String DOC = "ParticleOptions getDeserializer().fromNetwork writeToNetwork FriendlyByteBuf";
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "particle-network-streamcodec" }, result.changes.joinToString("\n"))
+        assertTrue(transformed.contains("FriendlyByteBuf buf"), transformed)
+        assertTrue(transformed.contains("particleType.getDeserializer().fromNetwork(particleType, buf);"), transformed)
+        assertTrue(transformed.contains("queuedParticle.particleOptions.writeToNetwork(buf);"), transformed)
+        assertFalse(transformed.contains("RegistryFriendlyByteBuf"), transformed)
+        assertFalse(transformed.contains("particleType.streamCodec()"), transformed)
+        assertFalse(transformed.contains("void writeParticle("), transformed)
+    }
+
+    @Test
+    fun `loot datagen builders and global loot modifier generics migrate to 1_21 APIs`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import com.mojang.serialization.MapCodec;
+            import net.minecraft.world.level.storage.loot.entries.LootTableReference;
+            import net.minecraft.world.level.storage.loot.functions.CopyNbtFunction;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemRandomChanceWithLootingCondition;
+            import net.minecraft.world.level.storage.loot.providers.nbt.ContextNbtProvider;
+            import net.neoforged.neoforge.common.loot.IGlobalLootModifier;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class TestMod {
+                public static final DeferredRegister<MapCodec<? extends IGlobalLootModifier>> LOOT_MODIFIERS = null;
+                public static final DeferredHolder<Codec<FieryToolSmeltingModifier>, Codec<FieryToolSmeltingModifier>> FIERY_PICK_SMELTING =
+                        LOOT_MODIFIERS.register("fiery_pick_smelting", () -> FieryToolSmeltingModifier.CODEC);
+
+                void loot() {
+                    pool.add(LootTableReference.lootTableReference(TFLootTables.USELESS_LOOT).setWeight(25));
+                    entry.when(LootItemRandomChanceWithLootingCondition.randomChanceAndLootingBoost(0.5F, 0.1F));
+                    table.apply(CopyNbtFunction.copyData(ContextNbtProvider.BLOCK_ENTITY).copy("SkullOwner", "SkullOwner"));
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.world.level.storage.loot.entries.NestedLootTable;"))
+        assertTrue(transformed.contains("import net.minecraft.world.level.storage.loot.predicates.LootItemRandomChanceWithEnchantedBonusCondition;"))
+        assertTrue(transformed.contains("import net.minecraft.world.level.storage.loot.functions.CopyComponentsFunction;"))
+        assertTrue(transformed.contains("import net.minecraft.core.component.DataComponents;"))
+        assertTrue(transformed.contains("DeferredHolder<MapCodec<? extends IGlobalLootModifier>, MapCodec<FieryToolSmeltingModifier>> FIERY_PICK_SMELTING"))
+        assertTrue(transformed.contains("NestedLootTable.lootTableReference(TFLootTables.USELESS_LOOT)"))
+        assertTrue(transformed.contains("LootItemRandomChanceWithEnchantedBonusCondition.randomChanceAndLootingBoost(this.registries, 0.5F, 0.1F)"))
+        assertTrue(transformed.contains("CopyComponentsFunction.copyComponents(CopyComponentsFunction.Source.BLOCK_ENTITY).include(DataComponents.PROFILE).include(DataComponents.NOTE_BLOCK_SOUND).include(DataComponents.CUSTOM_NAME)"))
+        assertFalse(transformed.contains("LootTableReference"))
+        assertFalse(transformed.contains("LootItemRandomChanceWithLootingCondition"))
+        assertFalse(transformed.contains("CopyNbtFunction"))
+        assertFalse(transformed.contains("ContextNbtProvider"))
+        assertFalse(transformed.contains("SkullOwner"))
+        assertFalse(transformed.contains("ChunkGenerator"))
+        assertFalse(transformed.contains("MapMapCodec"))
+    }
+
+    @Test
+    fun `generic loot nbt copy builders migrate to custom data copy function`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.level.storage.loot.functions.CopyNbtFunction;
+            import net.minecraft.world.level.storage.loot.providers.nbt.ContextNbtProvider;
+
+            public class TestMod {
+                void loot() {
+                    table.apply(CopyNbtFunction.copyData(ContextNbtProvider.BLOCK_ENTITY)
+                            .copy("Locked", "BlockEntityTag.Locked")
+                            .copy("Kind", "BlockEntityTag.Kind", CopyNbtFunction.MergeStrategy.REPLACE));
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.world.level.storage.loot.functions.CopyCustomDataFunction;"))
+        assertTrue(transformed.contains("import net.minecraft.world.level.storage.loot.providers.nbt.ContextNbtProvider;"))
+        assertTrue(transformed.contains("CopyCustomDataFunction.copyData(ContextNbtProvider.BLOCK_ENTITY)"))
+        assertTrue(transformed.contains("CopyCustomDataFunction.MergeStrategy.REPLACE"))
+        assertFalse(transformed.contains("CopyNbtFunction"))
+    }

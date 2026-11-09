@@ -1,8 +1,8 @@
 001-header.ktfrag
-002-adds-structure-pool-access-transformers-only-for-typed-direct-field-acce.ktfrag
-003-rewrites-class-for-name-is-instance-checks-without-member-reflection.ktfrag
-004-restores-get-tag-on-local-tag-key-holder-types-after-nbt-text-migration.ktfrag
-005-hard-gates-forbidden-reflection-after-migration.ktfrag
-006-mmlib-recipe-base-relocation-requires-executable-removed-type-evidence.ktfrag
+002-entity-visibility-reflection-migration-ignores-comments-strings-and-text.ktfrag
+003-season-helper-reflection-migration-ignores-text-block-reflection-documen.ktfrag
+004-model-resource-location-id-migration-ignores-comments-strings-and-text-b.ktfrag
+005-migrates-same-project-static-field-reflection-to-explicit-source-accesso.ktfrag
+006-does-not-exclude-legacy-datagen-sources-from-strict-migration.ktfrag
 007-mmlib-recipe-provider-without-any-mod-id-source-reports-hard-migration-e.ktfrag
-008-complete-legacy-food-properties-codecs-use-the-target-standard-codec.ktfrag
+008-portal-provider-callback-pipelines-migrate-to-direct-portal-api-through-.ktfrag

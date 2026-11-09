@@ -31,6 +31,7 @@ import com.github.javaparser.ast.expr.MethodCallExpr
 import com.github.javaparser.ast.expr.NameExpr
 import com.github.javaparser.ast.expr.ObjectCreationExpr
 import com.github.javaparser.ast.expr.PatternExpr
+import com.github.javaparser.ast.expr.TypePatternExpr
 import com.github.javaparser.ast.expr.SuperExpr
 import com.github.javaparser.ast.expr.ThisExpr
 import com.github.javaparser.ast.expr.TypeExpr
@@ -408,6 +409,24 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             return ExactFieldQuery.Unique(it)
         }
         return exactFieldQuery(ownerInfo.qualifiedName, matches)
+    }
+
+    fun exactInstanceFieldIsFinal(use: Node, fieldName: String): Boolean {
+        val owner = exactEnclosingNamedClass(use) ?: return false
+        val ownerInfo = typeInfo(owner) ?: return false
+        fun declarations(receiver: TypeRef, visited: MutableSet<String>): List<FieldDeclaration> {
+            if (!visited.add(receiver.toString())) return emptyList()
+            val info = loadType(receiver.name) ?: return emptyList()
+            val substitutions = substitutions(info, receiver)
+            return fields(info).filterNot { it.isStatic } +
+                resolvedSupers(info, substitutions).flatMap { superType ->
+                    declarations(superType, visited)
+                }
+        }
+        val matches = declarations(TypeRef(ownerInfo.qualifiedName), mutableSetOf()).flatMap { field ->
+            field.variables.filter { it.nameAsString == fieldName }.map { field }
+        }.distinct()
+        return matches.singleOrNull()?.isFinal == true
     }
 
     private fun exactFieldQuery(
@@ -1073,7 +1092,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
 
     private fun visiblePatternBinding(name: String, use: Node): PatternExpr? {
         val callable = use.findAncestor(CallableDeclaration::class.java).orElse(null) ?: return null
-        val bindings = callable.findAll(PatternExpr::class.java).filter { pattern ->
+        val bindings = callable.findAll(TypePatternExpr::class.java).filter { pattern ->
             pattern.nameAsString == name && patternBindingDominatesUse(pattern, use)
         }
         if (bindings.size > 1) {
@@ -1824,6 +1843,9 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             "net.minecraft.nbt.CompoundTag" to mapOf(
                 ("getCompound" to 1) to TypeRef("net.minecraft.nbt.CompoundTag"),
                 ("getList" to 2) to TypeRef("net.minecraft.nbt.ListTag")
+            ),
+            "net.minecraft.nbt.ListTag" to mapOf(
+                ("getCompound" to 1) to TypeRef("net.minecraft.nbt.CompoundTag")
             ),
             "net.minecraft.network.FriendlyByteBuf" to mapOf(
                 ("readNbt" to 0) to TypeRef("net.minecraft.nbt.CompoundTag")

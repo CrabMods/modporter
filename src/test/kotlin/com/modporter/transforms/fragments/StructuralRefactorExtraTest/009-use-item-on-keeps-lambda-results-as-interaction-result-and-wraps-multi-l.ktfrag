@@ -1,0 +1,1109 @@
+
+    @Test
+    fun `useItemOn keeps lambda results as InteractionResult and wraps multi line helper returns`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BurnerBlock.java").writeText("""
+            package com.example;
+
+            import java.util.function.Function;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.InteractionHand;
+            import net.minecraft.world.InteractionResult;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.phys.BlockHitResult;
+
+            public class BurnerBlock extends Block {
+                public BurnerBlock(Properties properties) {
+                    super(properties);
+                }
+
+                @Override
+                public InteractionResult use(BlockState state, Level world, BlockPos pos, Player player, InteractionHand hand, BlockHitResult ray) {
+                    ItemStack heldItem = player.getItemInHand(hand);
+                    if (heldItem.isEmpty())
+                        return onBlockEntityUse(world, pos, be -> {
+                            if (be.goggles)
+                                return InteractionResult.PASS;
+                            be.goggles = true;
+                            return InteractionResult.SUCCESS;
+                        });
+                    InteractionResult result = onBlockEntityUse(world, pos, be -> InteractionResult.SUCCESS);
+                    if (result.consumesAction())
+                        return result;
+                    switch (hand) {
+                        case MAIN_HAND -> world.removeBlock(pos, false);
+                        default -> {
+                        }
+                    }
+                    if (player.isCrouching())
+                        return InteractionResult.sidedSuccess(world.isClientSide);
+                    return InteractionResult.PASS;
+                }
+
+                protected InteractionResult onBlockEntityUse(Level world, BlockPos pos, Function<Burner, InteractionResult> action) {
+                    return InteractionResult.PASS;
+                }
+
+                static class Burner {
+                    boolean goggles;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val block = srcDir.resolve("BurnerBlock.java").readText().replace("\r\n", "\n")
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(block.contains("return InteractionResult.PASS;\n                be.goggles = true;\n                return InteractionResult.SUCCESS;"), block)
+        assertTrue(block.contains("return switch (onBlockEntityUse(world, pos, be -> {"), block)
+        assertTrue(block.contains("InteractionResult result = onBlockEntityUse(world, pos, be -> InteractionResult.SUCCESS);"), block)
+        assertTrue(block.contains("return switch (result) {"), block)
+        assertTrue(block.contains("return net.minecraft.world.ItemInteractionResult.sidedSuccess(world.isClientSide);"), block)
+        assertTrue(block.contains("case MAIN_HAND -> world.removeBlock(pos, false);"), block)
+        assertTrue(block.contains("return net.minecraft.world.ItemInteractionResult.PASS_TO_DEFAULT_BLOCK_INTERACTION;\n    }"), block)
+        assertTrue(block.contains("default -> net.minecraft.world.ItemInteractionResult.PASS_TO_DEFAULT_BLOCK_INTERACTION;"), block)
+    }
+
+    @Test
+    fun `playerWillDestroy bare returns after the kept super result return it`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("TrackBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class TrackBlock extends Block {
+                public TrackBlock(Properties properties) {
+                    super(properties);
+                }
+
+                @Override
+                public BlockState playerWillDestroy(Level pLevel, BlockPos pPos, BlockState pState, Player pPlayer) {
+                    return super.playerWillDestroy(pLevel, pPos, pState, pPlayer);
+                    if (pLevel.isClientSide())
+                        return;
+                    if (!pPlayer.isCreative())
+                        return;
+                    pLevel.removeBlock(pPos, false);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val block = srcDir.resolve("TrackBlock.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(block.contains("public BlockState playerWillDestroy(Level pLevel, BlockPos pPos, BlockState pState, Player pPlayer) {"), block)
+        assertTrue(block.contains("BlockState modporterDestroyedState = super.playerWillDestroy(pLevel, pPos, pState, pPlayer);"), block)
+        assertFalse(Regex("""return\s*;""").containsMatchIn(block), block)
+        assertTrue(block.contains("return modporterDestroyedState;"), block)
+    }
+
+    @Test
+    fun `component serializer json calls receive the registry provider`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("Train.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class Train extends BlockEntity {
+                Component name = Component.empty();
+
+                public Train(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+
+                @Override
+                public void load(CompoundTag tag) {
+                    super.load(tag);
+                    name = Component.Serializer.fromJson(tag.getString("Name"));
+                }
+
+                @Override
+                protected void saveAdditional(CompoundTag tag) {
+                    super.saveAdditional(tag);
+                    tag.putString("Name", Component.Serializer.toJson(name));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val train = srcDir.resolve("Train.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(train.contains("name = Component.Serializer.fromJson(tag.getString(\"Name\"), registries);"), train)
+        assertTrue(train.contains("tag.putString(\"Name\", Component.Serializer.toJson(name, registries));"), train)
+    }
+
+    @Test
+    fun `living tick handlers imported by their nested name become entity tick handlers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DivingBoots.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.LivingEntity;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.event.entity.living.LivingEvent.LivingTickEvent;
+
+            public class DivingBoots {
+                @SubscribeEvent
+                public static void accelerateDescent(LivingTickEvent event) {
+                    LivingEntity entity = event.getEntity();
+                    entity.setDeltaMovement(entity.getDeltaMovement().scale(1.1));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val boots = srcDir.resolve("DivingBoots.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(boots.contains("public static void accelerateDescent(EntityTickEvent."), boots)
+        assertTrue(boots.contains("import net.neoforged.neoforge.event.tick.EntityTickEvent;"), boots)
+        assertFalse(boots.contains("LivingTickEvent"), boots)
+    }
+
+    @Test
+    fun `dist executor expressions use guards and the typed adapter according to call shape`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("RangePacket.java").writeText("""
+            package com.example;
+
+            import java.util.function.Supplier;
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.fml.DistExecutor;
+
+            public class RangePacket {
+                public void handle(Supplier<Runnable> toRun) {
+                    DistExecutor.unsafeRunWhenOn(Dist.CLIENT, toRun);
+                    DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> () -> handleClient());
+                    Runnable deferred = () -> DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> this::handleClient);
+                    deferred.run();
+                }
+
+                private void handleClient() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val packet = srcDir.resolve("RangePacket.java").readText()
+        val compat = tempDir.resolve("src/main/java/com/modporter/generated/example/compat/DistExecution.java")
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(compat.exists())
+        assertTrue(compat.readText().contains("public static void runWhenOn(Dist dist, Supplier<? extends Runnable> target)"))
+        assertTrue(compat.readText().contains("if (FMLLoader.getDist() == dist)"))
+        assertFalse(packet.contains("import net.neoforged.fml.DistExecutor;"), packet)
+        assertTrue(packet.contains("if (FMLLoader.getDist() == Dist.CLIENT)"), packet)
+        assertTrue(packet.contains("com.modporter.generated.example.compat.DistExecution.runWhenOn(Dist.CLIENT, toRun)"), packet)
+        assertTrue(packet.contains("com.modporter.generated.example.compat.DistExecution.runWhenOn(Dist.CLIENT, () -> this::handleClient)"), packet)
+    }
+
+    @Test
+    fun `entity nbt round trips and held item stacks serialize with the registries they already have`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AssemblerBlockEntity.java").writeText("""
+            package com.example;
+
+            import java.util.List;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.entity.vehicle.AbstractMinecart;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class AssemblerBlockEntity extends BlockEntity {
+                List<ItemStack> particleItems;
+
+                public AssemblerBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+
+                public void assemble(AbstractMinecart cart) {
+                    CompoundTag nbt = cart.serializeNBT();
+                    nbt.remove("Passengers");
+                    cart.deserializeNBT(nbt);
+                }
+
+                @Override
+                protected void saveAdditional(CompoundTag compound) {
+                    super.saveAdditional(compound);
+                    Player player = null;
+                    compound.put("HeldItem", player.getMainHandItem().serializeNBT());
+                    compound.put("ParticleItems", NBTHelper.writeCompoundList(particleItems, ItemStack::serializeNBT));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("NBTHelper.java").writeText("""
+            package com.example;
+
+            import java.util.List;
+            import java.util.function.Function;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.nbt.ListTag;
+
+            public class NBTHelper {
+                public static <T> ListTag writeCompoundList(List<T> list, Function<T, CompoundTag> serializer) {
+                    return new ListTag();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val assembler = srcDir.resolve("AssemblerBlockEntity.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(assembler.contains("CompoundTag nbt = cart.serializeNBT(cart.registryAccess());"), assembler)
+        assertTrue(assembler.contains("cart.deserializeNBT(cart.registryAccess(), nbt);"), assembler)
+        assertTrue(assembler.contains("compound.put(\"HeldItem\", player.getMainHandItem().saveOptional(registries));"), assembler)
+        assertTrue(assembler.contains("NBTHelper.writeCompoundList(particleItems, modporterStack -> (net.minecraft.nbt.CompoundTag) modporterStack.saveOptional(registries))"), assembler)
+    }
+
+    @Test
+    fun `behaviours owning a block entity thread providers through hooks reached from loading and chained handlers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("SmartBlockEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class SmartBlockEntity extends BlockEntity {
+                TankBehaviour tankBehaviour = new TankBehaviour(this);
+                PortLink link = new PortLink();
+
+                public SmartBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+
+                @Override
+                public void load(CompoundTag tag) {
+                    super.load(tag);
+                    tankBehaviour.read(tag, false);
+                    link.buffer.deserializeNBT(tag.getCompound("Buffer"));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TankBehaviour.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.neoforged.neoforge.fluids.capability.templates.FluidTank;
+
+            public class TankBehaviour {
+                private final SmartBlockEntity blockEntity;
+                private final FluidTank tank = new FluidTank(1000);
+
+                public TankBehaviour(SmartBlockEntity blockEntity) {
+                    this.blockEntity = blockEntity;
+                }
+
+                public void read(CompoundTag nbt, boolean clientPacket) {
+                    tank.readFromNBT(nbt.getCompound("Tank"));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("PortLink.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.items.ItemStackHandler;
+
+            public class PortLink {
+                public final ItemStackHandler buffer = new ItemStackHandler(9);
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val smart = srcDir.resolve("SmartBlockEntity.java").readText()
+        val behaviour = srcDir.resolve("TankBehaviour.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(
+            Regex("""public void read\(CompoundTag nbt, boolean clientPacket, (?:net\.minecraft\.core\.)?HolderLookup\.Provider registries\) \{""")
+                .containsMatchIn(behaviour),
+            behaviour
+        )
+        assertTrue(behaviour.contains("tank.readFromNBT(registries, nbt.getCompound(\"Tank\"));"), behaviour)
+        assertTrue(smart.contains("tankBehaviour.read(tag, false, registries);"), smart)
+        assertTrue(smart.contains("link.buffer.deserializeNBT(registries, tag.getCompound(\"Buffer\"));"), smart)
+    }
+
+    @Test
+    fun `custom data children are read from any item stack receiver`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DisplayBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            public class DisplayBlock {
+                public boolean apply(ItemStack heldItem) {
+                    CompoundTag tag = heldItem.getTagElement("display");
+                    if (tag == null)
+                        return false;
+                    heldItem.removeTagKey("display");
+                    return true;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val block = srcDir.resolve("DisplayBlock.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(block.contains("CompoundTag tag = getCustomDataChild(heldItem, \"display\");"), block)
+        assertTrue(block.contains("removeCustomDataChild(heldItem, \"display\");"), block)
+        assertTrue(block.contains("private static CompoundTag getCustomDataChild(ItemStack stack, String key)"), block)
+    }
+
+    @Test
+    fun `saved data loaders handed to computeIfAbsent stay method references for the factory`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LifeEconomyData.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.saveddata.SavedData;
+
+            public class LifeEconomyData extends SavedData {
+                private ItemStack token = ItemStack.EMPTY;
+
+                public static LifeEconomyData create() {
+                    return new LifeEconomyData();
+                }
+
+                public static LifeEconomyData load(CompoundTag tag) {
+                    LifeEconomyData data = new LifeEconomyData();
+                    data.token = ItemStack.of(tag.getCompound("Token"));
+                    return data;
+                }
+
+                @Override
+                public CompoundTag save(CompoundTag tag) {
+                    tag.put("Token", token.serializeNBT());
+                    return tag;
+                }
+
+                public static LifeEconomyData get(ServerLevel sl) {
+                    return sl.getDataStorage().computeIfAbsent(LifeEconomyData::load, LifeEconomyData::create, "lifeEconomyData");
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val data = srcDir.resolve("LifeEconomyData.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(data.contains("public static LifeEconomyData load(CompoundTag tag, HolderLookup.Provider registries) {"), data)
+        assertTrue(data.contains("new SavedData.Factory<>(LifeEconomyData::create, LifeEconomyData::load)"), data)
+        assertFalse(data.contains("value -> LifeEconomyData.load("), data)
+    }
+
+    @Test
+    fun `cancellation results on the base player interact event dispatch on the subevent`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ClipboardHandler.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.InteractionResult;
+            import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
+
+            public class ClipboardHandler {
+                public static void interact(PlayerInteractEvent event) {
+                    if (event.getLevel().isClientSide())
+                        return;
+                    event.setCanceled(true);
+                    event.setCancellationResult(InteractionResult.SUCCESS);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val handler = srcDir.resolve("ClipboardHandler.java").readText().replace("\r\n", "\n")
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(handler.contains("event.setCancellationResult("), handler)
+        assertTrue(handler.contains("        switch (event) {\n            case PlayerInteractEvent.EntityInteractSpecific e -> e.setCancellationResult(InteractionResult.SUCCESS);\n            case PlayerInteractEvent.EntityInteract e -> e.setCancellationResult(InteractionResult.SUCCESS);\n            case PlayerInteractEvent.RightClickBlock e -> e.setCancellationResult(InteractionResult.SUCCESS);\n            case PlayerInteractEvent.RightClickItem e -> e.setCancellationResult(InteractionResult.SUCCESS);\n            default -> {\n            }\n        }"), handler)
+    }
+
+    @Test
+    fun `legacy block entity capability hierarchies keep their query behind generated providers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("SmartBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+
+            public abstract class SmartBlockEntity extends BlockEntity {
+                public SmartBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+
+                @Override
+                public <T> LazyOptional<T> getCapability(Capability<T> cap, Direction side) {
+                    return super.getCapability(cap, side);
+                }
+
+                protected boolean isItemHandlerCap(Capability<?> cap) {
+                    return cap == Capabilities.ItemHandler.BLOCK;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BeltBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.items.IItemHandler;
+
+            public class BeltBlockEntity extends SmartBlockEntity {
+                private LazyOptional<IItemHandler> itemHandler = LazyOptional.empty();
+
+                public BeltBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+
+                @Override
+                public <T> LazyOptional<T> getCapability(Capability<T> cap, Direction side) {
+                    if (!isItemHandlerCap(cap))
+                        return super.getCapability(cap, side);
+                    return itemHandler.cast();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BeltHelper.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.Direction;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.items.IItemHandler;
+
+            public class BeltHelper {
+                static IItemHandler inventory(BeltBlockEntity be, Direction side) {
+                    return be.getCapability(Capabilities.ItemHandler.BLOCK, side).orElse(null);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val smart = srcDir.resolve("SmartBlockEntity.java").readText()
+        val belt = srcDir.resolve("BeltBlockEntity.java").readText()
+        val helper = srcDir.resolve("BeltHelper.java").readText()
+        val compatDir = tempDir.resolve("src/main/java/com/modporter/generated/example/compat")
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(smart.contains("public abstract class SmartBlockEntity extends BlockEntity implements LegacyCapabilityProvider {"), smart)
+        assertTrue(smart.contains("    public <T> LazyOptional<T> getCapability(Capability<T> cap, Direction side) {\n        return LazyOptional.empty();"), smart.replace("\r\n", "\n"))
+        assertFalse(smart.replace("\r\n", "\n").contains("@Override\n    public <T> LazyOptional<T> getCapability"), smart)
+        assertTrue(smart.contains("return cap == LegacyCapabilities.ITEM_HANDLER;"), smart)
+        assertTrue(belt.contains("@Override"), belt)
+        assertTrue(belt.contains("return super.getCapability(cap, side);"), belt)
+        assertFalse(belt.contains("LegacyCapabilityProvider"), belt)
+        assertTrue(helper.contains("be.getCapability(LegacyCapabilities.ITEM_HANDLER, side).orElse(null)"), helper)
+        assertTrue(helper.contains("import com.modporter.generated.example.compat.LegacyCapabilities;"), helper)
+        assertTrue(compatDir.resolve("LegacyCapabilities.java").readText().contains("ITEM_HANDLER = new Capability<>();"))
+        assertTrue(compatDir.resolve("LegacyCapabilityProvider.java").exists())
+        val registrar = compatDir.resolve("LegacyBlockEntityCapabilities.java").readText()
+        assertTrue(registrar.contains("@EventBusSubscriber(modid = \"example\")"), registrar)
+        assertTrue(registrar.contains("event.registerBlockEntity(Capabilities.ItemHandler.BLOCK, type, (be, side) -> be instanceof LegacyCapabilityProvider provider ? provider.getCapability(LegacyCapabilities.ITEM_HANDLER, side).orElse(null) : null);"), registrar)
+    }
+
+    @Test
+    fun `forge only stair state supplier writes are dropped like the real port`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CopperStairs.java").writeText("""
+            package com.example;
+
+            import java.util.function.Supplier;
+            import net.minecraft.world.level.block.Blocks;
+            import net.minecraft.world.level.block.StairBlock;
+            import net.minecraft.world.level.block.WeatheringCopperStairBlock;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.fml.util.ObfuscationReflectionHelper;
+
+            public class CopperStairs {
+                WeatheringCopperStairBlock make(WeatheringCopperStairBlock.WeatherState state, BlockBehaviour.Properties p, Supplier<BlockState> defaultStateSupplier) {
+                    WeatheringCopperStairBlock block =
+                        new WeatheringCopperStairBlock(state, Blocks.AIR.defaultBlockState(), p);
+                    // WeatheringCopperStairBlock does not have a constructor that takes a Supplier
+                    ObfuscationReflectionHelper.setPrivateValue(StairBlock.class, block, defaultStateSupplier,
+                        "stateSupplier");
+                    return block;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("CopperStairs.java").readText().replace("\r\n", "\n")
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(migrated.contains("stateSupplier\""), migrated)
+        assertFalse(migrated.contains("ObfuscationReflectionHelper.setPrivateValue"), migrated)
+        assertTrue(migrated.contains("// WeatheringCopperStairBlock does not have a constructor that takes a Supplier\n        return block;"), migrated)
+    }
+
+    @Test
+    fun `pool style block entities expose their resolved handler block entity tags use the component and presence is requeried`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    BlockEntityRegistry.BLOCK_ENTITIES.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/BlockEntityRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockEntityRegistry {
+                public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES = null;
+                public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<PoolBlockEntity>> POOL = null;
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/PoolBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.fluids.FluidStack;
+            import net.neoforged.neoforge.fluids.capability.IFluidHandler;
+            import net.neoforged.neoforge.fluids.capability.templates.FluidTank;
+            import org.jetbrains.annotations.Nullable;
+
+            public class PoolBlockEntity extends BlockEntity {
+                private FluidTank tank;
+                private FluidStack visibleFluid = FluidStack.EMPTY;
+                private LazyOptional<IFluidHandler> externalFluid = LazyOptional.empty();
+
+                public PoolBlockEntity(BlockPos pos, BlockState state) {
+                    super(BlockEntityRegistry.POOL.get(), pos, state);
+                }
+
+                @Nullable
+                public PoolBlockEntity controller() {
+                    return this;
+                }
+
+                @Nullable
+                public IFluidHandler fluidHandler() {
+                    var controller = controller();
+                    return controller == null ? null : controller.tank;
+                }
+
+                public void reset() {
+                    tank = null;
+                    externalFluid.invalidate();
+                    externalFluid = LazyOptional.empty();
+                }
+
+                @Override
+                public <T> LazyOptional<T> getCapability(Capability<T> capability, @Nullable Direction side) {
+                    if (capability == Capabilities.FluidHandler.BLOCK && !isRemoved()) {
+                        var handler = fluidHandler();
+                        if (handler == null) return LazyOptional.empty();
+                        if (!externalFluid.isPresent()) externalFluid = LazyOptional.of(() -> handler);
+                        return externalFluid.cast();
+                    }
+                    return super.getCapability(capability, side);
+                }
+
+                @Override
+                public void invalidateCaps() {
+                    super.invalidateCaps();
+                    externalFluid.invalidate();
+                    externalFluid = LazyOptional.empty();
+                }
+
+                @Override
+                protected void saveAdditional(CompoundTag tag) {
+                    super.saveAdditional(tag);
+                    tag.put("PoolFluid", visibleFluid.writeToNBT(new CompoundTag()));
+                    visibleFluid.writeToNBT(tag);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/MaterialSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.BlockItem;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.fluids.FluidStack;
+            import net.neoforged.neoforge.fluids.capability.IFluidHandler;
+
+            public final class MaterialSurface {
+                static CompoundTag data(ItemStack stack) {
+                    CompoundTag data = stack.getItem() instanceof BlockItem ? stack.getTagElement("BlockEntityTag") : stack.getTagElement("Material");
+                    return data == null ? new CompoundTag() : data.copy();
+                }
+
+                static void clear(ItemStack stack) {
+                    stack.removeTagKey("BlockEntityTag");
+                }
+
+                static boolean retire(Level level, BlockPos member) {
+                    var exposed = level.getBlockEntity(member).getCapability(Capabilities.FluidHandler.BLOCK);
+                    var handler = exposed.resolve().orElseThrow();
+                    handler.fill(FluidStack.EMPTY, IFluidHandler.FluidAction.EXECUTE);
+                    return !exposed.isPresent();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val pool = tempDir.resolve("src/main/java/com/example/PoolBlockEntity.java").readText().replace("\r\n", "\n")
+        val surface = tempDir.resolve("src/main/java/com/example/MaterialSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(pool.contains("(PoolBlockEntity blockEntity, net.minecraft.core.Direction side) -> blockEntity.fluidHandler());"), pool)
+        assertFalse(pool.contains("externalFluid"), pool)
+        assertFalse(pool.contains("LazyOptional"), pool)
+        assertTrue(pool.contains("tank = null;\n    }"), pool)
+        assertTrue(pool.contains("tag.put(\"PoolFluid\", (CompoundTag) visibleFluid.saveOptional(registries));"), pool)
+        assertTrue(pool.contains("if (!visibleFluid.isEmpty()) visibleFluid.save(registries, tag);"), pool)
+        assertTrue(surface.contains("stack.getItem() instanceof BlockItem ? (stack.has(DataComponents.BLOCK_ENTITY_DATA) ? stack.get(DataComponents.BLOCK_ENTITY_DATA).copyTag() : null) : getCustomDataChild(stack, \"Material\")"), surface)
+        assertTrue(surface.contains("stack.remove(DataComponents.BLOCK_ENTITY_DATA);"), surface)
+        assertTrue(surface.contains("var exposed = level.getCapability(Capabilities.FluidHandler.BLOCK, member, null);"), surface)
+        assertTrue(surface.contains("var handler = java.util.Objects.requireNonNull(exposed);"), surface)
+        assertTrue(surface.contains("return !(level.getCapability(Capabilities.FluidHandler.BLOCK, member, null) != null);"), surface)
+    }
+
+    @Test
+    fun `item stack serialization calls use proven holder lookup provider without fallbacks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ItemStackNbtSurface.java").writeText("""
+            package com.example;
+
+            import java.util.Optional;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.ContainerHelper;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.items.ItemStackHandler;
+
+            public class ItemStackNbtSurface {
+                private final ItemStack heldStack = ItemStack.EMPTY;
+                private final NonNullList<ItemStack> items = NonNullList.withSize(1, ItemStack.EMPTY);
+                private final ItemStackHandler handler = new ItemStackHandler(1);
+
+                public void migrate(HolderLookup.Provider registries, CompoundTag tag, ItemStack stack) {
+                    ItemStack restored = ItemStack.of(tag.getCompound("Stack"));
+                    Optional.of(tag).map(ItemStack::of);
+                    ContainerHelper.saveAllItems(tag, this.items);
+                    ContainerHelper.loadAllItems(tag, this.items);
+                    tag.put("Stack", stack.save(new CompoundTag()));
+                    tag.put("Held", this.heldStack.serializeNBT());
+                    tag.put("Handler", handler.serializeNBT());
+                    handler.deserializeNBT(tag.getCompound("Handler"));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ItemStackNbtSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("ItemStack restored = ItemStack.parseOptional(registries, tag.getCompound(\"Stack\"));"), migrated)
+        assertTrue(migrated.contains("Optional.of(tag).map(tag -> ItemStack.parseOptional(registries, tag));"), migrated)
+        assertTrue(migrated.contains("ContainerHelper.saveAllItems(tag, this.items, registries);"), migrated)
+        assertTrue(migrated.contains("ContainerHelper.loadAllItems(tag, this.items, registries);"), migrated)
+        assertTrue(migrated.contains("tag.put(\"Stack\", stack.saveOptional(registries));"), migrated)
+        assertTrue(migrated.contains("tag.put(\"Held\", this.heldStack.saveOptional(registries));"), migrated)
+        assertTrue(migrated.contains("tag.put(\"Handler\", handler.serializeNBT(registries));"), migrated)
+        assertTrue(migrated.contains("handler.deserializeNBT(registries, tag.getCompound(\"Handler\"));"), migrated)
+        assertFalse(migrated.contains("RegistryAccess.EMPTY"), migrated)
+        assertFalse(migrated.contains("player.registryAccess()"), migrated)
+    }
+
+    @Test
+    fun `item stack serialization without a provider in scope threads one instead of injecting fallbacks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("UnprovenItemStackNbtSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.ContainerHelper;
+            import net.minecraft.world.item.ItemStack;
+
+            public class UnprovenItemStackNbtSurface {
+                private final NonNullList<ItemStack> items = NonNullList.withSize(1, ItemStack.EMPTY);
+
+                public void migrate(CompoundTag tag, ItemStack stack) {
+                    ItemStack restored = ItemStack.of(tag.getCompound("Stack"));
+                    ContainerHelper.saveAllItems(tag, this.items);
+                    tag.put("Stack", stack.save(new CompoundTag()));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("UnprovenItemStackNbtSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        // nothing in the project calls migrate, so it takes the provider as a parameter
+        assertTrue(migrated.contains("public void migrate(CompoundTag tag, ItemStack stack, HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("ItemStack restored = ItemStack.parseOptional(registries, tag.getCompound(\"Stack\"));"), migrated)
+        assertTrue(migrated.contains("ContainerHelper.saveAllItems(tag, this.items, registries);"), migrated)
+        assertFalse(migrated.contains("RegistryAccess.EMPTY"), migrated)
+        assertFalse(migrated.contains("player.registryAccess()"), migrated)
+    }
+
+    @Test
+    fun `container helper private methods receive holder lookup provider from proven callers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ShulkerInventoryHandler.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.ContainerHelper;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+
+            public class ShulkerInventoryHandler {
+                public int countItems(Player player, ItemStack inventoryStack) {
+                    return getItemList(inventoryStack).size();
+                }
+
+                public void useItems(Player player, ItemStack inventoryStack, NonNullList<ItemStack> itemList) {
+                    setItemList(inventoryStack, itemList);
+                }
+
+                private NonNullList<ItemStack> getItemList(ItemStack itemStack) {
+                    NonNullList<ItemStack> itemStacks = NonNullList.withSize(27, ItemStack.EMPTY);
+                    CompoundTag entityTag = new CompoundTag();
+                    ContainerHelper.loadAllItems(entityTag, itemStacks);
+                    return itemStacks;
+                }
+
+                private void setItemList(ItemStack itemStack, NonNullList<ItemStack> itemStacks) {
+                    CompoundTag entityTag = new CompoundTag();
+                    ContainerHelper.saveAllItems(entityTag, itemStacks);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ShulkerInventoryHandler.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.minecraft.core.HolderLookup;"), migrated)
+        assertTrue(migrated.contains("return getItemList(inventoryStack, player.registryAccess()).size();"), migrated)
+        assertTrue(migrated.contains("setItemList(inventoryStack, itemList, player.registryAccess());"), migrated)
+        assertTrue(migrated.contains("private NonNullList<ItemStack> getItemList(ItemStack itemStack, HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("ContainerHelper.loadAllItems(entityTag, itemStacks, registries);"), migrated)
+        assertTrue(migrated.contains("private void setItemList(ItemStack itemStack, NonNullList<ItemStack> itemStacks, HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("ContainerHelper.saveAllItems(entityTag, itemStacks, registries);"), migrated)
+        assertFalse(migrated.contains("RegistryAccess.EMPTY"), migrated)
+    }
+
+    @Test
+    fun `container helper default interface methods thread holder lookup provider across entity callers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LootBuffer.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.ContainerHelper;
+            import net.minecraft.world.item.ItemStack;
+
+            public interface LootBuffer {
+                NonNullList<ItemStack> getItems();
+
+                default void addDeathItemsSaveData(CompoundTag tag) {
+                    ContainerHelper.saveAllItems(tag, this.getItems());
+                }
+
+                default void readDeathItemsSaveData(CompoundTag tag) {
+                    ContainerHelper.loadAllItems(tag, this.getItems());
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BossEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+
+            public abstract class BossEntity extends LivingEntity implements LootBuffer {
+                private final NonNullList<ItemStack> items = NonNullList.withSize(1, ItemStack.EMPTY);
+
+                protected BossEntity(EntityType<? extends LivingEntity> type, Level level) {
+                    super(type, level);
+                }
+
+                public NonNullList<ItemStack> getItems() {
+                    return this.items;
+                }
+
+                protected void addAdditionalSaveData(CompoundTag compound) {
+                    this.addDeathItemsSaveData(compound);
+                }
+
+                protected void readAdditionalSaveData(CompoundTag compound) {
+                    this.readDeathItemsSaveData(compound);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val buffer = srcDir.resolve("LootBuffer.java").readText()
+        val boss = srcDir.resolve("BossEntity.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-container-helper-provider-thread" }, "changes=${result.changes}")
+        assertTrue(buffer.contains("import net.minecraft.core.HolderLookup;"), buffer)
+        assertTrue(buffer.contains("default void addDeathItemsSaveData(CompoundTag tag, HolderLookup.Provider registries)"), buffer)
+        assertTrue(buffer.contains("ContainerHelper.saveAllItems(tag, this.getItems(), registries);"), buffer)
+        assertTrue(buffer.contains("default void readDeathItemsSaveData(CompoundTag tag, HolderLookup.Provider registries)"), buffer)
+        assertTrue(buffer.contains("ContainerHelper.loadAllItems(tag, this.getItems(), registries);"), buffer)
+        assertTrue(boss.contains("this.addDeathItemsSaveData(compound, this.registryAccess());"), boss)
+        assertTrue(boss.contains("this.readDeathItemsSaveData(compound, this.registryAccess());"), boss)
+        assertFalse(buffer.contains("RegistryAccess.EMPTY"), buffer)
+    }
+
+    @Test
+    fun `container helper provider threading recognizes source superclass chain through vanilla ghast`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LootBuffer.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.ContainerHelper;
+            import net.minecraft.world.item.ItemStack;
+
+            public interface LootBuffer {
+                NonNullList<ItemStack> getItems();
+
+                default void save(CompoundTag tag) {
+                    ContainerHelper.saveAllItems(tag, this.getItems());
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CustomGhast.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.monster.Ghast;
+            import net.minecraft.world.level.Level;
+
+            public class CustomGhast extends Ghast {
+                public CustomGhast(EntityType<? extends Ghast> type, Level level) {
+                    super(type, level);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BossGhast.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            public class BossGhast extends CustomGhast implements LootBuffer {
+                private final NonNullList<ItemStack> items = NonNullList.withSize(1, ItemStack.EMPTY);
+
+                public NonNullList<ItemStack> getItems() {
+                    return this.items;
+                }
+
+                protected void addAdditionalSaveData(CompoundTag compound) {
+                    this.save(compound);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val buffer = srcDir.resolve("LootBuffer.java").readText()
+        val boss = srcDir.resolve("BossGhast.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(buffer.contains("default void save(CompoundTag tag, HolderLookup.Provider registries)"), buffer)
+        assertTrue(buffer.contains("ContainerHelper.saveAllItems(tag, this.getItems(), registries);"), buffer)
+        assertTrue(boss.contains("this.save(compound, this.registryAccess());"), boss)
+    }
+
+    @Test
+    fun `item stack nbt data methods thread holder lookup provider through proven receivers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("StackData.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            public class StackData {
+                private ItemStack heldStack = ItemStack.EMPTY;
+
+                public CompoundTag saveToNBT(CompoundTag tag) {
+                    tag.put("held", heldStack.save(new CompoundTag()));
+                    return tag;
+                }
+
+                public void loadFromNBT(CompoundTag tag) {
+                    heldStack = ItemStack.of(tag.getCompound("held"));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("StackDataProvider.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.nbt.CompoundTag;
+            import net.neoforged.neoforge.common.util.INBTSerializable;
+
+            public class StackDataProvider implements INBTSerializable<CompoundTag> {
+                private StackData data;
+
+                public StackData getData() {
+                    return data;
+                }
+
+                @Override
+                public CompoundTag serializeNBT() {
+                    CompoundTag tag = new CompoundTag();
+                    getData().saveToNBT(tag);
+                    return tag;
+                }
+
+                @Override
+                public void deserializeNBT(CompoundTag tag) {
+                    getData().loadFromNBT(tag);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("StackDataWrapper.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+
+            public class StackDataWrapper {
+                private StackData data = new StackData();
+
+                public void fromStackNBT(CompoundTag tag) {
+                    data.loadFromNBT(tag);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val data = srcDir.resolve("StackData.java").readText()
+        val provider = srcDir.resolve("StackDataProvider.java").readText()
+        val wrapper = srcDir.resolve("StackDataWrapper.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(data.contains("import net.minecraft.core.HolderLookup;"), data)
+        assertTrue(data.contains("public CompoundTag saveToNBT(CompoundTag tag, HolderLookup.Provider registries)"), data)
+        assertTrue(data.contains("public void loadFromNBT(CompoundTag tag, HolderLookup.Provider registries)"), data)
+        assertTrue(data.contains("heldStack.saveOptional(registries)"), data)
+        assertTrue(data.contains("ItemStack.parseOptional(registries, tag.getCompound(\"held\"))"), data)
+        assertTrue(provider.contains("public CompoundTag serializeNBT(HolderLookup.Provider registries)"), provider)
+        assertTrue(provider.contains("getData().saveToNBT(tag, registries);"), provider)
+        assertTrue(provider.contains("public void deserializeNBT(HolderLookup.Provider registries, CompoundTag tag)"), provider)
+        assertTrue(provider.contains("getData().loadFromNBT(tag, registries);"), provider)
+        assertTrue(wrapper.contains("public void fromStackNBT(CompoundTag tag, HolderLookup.Provider registries)"), wrapper)
+        assertTrue(wrapper.contains("data.loadFromNBT(tag, registries);"), wrapper)
+        assertFalse(data.contains("RegistryAccess.EMPTY"), data)
+        assertFalse(provider.contains("RegistryAccess.EMPTY"), provider)
+    }

@@ -1,0 +1,1168 @@
+
+    @Test
+    fun `does not exclude legacy datagen sources from strict migration`() {
+        val projectDir = tempDir.resolve("p16")
+        val dataDir = projectDir.resolve("src/main/java/com/example/data")
+        val builderDir = dataDir.resolve("builder")
+        dataDir.createDirectories()
+        builderDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        dataDir.resolve("ExampleRecipeProvider.java").writeText("""
+            package com.example.data;
+
+            public class ExampleRecipeProvider extends AbstractRecipeProvider {
+            }
+        """.trimIndent())
+        builderDir.resolve("ExampleRecipeBuilder.java").writeText("""
+            package com.example.data.builder;
+
+            public class ExampleRecipeBuilder {
+                public static class Result implements RecipeOutput {
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "build-exclude-integrations" })
+        assertFalse(content.contains("exclude 'com/example/data/ExampleRecipeProvider.java'"))
+        assertFalse(content.contains("exclude 'com/example/data/builder/ExampleRecipeBuilder.java'"))
+    }
+
+    @Test
+    fun `does not exclude main-source gametest fixtures from strict migration`() {
+        val projectDir = tempDir.resolve("p17")
+        val testDir = projectDir.resolve("src/main/java/com/example/test/util")
+        testDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        testDir.resolve("SakuraTestBase.java").writeText("""
+            package com.example.test.util;
+
+            public final class SakuraTestBase {
+                RegistryObject<?> oldForgeTestOnlyField;
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "build-exclude-integrations" })
+        assertFalse(content.contains("exclude 'com/example/test/util/SakuraTestBase.java'"))
+    }
+
+    @Test
+    fun `removes existing build excludes that hide main source and resource content`() {
+        val projectDir = tempDir.resolve("p17-existing-excludes")
+        val gameTestDir = projectDir.resolve("src/main/java/com/example/gametest")
+        val structureDir = projectDir.resolve("src/main/resources/gameteststructures")
+        gameTestDir.createDirectories()
+        structureDir.createDirectories()
+        gameTestDir.resolve("ExampleGameTests.java").writeText("""
+            package com.example.gametest;
+
+            public class ExampleGameTests {
+            }
+        """.trimIndent())
+        structureDir.resolve("empty.snbt").writeText("{}")
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            tasks.named('jar', Jar).configure {
+                exclude 'com/example/gametest/**'
+                exclude 'gameteststructures/**'
+                exclude 'META-INF/private-notes.txt'
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-remove-main-source-exclude" }, result.changes.joinToString("\n"))
+        assertFalse(content.contains("exclude 'com/example/gametest/**'"), content)
+        assertFalse(content.contains("exclude 'gameteststructures/**'"), content)
+        assertTrue(content.contains("exclude 'META-INF/private-notes.txt'"), content)
+    }
+
+    @Test
+    fun `does not create source exclusions for removed api references`() {
+        val projectDir = tempDir.resolve("p18")
+        val blockDir = projectDir.resolve("src/main/java/com/example/block")
+        blockDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        blockDir.resolve("ProviderRegistry.java").writeText("""
+            package com.example.block;
+
+            public final class ProviderRegistry {
+                public static final Object PROVIDER = Capabilities.ITEM_HANDLER;
+            }
+        """.trimIndent())
+        blockDir.resolve("FoodBlock.java").writeText("""
+            package com.example.block;
+
+            public class FoodBlock extends Block {
+                public FoodBlock() {
+                    super(ProviderRegistry.PROVIDER);
+                }
+
+                public int unrelated01() { return 1; }
+                public int unrelated02() { return 2; }
+                public int unrelated03() { return 3; }
+                public int unrelated04() { return 4; }
+                public int unrelated05() { return 5; }
+                public int unrelated06() { return 6; }
+                public int unrelated07() { return 7; }
+                public int unrelated08() { return 8; }
+                public int unrelated09() { return 9; }
+                public int unrelated10() { return 10; }
+                public int unrelated11() { return 11; }
+                public int unrelated12() { return 12; }
+                public int unrelated13() { return 13; }
+                public int unrelated14() { return 14; }
+                public int unrelated15() { return 15; }
+                public int unrelated16() { return 16; }
+                public int unrelated17() { return 17; }
+                public int unrelated18() { return 18; }
+                public int unrelated19() { return 19; }
+                public int unrelated20() { return 20; }
+                public int unrelated21() { return 21; }
+                public int unrelated22() { return 22; }
+                public int unrelated23() { return 23; }
+                public int unrelated24() { return 24; }
+                public int unrelated25() { return 25; }
+                public int unrelated26() { return 26; }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "build-exclude-integrations" })
+        assertFalse(content.contains("exclude 'com/example/block/ProviderRegistry.java'"))
+        assertFalse(content.contains("exclude 'com/example/block/FoodBlock.java'"))
+    }
+
+    @Test
+    fun `keeps curse maven compileOnly integrations in source set without excluding core`() {
+        val projectDir = tempDir.resolve("p19")
+        val compatDir = projectDir.resolve("src/main/java/com/example/compat")
+        val coreDir = projectDir.resolve("src/main/java/com/example/core")
+        compatDir.createDirectories()
+        coreDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                compileOnly fg.deobf("curse.maven:alexs-mobs-426558:4610263")
+            }
+        """.trimIndent())
+        compatDir.resolve("AlexsMobsEventHandler.java").writeText("""
+            package com.example.compat;
+
+            import com.github.alexthe666.alexsmobs.entity.EntityFly;
+
+            public final class AlexsMobsEventHandler {
+                public static boolean hasFlies(Object level) {
+                    return EntityFly.class != null && level != null;
+                }
+            }
+        """.trimIndent())
+        compatDir.resolve("CompatBridge.java").writeText("""
+            package com.example.compat;
+
+            public final class CompatBridge {
+                public boolean usesAlexsMobs(Object level) {
+                    if (level == null) {
+                        return false;
+                    }
+                    return AlexsMobsEventHandler.hasFlies(level);
+                }
+
+                public int unrelated01() { return 1; }
+                public int unrelated02() { return 2; }
+                public int unrelated03() { return 3; }
+                public int unrelated04() { return 4; }
+                public int unrelated05() { return 5; }
+                public int unrelated06() { return 6; }
+                public int unrelated07() { return 7; }
+                public int unrelated08() { return 8; }
+                public int unrelated09() { return 9; }
+                public int unrelated10() { return 10; }
+                public int unrelated11() { return 11; }
+                public int unrelated12() { return 12; }
+                public int unrelated13() { return 13; }
+                public int unrelated14() { return 14; }
+                public int unrelated15() { return 15; }
+                public int unrelated16() { return 16; }
+                public int unrelated17() { return 17; }
+                public int unrelated18() { return 18; }
+                public int unrelated19() { return 19; }
+                public int unrelated20() { return 20; }
+                public int unrelated21() { return 21; }
+                public int unrelated22() { return 22; }
+                public int unrelated23() { return 23; }
+                public int unrelated24() { return 24; }
+                public int unrelated25() { return 25; }
+                public int unrelated26() { return 26; }
+            }
+        """.trimIndent())
+        coreDir.resolve("CoreRegistry.java").writeText("""
+            package com.example.core;
+
+            import com.example.compat.AlexsMobsEventHandler;
+
+            public final class CoreRegistry {
+                public static final String OPTIONAL_HANDLER =
+                    AlexsMobsEventHandler.class.getName();
+
+                public int unrelated01() { return 1; }
+                public int unrelated02() { return 2; }
+                public int unrelated03() { return 3; }
+                public int unrelated04() { return 4; }
+                public int unrelated05() { return 5; }
+                public int unrelated06() { return 6; }
+                public int unrelated07() { return 7; }
+                public int unrelated08() { return 8; }
+                public int unrelated09() { return 9; }
+                public int unrelated10() { return 10; }
+                public int unrelated11() { return 11; }
+                public int unrelated12() { return 12; }
+                public int unrelated13() { return 13; }
+                public int unrelated14() { return 14; }
+                public int unrelated15() { return 15; }
+                public int unrelated16() { return 16; }
+                public int unrelated17() { return 17; }
+                public int unrelated18() { return 18; }
+                public int unrelated19() { return 19; }
+                public int unrelated20() { return 20; }
+                public int unrelated21() { return 21; }
+                public int unrelated22() { return 22; }
+                public int unrelated23() { return 23; }
+                public int unrelated24() { return 24; }
+                public int unrelated25() { return 25; }
+                public int unrelated26() { return 26; }
+            }
+        """.trimIndent())
+
+        pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(content.contains("""compileOnly "curse.maven:alexs-mobs-1-21-1-port-1415721:7391745""""))
+        assertFalse(content.contains("4610263"))
+        assertFalse(content.contains("E:/MinecraftDev"))
+        assertFalse(content.contains("exclude 'com/example/compat/AlexsMobsEventHandler.java'"))
+        assertFalse(content.contains("exclude 'com/example/compat/CompatBridge.java'"))
+        assertFalse(content.contains("exclude 'com/example/core/CoreRegistry.java'"))
+    }
+
+    @Test
+    fun `resolves Create CurseMaven dependency to NeoForge compatible file`() {
+        val projectDir = tempDir.resolve("p19-create")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                compileOnly fg.deobf("curse.maven:create-328085:7178761")
+                runtimeOnly "curse.maven:create-328085:7178761"
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-resolve-dep" })
+        assertTrue(content.contains("""compileOnly "curse.maven:create-328085:7408951""""))
+        assertFalse(content.contains("7178761"))
+        assertFalse(content.contains("net.minecraftforge.fluids"))
+    }
+
+    @Test
+    fun `resolves JEI to compile common api and full NeoForge runtime jars`() {
+        val projectDir = tempDir.resolve("p19-jei")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                compileOnly fg.deobf("mezz.jei:jei-1.20.1-forge-api:15.2.0.27")
+                runtimeOnly fg.deobf("mezz.jei:jei-1.20.1-forge:15.2.0.27")
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-resolve-dep" })
+        assertTrue(content.contains("""compileOnly "mezz.jei:jei-1.21.1-common-api:19.21.2.313""""))
+        assertTrue(content.contains("""compileOnly "mezz.jei:jei-1.21.1-neoforge:19.21.2.313""""))
+        assertTrue(content.contains("""runtimeOnly "mezz.jei:jei-1.21.1-neoforge:19.21.2.313""""))
+        assertFalse(content.contains("jei-1.20.1-forge"), content)
+        assertFalse(content.contains("fg.deobf"), content)
+    }
+
+    @Test
+    fun `resolves curse maven runtime integrations to clean target runtime coordinates`() {
+        val projectDir = tempDir.resolve("p19-curse-runtime-integrations")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                runtimeOnly fg.deobf("curse.maven:jei-238222:6600311")
+                runtimeOnly fg.deobf("curse.maven:farmers-delight-398521:6917255")
+                runtimeOnly "curse.maven:construction-wand-399558:4684054"
+                runtimeOnly "curse.maven:better-combat-by-daedelus-639842:7287334"
+                runtimeOnly "curse.maven:cloth-config-348521:5729105"
+                runtimeOnly "curse.maven:playeranimator-658587:4587214"
+                runtimeOnly "curse.maven:worldedit-225608:4586218"
+                runtimeOnly "curse.maven:world-preview-891429:5686690"
+                implementation "curse.maven:caelus-308989:5281700"
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-resolve-dep" })
+        assertTrue(result.changes.any { it.ruleId == "build-remove-dep" })
+        assertTrue(content.contains("""compileOnly "mezz.jei:jei-1.21.1-common-api:19.21.2.313""""))
+        assertTrue(content.contains("""compileOnly "mezz.jei:jei-1.21.1-neoforge:19.21.2.313""""))
+        assertTrue(content.contains("""runtimeOnly "mezz.jei:jei-1.21.1-neoforge:19.21.2.313""""))
+        assertTrue(content.contains("""compileOnly "curse.maven:farmers-delight-398521:8083481""""))
+        assertTrue(content.contains("""runtimeOnly "curse.maven:farmers-delight-398521:8083481""""))
+        assertTrue(content.contains("""runtimeOnly "maven.modrinth:better-combat:2.3.2+1.21.1-neoforge""""))
+        assertTrue(content.contains("""runtimeOnly "maven.modrinth:cloth-config:15.0.140+neoforge""""))
+        assertTrue(content.contains("""runtimeOnly "maven.modrinth:playeranimator:2.0.4+1.21.1-forge""""))
+        assertTrue(content.contains("""runtimeOnly "maven.modrinth:worldedit:7.3.8""""))
+        assertTrue(content.contains("""compileOnly "curse.maven:caelus-308989:5694215""""))
+        assertTrue(content.contains("""runtimeOnly "curse.maven:caelus-308989:5694215""""))
+        assertTrue(content.contains("https://maven.blamejared.com"), content)
+        assertTrue(content.contains("https://api.modrinth.com/maven"), content)
+        assertTrue(content.contains("https://www.cursemaven.com"), content)
+        assertFalse(content.contains("curse.maven:construction-wand-399558"), content)
+        assertFalse(content.contains("curse.maven:world-preview-891429"), content)
+        assertFalse(content.contains("6600311"), content)
+        assertFalse(content.contains("6917255"), content)
+        assertFalse(content.contains("7287334"), content)
+        assertFalse(content.contains("5729105"), content)
+        assertFalse(content.contains("4587214"), content)
+        assertFalse(content.contains("4586218"), content)
+        assertFalse(content.contains("5281700"), content)
+        assertFalse(content.contains("fg.deobf"), content)
+    }
+
+    @Test
+    fun `unresolved fg deobf wrappers are removed without dependency prefix allowlist`() {
+        val projectDir = tempDir.resolve("p19-generic-fg-deobf")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                compileOnly fg.deobf "com.example.unlisted:api:1.2.3"
+                runtimeOnly fg.deobf("com.example.unlisted:runtime:4.5.6")
+            }
+        """.trimIndent())
+
+        pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(content.contains("""compileOnly "com.example.unlisted:api:1.2.3""""))
+        assertTrue(content.contains("""runtimeOnly "com.example.unlisted:runtime:4.5.6""""))
+        assertFalse(content.contains("fg.deobf"), content)
+    }
+
+    @Test
+    fun `resolves versioned public library dependencies to target NeoForge coordinates`() {
+        val projectDir = tempDir.resolve("p19-versioned-public-libraries")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                implementation fg.deobf("com.aetherteam.nitrogen:nitrogen_internals:${'$'}{project.nitrogen_version}")
+                implementation fg.deobf("com.aetherteam.cumulus:cumulus_menus:${'$'}{project.cumulus_version}")
+            }
+        """.trimIndent())
+        projectDir.resolve("gradle.properties").writeText("""
+            minecraft_version=1.20.1
+            nitrogen_version=1.20.1-1.0.12-neoforge
+            cumulus_version=1.20.1-1.0.1-neoforge
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val build = projectDir.resolve("build.gradle").readText()
+        val props = projectDir.resolve("gradle.properties").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-resolve-dep" })
+        assertTrue(build.contains("""implementation "com.aetherteam.nitrogen:nitrogen_internals:1.21.1-1.1.25-neoforge""""))
+        assertTrue(build.contains("""implementation "com.aetherteam.cumulus:cumulus_menus:1.21.1-2.0.8-neoforge""""))
+        assertTrue(build.contains("https://packages.aether-mod.net/Nitrogen"))
+        assertTrue(build.contains("https://packages.aether-mod.net/Cumulus"))
+        assertTrue(props.contains("nitrogen_version=1.21.1-1.1.25-neoforge"), props)
+        assertTrue(props.contains("cumulus_version=1.21.1-2.0.8-neoforge"), props)
+        assertFalse(build.contains("fg.deobf"), build)
+        assertFalse(props.contains("1.20.1-1.0"), props)
+    }
+
+    @Test
+    fun `dependency version properties update only when matching dependency is declared`() {
+        val projectDir = tempDir.resolve("p19-version-property-scope")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                implementation "com.example:unrelated:1.0.0"
+            }
+        """.trimIndent())
+        projectDir.resolve("gradle.properties").writeText("""
+            minecraft_version=1.20.1
+            jade_version=4681833
+        """.trimIndent())
+
+        pass.apply(projectDir)
+        val props = projectDir.resolve("gradle.properties").readText()
+
+        assertTrue(props.contains("jade_version=4681833"), props)
+        assertFalse(props.contains("jade_version=5813144"), props)
+    }
+
+    @Test
+    fun `dependency resolver ignores known prefixes outside parsed coordinates`() {
+        val projectDir = tempDir.resolve("p19-structured-dependency-no-comment-match")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                implementation "com.example:library:1.0.0" // curse.maven:create-328085:7178761 documents an optional manual test
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "build-resolve-dep" }, result.changes.joinToString("\n"))
+        assertTrue(content.contains("""implementation "com.example:library:1.0.0""""))
+        assertFalse(content.contains("curse.maven:create-328085:7408951"), content)
+    }
+
+    @Test
+    fun `dependency resolver handles Gradle map notation as structured coordinates`() {
+        val projectDir = tempDir.resolve("p19-structured-map-notation")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                compileOnly group: 'curse.maven', name: 'create-328085', version: '7178761'
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-resolve-dep" })
+        assertTrue(content.contains("""compileOnly "curse.maven:create-328085:7408951""""))
+        assertFalse(content.contains("7178761"), content)
+    }
+
+    @Test
+    fun `resolves TerraBlender and Curios Forge coordinates to target NeoForge artifacts`() {
+        val projectDir = tempDir.resolve("p19-btv-public-libraries")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                implementation fg.deobf('com.github.glitchfiend:TerraBlender-forge:1.20.1-3.0.1.7')
+                compileOnly(fg.deobf("top.theillusivec4.curios:curios-forge:${'$'}{curios_version}:api"))
+                runtimeOnly(fg.deobf("top.theillusivec4.curios:curios-forge:${'$'}{curios_version}"))
+            }
+        """.trimIndent())
+        projectDir.resolve("gradle.properties").writeText("""
+            minecraft_version=1.20.1
+            curios_version=5.12.0+1.20.1
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val build = projectDir.resolve("build.gradle").readText()
+        val props = projectDir.resolve("gradle.properties").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-resolve-dep" })
+        assertTrue(build.contains("""implementation "com.github.glitchfiend:TerraBlender-neoforge:1.21.1-4.1.0.8""""))
+        assertTrue(build.contains("""compileOnly "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1:api""""))
+        assertTrue(build.contains("""compileOnly "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1""""))
+        assertTrue(build.contains("""compileOnly "net.fabricmc:fabric-loader:0.16.14""""))
+        assertTrue(build.contains("""runtimeOnly "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1""""))
+        assertTrue(build.contains("https://maven.minecraftforge.net/releases"), build)
+        assertTrue(build.contains("https://maven.theillusivec4.top/"), build)
+        assertTrue(build.contains("https://maven.fabricmc.net/"), build)
+        assertTrue(props.contains("curios_version=9.2.3+1.21.1"), props)
+        assertFalse(build.contains("TerraBlender-forge"), build)
+        assertFalse(build.contains("curios-forge"), build)
+        assertFalse(build.contains("fg.deobf"), build)
+    }
+
+    @Test
+    fun `resolves Curios CurseMaven coordinate to target NeoForge artifacts`() {
+        val projectDir = tempDir.resolve("p19-curios-cursemaven")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            repositories {
+                maven {
+                    url "https://www.cursemaven.com"
+                    content { includeGroup "curse.maven" }
+                }
+            }
+
+            dependencies {
+                implementation "curse.maven:curios-309927:5843594"
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val build = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-resolve-dep" })
+        assertTrue(build.contains("""compileOnly "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1:api""""))
+        assertTrue(build.contains("""compileOnly "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1""""))
+        assertTrue(build.contains("""runtimeOnly "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1""""))
+        assertTrue(build.contains("https://maven.theillusivec4.top/"), build)
+        assertFalse(build.contains("curse.maven:curios-309927"), build)
+    }
+
+    @Test
+    fun `resolves replaced runtime-only optional mod dependencies`() {
+        val projectDir = tempDir.resolve("p19-runtime-replacement")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            repositories {
+                maven {
+                    name 'Tama Maven'
+                    url "https://maven.tamaized.com/releases"
+                }
+            }
+
+            dependencies {
+                runtimeOnly fg.deobf("team-twilight:crossdimcommands:${'$'}{project.base_minecraft_version}-1.0")
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-resolve-dep" })
+        assertTrue(content.contains("""runtimeOnly "com.telepathicgrunt:CommandStructures-Neoforge:4.3.2+1.20.6""""))
+        assertTrue(content.contains("https://nexus.resourcefulbees.com/repository/maven-public/"))
+        assertFalse(content.contains("team-twilight:crossdimcommands"))
+    }
+
+    @Test
+    fun `resolves and removes stale curse maven runtime dependencies by explicit mapping`() {
+        val projectDir = tempDir.resolve("p19-runtime-stale-removal")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                implementation fg.deobf("curse.maven:jade-324717:4681833")
+                compileOnly "curse.maven:lootr-361276:${'$'}{project.lootr_version}"
+                runtimeOnly "curse.maven:jeed-532286:4599236"
+                runtimeOnly fg.deobf("curse.maven:museum-curator-859070:4629894")
+            }
+        """.trimIndent())
+        projectDir.resolve("gradle.properties").writeText("""
+            lootr_version=5636598
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+        val props = projectDir.resolve("gradle.properties").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-resolve-dep" })
+        assertTrue(result.changes.any { it.ruleId == "build-remove-dep" })
+        assertTrue(content.contains("""compileOnly "curse.maven:jade-324717:5813144""""))
+        assertTrue(content.contains("""compileOnly "curse.maven:lootr-361276:5832064""""))
+        assertTrue(content.contains("""runtimeOnly "curse.maven:jeed-532286:6550600""""))
+        assertFalse(content.contains("4681833"))
+        assertFalse(content.contains("5636598"))
+        assertFalse(content.contains("4599236"))
+        assertFalse(content.contains("curse.maven:museum-curator-859070"))
+        assertFalse(content.contains("4629894"))
+        assertTrue(props.contains("lootr_version=5832064"), props)
+    }
+
+    @Test
+    fun `runtime absent dependency mapping does not remove compile api declarations`() {
+        val projectDir = tempDir.resolve("p19-runtime-absent-scope")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                compileOnly "curse.maven:museum-curator-859070:4629894"
+                runtimeOnly fg.deobf("curse.maven:museum-curator-859070:4629894")
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-remove-dep" })
+        assertTrue(content.contains("""compileOnly "curse.maven:museum-curator-859070:4629894""""))
+        assertFalse(content.contains("""runtimeOnly "curse.maven:museum-curator-859070:4629894""""))
+    }
+
+    @Test
+    fun `renders resolved optional public curse maven dependencies as compileOnly coordinates`() {
+        val projectDir = tempDir.resolve("p19-public-curse-maven")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                compileOnly fg.deobf("curse.maven:alexs-mobs-426558:5698791")
+                runtimeOnly "curse.maven:alexs-mobs-426558:5698791"
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-resolve-dep" })
+        assertTrue(content.contains("""compileOnly "curse.maven:alexs-mobs-1-21-1-port-1415721:7391745""""))
+        assertFalse(content.contains("""runtimeOnly "curse.maven:alexs-mobs-1-21-1-port-1415721:7391745""""))
+        assertFalse(content.contains("5698791"))
+        assertFalse(content.contains("E:/MinecraftDev"))
+        assertFalse(content.contains("""compileOnly "files("""))
+    }
+
+    @Test
+    fun `resolves Botania map style dependency to NeoForge compileOnly snapshot`() {
+        val projectDir = tempDir.resolve("p19-botania")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                compileOnly [
+                    group: "vazkii.botania",
+                    name: "Botania",
+                    version: "${'$'}{project.botania}",
+                    classifier: "api"
+                ]
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-resolve-dep" })
+        assertTrue(content.contains("""compileOnly "vazkii.botania:botania-neoforge-1.21.1:452-SNAPSHOT""""))
+        assertTrue(content.contains("https://maven.blamejared.com"))
+        assertFalse(content.contains("TO" + "DO: Update for NeoForge"))
+        assertFalse(content.contains("name: \"Botania\""))
+    }
+
+    @Test
+    fun `resolves CraftTweaker to official NeoForge maven artifact`() {
+        val projectDir = tempDir.resolve("p19-crafttweaker")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                implementation fg.deobf("com.blamejared.crafttweaker:CraftTweaker-forge-1.20.1:14.0.14")
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-resolve-dep" })
+        assertTrue(content.contains("""implementation "com.blamejared.crafttweaker:CraftTweaker-neoforge-1.21.1:21.0.38""""))
+        assertTrue(content.contains("https://maven.blamejared.com"))
+        assertFalse(content.contains("CraftTweaker-forge-1.20.1"))
+        assertFalse(content.contains("maven.modrinth:crafttweaker"))
+    }
+
+    @Test
+    fun `migrates RecipeProvider lookup constructor and special recipe factory`() {
+        val projectDir = tempDir.resolve("p19-datagen")
+        val dataDir = projectDir.resolve("src/main/java/com/example/data")
+        dataDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        dataDir.resolve("RecipeGenerator.java").writeText("""
+            package com.example.data;
+
+            import net.minecraft.data.PackOutput;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.data.recipes.RecipeProvider;
+            import net.minecraft.data.recipes.SpecialRecipeBuilder;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.crafting.CraftingBookCategory;
+            import net.minecraft.world.item.crafting.SimpleCraftingRecipeSerializer;
+            import net.minecraft.core.registries.BuiltInRegistries;
+
+            public class RecipeGenerator extends RecipeProvider {
+                public RecipeGenerator(PackOutput packOutput) {
+                    super(packOutput);
+                }
+
+                protected void buildRecipes(RecipeOutput consumer) {
+                    specialRecipe(consumer, RecipeWandUpgrade.SERIALIZER);
+                }
+
+                private void specialRecipe(RecipeOutput consumer, SimpleCraftingRecipeSerializer<RecipeWandUpgrade> serializer) {
+                    ResourceLocation name = BuiltInRegistries.RECIPE_SERIALIZER.getKey(serializer);
+                    SpecialRecipeBuilder.special(serializer).save(consumer, ExampleMod.loc("dynamic/" + name.getPath()).toString());
+                }
+            }
+        """.trimIndent())
+        dataDir.resolve("ModData.java").writeText("""
+            package com.example.data;
+
+            import net.minecraft.data.DataGenerator;
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            public class ModData {
+                public static void gatherData(GatherDataEvent event) {
+                    DataGenerator generator = event.getGenerator();
+                    PackOutput packOutput = generator.getPackOutput();
+                    generator.addProvider(true, new RecipeGenerator(packOutput));
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val recipe = dataDir.resolve("RecipeGenerator.java").readText()
+        val modData = dataDir.resolve("ModData.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-datagen-api-121" })
+        assertTrue(recipe.contains("import java.util.concurrent.CompletableFuture;"))
+        assertTrue(recipe.contains("import net.minecraft.core.HolderLookup;"))
+        assertTrue(recipe.contains("import net.minecraft.core.registries.BuiltInRegistries;"))
+        assertTrue(recipe.contains("public RecipeGenerator(PackOutput packOutput, CompletableFuture<HolderLookup.Provider> lookupProvider)"))
+        assertTrue(recipe.contains("super(packOutput, lookupProvider);"))
+        assertTrue(recipe.contains("java.util.function.Function<net.minecraft.world.item.crafting.CraftingBookCategory, net.minecraft.world.item.crafting.Recipe<?>> recipeFactory"))
+        assertTrue(recipe.contains("specialRecipe(consumer, RecipeWandUpgrade::new, BuiltInRegistries.RECIPE_SERIALIZER.getKey(RecipeWandUpgrade.SERIALIZER));"))
+        assertTrue(recipe.contains("SpecialRecipeBuilder.special(recipeFactory).save"))
+        assertFalse(recipe.contains("SpecialRecipeBuilder.special(serializer)"))
+        assertFalse(recipe.contains("ResourceLocation name ="))
+        assertFalse(recipe.contains("Registries.RECIPE_SERIALIZER.getKey(serializer)"))
+        assertTrue(modData.contains("new RecipeGenerator(packOutput, event.getLookupProvider())"))
+    }
+
+    @Test
+    fun `migrates mmlib recipe and loot datagen providers to lookup constructors`() {
+        val projectDir = tempDir.resolve("p19-mmlib-datagen")
+        val dataDir = projectDir.resolve("src/main/java/com/example/data")
+        dataDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        dataDir.resolve("ExampleRecipeProvider.java").writeText("""
+            package com.example.data;
+
+            import com.example.ExampleMod;
+            import cn.mcmod_mmf.mmlib.data.AbstractRecipeProvider;
+            import net.minecraft.data.PackOutput;
+            import net.minecraft.data.recipes.RecipeOutput;
+
+            public class ExampleRecipeProvider extends AbstractRecipeProvider {
+                public ExampleRecipeProvider(PackOutput packOutput) {
+                    super(packOutput);
+                }
+
+                protected void buildRecipes(RecipeOutput output) {
+                    save(output, ExampleMod.MODID);
+                }
+            }
+        """.trimIndent())
+        dataDir.resolve("ExampleLootTableProvider.java").writeText("""
+            package com.example.data;
+
+            import net.minecraft.data.PackOutput;
+            import net.minecraft.data.loot.LootTableProvider;
+            import net.minecraft.world.level.storage.loot.parameters.LootContextParamSets;
+            import java.util.List;
+            import java.util.Set;
+
+            public class ExampleLootTableProvider extends LootTableProvider {
+                public ExampleLootTableProvider(PackOutput packOutput) {
+                    super(packOutput, Set.of(), List.of(new SubProviderEntry(ExampleBlockLoot::new, LootContextParamSets.BLOCK)));
+                }
+            }
+        """.trimIndent())
+        dataDir.resolve("ExampleLootModifierProvider.java").writeText("""
+            package com.example.data;
+
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.common.data.GlobalLootModifierProvider;
+
+            public class ExampleLootModifierProvider extends GlobalLootModifierProvider {
+                public ExampleLootModifierProvider(PackOutput output, String modid) {
+                    super(output, modid);
+                }
+
+                protected void start() {
+                }
+            }
+        """.trimIndent())
+        dataDir.resolve("ModData.java").writeText("""
+            package com.example.data;
+
+            import com.example.ExampleMod;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.data.DataGenerator;
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+            import java.util.concurrent.CompletableFuture;
+
+            public class ModData {
+                public static void gatherData(GatherDataEvent event) {
+                    DataGenerator generator = event.getGenerator();
+                    PackOutput packOutput = generator.getPackOutput();
+                    CompletableFuture<HolderLookup.Provider> provider = event.getLookupProvider();
+                    generator.addProvider(true, new ExampleRecipeProvider(packOutput));
+                    generator.addProvider(true, new ExampleLootTableProvider(packOutput));
+                    generator.addProvider(true, new ExampleLootModifierProvider(packOutput, ExampleMod.MODID));
+                }
+            }
+        """.trimIndent())
+        projectDir.resolve("src/main/java/com/example/ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val recipe = dataDir.resolve("ExampleRecipeProvider.java").readText()
+        val lootTable = dataDir.resolve("ExampleLootTableProvider.java").readText()
+        val lootModifier = dataDir.resolve("ExampleLootModifierProvider.java").readText()
+        val modData = dataDir.resolve("ModData.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-datagen-api-121" })
+        assertTrue(recipe.contains("public ExampleRecipeProvider(PackOutput packOutput, CompletableFuture<HolderLookup.Provider> lookupProvider)"))
+        assertTrue(recipe.contains("super(packOutput, com.example.ExampleMod.MODID, lookupProvider);"))
+        assertTrue(lootTable.contains("public ExampleLootTableProvider(PackOutput packOutput, CompletableFuture<HolderLookup.Provider> lookupProvider)"))
+        assertTrue(lootTable.contains("lookupProvider"))
+        assertTrue(lootModifier.contains("public ExampleLootModifierProvider(PackOutput output, CompletableFuture<HolderLookup.Provider> lookupProvider, String modid)"))
+        assertTrue(lootModifier.contains("super(output, lookupProvider, modid);"))
+        assertTrue(modData.contains("new ExampleRecipeProvider(packOutput, provider)"))
+        assertTrue(modData.contains("new ExampleLootTableProvider(packOutput, provider)"))
+        assertTrue(modData.contains("new ExampleLootModifierProvider(packOutput, provider, ExampleMod.MODID)"))
+    }
+
+    @Test
+    fun `global loot modifier provider keeps already migrated lookup constructor calls`() {
+        val projectDir = tempDir.resolve("p19-global-loot-modifier-existing-lookup")
+        val dataDir = projectDir.resolve("src/main/java/com/example/data")
+        dataDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        dataDir.resolve("ExampleLootModifierProvider.java").writeText("""
+            package com.example.data;
+
+            import java.util.concurrent.CompletableFuture;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.common.data.GlobalLootModifierProvider;
+
+            public class ExampleLootModifierProvider extends GlobalLootModifierProvider {
+                public ExampleLootModifierProvider(PackOutput output, CompletableFuture<HolderLookup.Provider> lookupProvider) {
+                    super(output, lookupProvider, "example");
+                }
+
+                protected void start() {
+                }
+            }
+        """.trimIndent())
+        dataDir.resolve("ModData.java").writeText("""
+            package com.example.data;
+
+            import java.util.concurrent.CompletableFuture;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.data.DataGenerator;
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            public class ModData {
+                public static void gatherData(GatherDataEvent event) {
+                    DataGenerator generator = event.getGenerator();
+                    PackOutput packOutput = generator.getPackOutput();
+                    CompletableFuture<HolderLookup.Provider> provider = event.getLookupProvider();
+                    generator.addProvider(true, new ExampleLootModifierProvider(packOutput, provider));
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val modData = dataDir.resolve("ModData.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(modData.contains("new ExampleLootModifierProvider(packOutput, provider)"), modData)
+        assertFalse(modData.contains("provider, provider"), modData)
+    }
+
+    @Test
+    fun `mmlib recipe provider derives mod id from project metadata`() {
+        val projectDir = tempDir.resolve("p19-mmlib-datagen-metadata-modid")
+        val dataDir = projectDir.resolve("src/main/java/com/example/data")
+        val metaInfDir = projectDir.resolve("src/main/resources/META-INF")
+        dataDir.createDirectories()
+        metaInfDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        metaInfDir.resolve("mods.toml").writeText("""
+            modLoader="javafml"
+            loaderVersion="[47,)"
+            license="MIT"
+
+            [[mods]]
+            modId="examplemod"
+            version="1.0.0"
+            displayName="Example Mod"
+        """.trimIndent())
+        dataDir.resolve("ExampleRecipeProvider.java").writeText("""
+            package com.example.data;
+
+            import cn.mcmod_mmf.mmlib.data.AbstractRecipeProvider;
+            import net.minecraft.data.PackOutput;
+            import net.minecraft.data.recipes.RecipeOutput;
+
+            public class ExampleRecipeProvider extends AbstractRecipeProvider {
+                public ExampleRecipeProvider(PackOutput packOutput) {
+                    super(packOutput);
+                }
+
+                protected void buildRecipes(RecipeOutput output) {
+                    save(output, "example_recipe");
+                }
+            }
+        """.trimIndent())
+        dataDir.resolve("ModData.java").writeText("""
+            package com.example.data;
+
+            import net.minecraft.data.DataGenerator;
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            public class ModData {
+                public static void gatherData(GatherDataEvent event) {
+                    DataGenerator generator = event.getGenerator();
+                    PackOutput packOutput = generator.getPackOutput();
+                    generator.addProvider(true, new ExampleRecipeProvider(packOutput));
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val recipe = dataDir.resolve("ExampleRecipeProvider.java").readText()
+        val modData = dataDir.resolve("ModData.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "Unexpected build-system errors: ${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "build-datagen-api-121" })
+        assertFalse(recipe.contains("\"minecraft\""))
+        assertTrue(recipe.contains("CompletableFuture<HolderLookup.Provider> lookupProvider"))
+        assertTrue(recipe.contains("super(packOutput, \"examplemod\", lookupProvider);"))
+        assertTrue(modData.contains("new ExampleRecipeProvider(packOutput, event.getLookupProvider())"))
+    }
+
+    @Test
+    fun `mmlib recipe provider does not derive mod id from unrelated constants`() {
+        val projectDir = tempDir.resolve("p19-mmlib-datagen-unrelated-modid")
+        val dataDir = projectDir.resolve("src/main/java/com/example/data")
+        dataDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        dataDir.resolve("ExampleRecipeProvider.java").writeText("""
+            package com.example.data;
+
+            import cn.mcmod_mmf.mmlib.data.AbstractRecipeProvider;
+            import com.dependency.DependencyMod;
+            import net.minecraft.data.PackOutput;
+            import net.minecraft.data.recipes.RecipeOutput;
+
+            public class ExampleRecipeProvider extends AbstractRecipeProvider {
+                public ExampleRecipeProvider(PackOutput packOutput) {
+                    super(packOutput);
+                }
+
+                protected void buildRecipes(RecipeOutput output) {
+                    save(output, DependencyMod.MODID);
+                }
+            }
+        """.trimIndent())
+        dataDir.resolve("ModData.java").writeText("""
+            package com.example.data;
+
+            import net.minecraft.data.DataGenerator;
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            public class ModData {
+                public static void gatherData(GatherDataEvent event) {
+                    DataGenerator generator = event.getGenerator();
+                    PackOutput packOutput = generator.getPackOutput();
+                    generator.addProvider(true, new ExampleRecipeProvider(packOutput));
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val recipe = dataDir.resolve("ExampleRecipeProvider.java").readText()
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot derive mod id for AbstractRecipeProvider ExampleRecipeProvider") },
+            "Expected hard migration error, got: ${result.errors}"
+        )
+        assertFalse(recipe.contains("DependencyMod.MODID, lookupProvider"))
+        assertTrue(recipe.contains("super(packOutput);"))
+    }
+
+    @Test
+    fun `mmlib recipe provider ignores text block mod id documentation`() {
+        val projectDir = tempDir.resolve("p19-mmlib-datagen-text-block-modid")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val dataDir = srcDir.resolve("data")
+        dataDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleMod.java").writeText(listOf(
+            "package com.example;",
+            "",
+            "public final class ExampleMod {",
+            "    String docs() {",
+            "        return \"\"\"",
+            "            @Mod(\"examplemod\")",
+            "            public static final String MODID = \"examplemod\";",
+            "            \"\"\";",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+        dataDir.resolve("ExampleRecipeProvider.java").writeText("""
+            package com.example.data;
+
+            import cn.mcmod_mmf.mmlib.data.AbstractRecipeProvider;
+            import net.minecraft.data.PackOutput;
+            import net.minecraft.data.recipes.RecipeOutput;
+
+            public class ExampleRecipeProvider extends AbstractRecipeProvider {
+                public ExampleRecipeProvider(PackOutput packOutput) {
+                    super(packOutput);
+                }
+
+                protected void buildRecipes(RecipeOutput output) {
+                    save(output, "example_recipe");
+                }
+            }
+        """.trimIndent())
+        dataDir.resolve("ModData.java").writeText("""
+            package com.example.data;
+
+            import net.minecraft.data.DataGenerator;
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            public class ModData {
+                public static void gatherData(GatherDataEvent event) {
+                    DataGenerator generator = event.getGenerator();
+                    PackOutput packOutput = generator.getPackOutput();
+                    generator.addProvider(true, new ExampleRecipeProvider(packOutput));
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val recipe = dataDir.resolve("ExampleRecipeProvider.java").readText()
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot derive mod id for AbstractRecipeProvider ExampleRecipeProvider") },
+            "Expected text block mod id documentation to be ignored; got errors: ${result.errors}"
+        )
+        assertFalse(recipe.contains("\"examplemod\", lookupProvider"), recipe)
+        assertTrue(recipe.contains("super(packOutput);"), recipe)
+    }

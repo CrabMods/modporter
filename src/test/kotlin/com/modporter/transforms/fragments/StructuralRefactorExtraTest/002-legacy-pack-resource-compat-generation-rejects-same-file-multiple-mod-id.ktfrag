@@ -1,0 +1,1166 @@
+
+    @Test
+    fun `legacy pack resource compat generation rejects same file multiple mod ids`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CombinedMods.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(FirstMod.MOD_ID)
+            class FirstMod {
+                public static final String MOD_ID = "firstmod";
+            }
+
+            @Mod(SecondMod.MOD_ID)
+            class SecondMod {
+                public static final String MOD_ID = "secondmod";
+            }
+        """.trimIndent())
+        srcDir.resolve("PackSetup.java").writeText("""
+            package com.example;
+
+            import java.nio.file.Path;
+            import net.neoforged.neoforge.resource.PathPackResources;
+
+            public class PackSetup {
+                public PathPackResources open(Path sourcePath) {
+                    return new PathPackResources("example:" + sourcePath, true, sourcePath);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val setup = srcDir.resolve("PackSetup.java").readText()
+
+        assertTrue(
+            result.errors.any {
+                it.contains("Legacy pack resource API migration error") &&
+                    it.contains("Cannot derive generated compat package")
+            },
+            "Expected ambiguous same-file mod ids to hard gate; got: ${result.errors}"
+        )
+        assertFalse(setup.contains("com.modporter.generated.firstmod"), setup)
+        assertFalse(setup.contains("com.modporter.generated.secondmod"), setup)
+        assertFalse(tempDir.resolve("src/main/java/com/modporter/generated/firstmod/compat/PathPackResources.java").exists())
+        assertFalse(tempDir.resolve("src/main/java/com/modporter/generated/secondmod/compat/PathPackResources.java").exists())
+        assertFalse(result.changes.any { it.ruleId == "struct-generate-path-pack-resources" })
+    }
+
+    @Test
+    fun `metadata mod id detection ignores dependency mod ids when bridging LazyOptional imports`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val metadataDir = tempDir.resolve("src/main/resources/META-INF")
+        srcDir.createDirectories()
+        metadataDir.createDirectories()
+        metadataDir.resolve("neoforge.mods.toml").writeText("""
+            modLoader="javafml"
+            loaderVersion="[4,)"
+            license="All Rights Reserved"
+
+            [[mods]]
+            modId="examplemod" # mandatory
+            version="1.0.0"
+            displayName="Example Mod"
+
+            [[dependencies.examplemod]]
+                modId="neoforge"
+                mandatory=true
+                versionRange="[21,)"
+                ordering="NONE"
+                side="BOTH"
+
+            [[dependencies.examplemod]]
+                modId="minecraft"
+                mandatory=true
+                versionRange="[1.21.1]"
+                ordering="NONE"
+                side="BOTH"
+        """.trimIndent())
+        srcDir.resolve("UsesLazyOptional.java").writeText("""
+            package com.example;
+
+            import net.minecraftforge.common.util.LazyOptional;
+
+            public class UsesLazyOptional {
+                private final LazyOptional<String> value = LazyOptional.empty();
+
+                public LazyOptional<String> value() {
+                    return this.value;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("UsesLazyOptional.java").readText()
+
+        assertTrue(result.errors.none { it.contains("Cannot derive generated compat package") }, result.errors.joinToString("\n"))
+        assertTrue(source.contains("import com.modporter.generated.examplemod.compat.LazyOptional;"), source)
+        assertFalse(source.contains("com.modporter.generated.neoforge"))
+        assertFalse(source.contains("com.modporter.generated.minecraft"))
+    }
+
+    @Test
+    fun `item stack fluid capability presence migration preserves if else chains`() {
+        val projectDir = createFile("FlaskLogic.java", """
+            package com.example;
+
+            import net.minecraft.world.InteractionResult;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.fluids.FluidUtil;
+            import net.neoforged.neoforge.fluids.capability.IFluidHandler;
+            import net.neoforged.neoforge.fluids.capability.IFluidHandlerItem;
+
+            public class FlaskLogic {
+                public InteractionResult interact(ItemStack itemStack) {
+                    if (itemStack.getCapability(Capabilities.FluidHandler.ITEM).isPresent()) {
+                        IFluidHandlerItem syringe = itemStack.getCapability(Capabilities.FluidHandler.ITEM).resolve().orElseThrow();
+                        syringe.fill(IFluidHandler.FluidAction.EXECUTE);
+                        return InteractionResult.SUCCESS;
+                    } else if (itemStack.isEmpty()) {
+                        return InteractionResult.PASS;
+                    }
+                    return InteractionResult.FAIL;
+                }
+
+                public boolean reject(ItemStack stack) {
+                    return !stack.getCapability(Capabilities.FluidHandler.ITEM).isPresent();
+                }
+
+                public IFluidHandlerItem direct(ItemStack stack) {
+                    IFluidHandlerItem fluid = stack.getCapability(Capabilities.FluidHandler.ITEM).resolve().get();
+                    return fluid;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val source = tempDir.resolve("src/main/java/com/example/FlaskLogic.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(source.contains("if (itemStack.getCapability(Capabilities.FluidHandler.ITEM) != null) {"), source)
+        assertTrue(source.contains("} else if (itemStack.isEmpty()) {"), source)
+        assertTrue(source.contains("IFluidHandlerItem syringe = itemStack.getCapability(Capabilities.FluidHandler.ITEM);"), source)
+        assertFalse(source.contains(".resolve().orElseThrow()"), source)
+        assertTrue(source.contains("IFluidHandlerItem fluid = stack.getCapability(Capabilities.FluidHandler.ITEM);"), source)
+        assertFalse(source.contains(".resolve().get()"), source)
+        assertTrue(source.contains("return stack.getCapability(Capabilities.FluidHandler.ITEM) == null;"), source)
+        assertFalse(source.contains("!stack.getCapability(Capabilities.FluidHandler.ITEM) != null"), source)
+    }
+
+    @Test
+    fun `block entity LazyOptional cleanup preserves business if else chains after unbraced capability branches`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    BlockEntityRegistry.BLOCK_ENTITIES.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/FlaskBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.InteractionResult;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.fluids.capability.IFluidHandler;
+            import net.neoforged.neoforge.fluids.capability.IFluidHandlerItem;
+            import net.neoforged.neoforge.fluids.capability.templates.FluidTank;
+            import net.neoforged.neoforge.items.IItemHandler;
+            import net.neoforged.neoforge.items.ItemStackHandler;
+            import org.jetbrains.annotations.NotNull;
+            import org.jetbrains.annotations.Nullable;
+
+            public class FlaskBlockEntity extends BlockEntity {
+                private final FluidTank tank = new FluidTank(1000);
+                private final LazyOptional<IFluidHandler> holder = LazyOptional.of(() -> tank);
+                private final ItemStackHandler stackHandler = new ItemStackHandler();
+                private final LazyOptional<IItemHandler> stackHolder = LazyOptional.of(() -> stackHandler);
+
+                public FlaskBlockEntity(BlockPos pos, BlockState state) {
+                    super(BlockEntityRegistry.FLASK.get(), pos, state);
+                }
+
+                public InteractionResult interact(ItemStack itemStack) {
+                    if (itemStack.getCapability(Capabilities.FluidHandler.ITEM).isPresent()) {
+                        IFluidHandlerItem syringe = itemStack.getCapability(Capabilities.FluidHandler.ITEM).resolve().orElseThrow();
+                        return InteractionResult.SUCCESS;
+                    } else if (itemStack.isEmpty()) {
+                        return InteractionResult.PASS;
+                    }
+                    return InteractionResult.FAIL;
+                }
+
+                @Override
+                @NotNull
+                public <T> LazyOptional<T> getCapability(@NotNull Capability<T> capability, @Nullable Direction facing) {
+                    if (capability == Capabilities.FluidHandler.BLOCK)
+                        return holder.cast();
+                    if (capability == Capabilities.ItemHandler.BLOCK)
+                        return stackHolder.cast();
+                    return super.getCapability(capability, facing);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/BlockEntityRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockEntityRegistry {
+                public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES = null;
+                public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<FlaskBlockEntity>> FLASK = null;
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val source = tempDir.resolve("src/main/java/com/example/FlaskBlockEntity.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(source.contains("if (itemStack.getCapability(Capabilities.FluidHandler.ITEM) != null) {"), source)
+        assertTrue(source.contains("} else if (itemStack.isEmpty()) {"), source)
+        assertTrue(source.contains("IFluidHandlerItem syringe = itemStack.getCapability(Capabilities.FluidHandler.ITEM);"), source)
+        assertFalse(source.contains(".resolve().orElseThrow()"), source)
+        assertTrue(source.contains("event.registerBlockEntity(\n                Capabilities.FluidHandler.BLOCK,\n                BlockEntityRegistry.FLASK.get(),"), source)
+        assertTrue(source.contains("event.registerBlockEntity(\n                Capabilities.ItemHandler.BLOCK,\n                BlockEntityRegistry.FLASK.get(),"), source)
+        assertFalse(source.contains("private final LazyOptional"), source)
+        assertFalse(source.contains("getCapability(@NotNull Capability<T> capability"), source)
+    }
+
+    @Test
+    fun `block entity LazyOptional cleanup is scoped to the migrated owner class`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    BlockEntityRegistry.BLOCK_ENTITIES.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/ShelfBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.InteractionResult;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.fluids.capability.IFluidHandler;
+            import net.neoforged.neoforge.fluids.capability.templates.FluidTank;
+            import net.neoforged.neoforge.items.IItemHandler;
+            import net.neoforged.neoforge.items.ItemStackHandler;
+            import org.jetbrains.annotations.NotNull;
+            import org.jetbrains.annotations.Nullable;
+
+            public class ShelfBlockEntity extends BlockEntity {
+                private final FluidTank tank = new FluidTank(1000);
+                private final LazyOptional<IFluidHandler> holder = LazyOptional.of(() -> tank);
+                private final ItemStackHandler stackHandler = new ItemStackHandler();
+                private final LazyOptional<IItemHandler> stackHolder = LazyOptional.of(() -> stackHandler);
+                private final ShelfSlot slot = new ShelfSlot();
+
+                public ShelfBlockEntity(BlockPos pos, BlockState state) {
+                    super(BlockEntityRegistry.SHELF.get(), pos, state);
+                }
+
+                public InteractionResult interact(ItemStack itemStack) {
+                    if (itemStack.getCapability(Capabilities.FluidHandler.ITEM).isPresent()) {
+                        if (slot != null) {
+                            slot.holder.map(handler -> true).orElse(false);
+                        }
+                        return InteractionResult.SUCCESS;
+                    } else if (itemStack.isEmpty()) {
+                        return InteractionResult.PASS;
+                    }
+                    return InteractionResult.FAIL;
+                }
+
+                @Override
+                @NotNull
+                public <T> LazyOptional<T> getCapability(@NotNull Capability<T> capability, @Nullable Direction facing) {
+                    if (capability == Capabilities.FluidHandler.BLOCK)
+                        return holder.cast();
+                    if (capability == Capabilities.ItemHandler.BLOCK)
+                        return stackHolder.cast();
+                    return super.getCapability(capability, facing);
+                }
+
+                public static class ShelfSlot {
+                    private final FluidTank tank = new FluidTank(250);
+                    private final LazyOptional<IFluidHandler> holder = LazyOptional.of(() -> tank);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/BlockEntityRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockEntityRegistry {
+                public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES = null;
+                public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<ShelfBlockEntity>> SHELF = null;
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val source = tempDir.resolve("src/main/java/com/example/ShelfBlockEntity.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(source.contains("if (itemStack.getCapability(Capabilities.FluidHandler.ITEM) != null) {"), source)
+        assertTrue(source.contains("} else if (itemStack.isEmpty()) {"), source)
+        assertTrue(source.contains("slot.holder.map(handler -> true).orElse(false);"), source)
+        assertEquals(1, Regex("""private final LazyOptional<IFluidHandler> holder = LazyOptional\.of\(\(\) -> tank\);""").findAll(source).count(), source)
+        assertFalse(source.contains("private final LazyOptional<IItemHandler> stackHolder"), source)
+        assertFalse(source.contains("getCapability(@NotNull Capability<T> capability"), source)
+        assertTrue(source.contains("event.registerBlockEntity(\n                Capabilities.FluidHandler.BLOCK,\n                BlockEntityRegistry.SHELF.get(),"), source)
+        assertTrue(source.contains("event.registerBlockEntity(\n                Capabilities.ItemHandler.BLOCK,\n                BlockEntityRegistry.SHELF.get(),"), source)
+    }
+
+    @Test
+    fun `migrates cross class DeferredHolder presence checks without touching optionals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("EntityRegistry.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class EntityRegistry {
+                public static final DeferredHolder<EntityType<?>, EntityType<DeerEntity>> DEER = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("ContentRegistryTest.java").writeText("""
+            package com.example;
+
+            import java.util.Optional;
+
+            public class ContentRegistryTest {
+                public void verify(Optional<String> optional) {
+                    boolean registryBound = EntityRegistry.DEER.isPresent();
+                    boolean milkBound = net.neoforged.neoforge.common.NeoForgeMod.MILK.isPresent();
+                    boolean milkTypeBound = NeoForgeMod.MILK_TYPE.isPresent();
+                    boolean optionalPresent = optional.isPresent();
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(tempDir)
+        val transformed = srcDir.resolve("ContentRegistryTest.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-deferredholder-isbound" })
+        assertTrue(transformed.contains("EntityRegistry.DEER.isBound()"))
+        assertTrue(transformed.contains("net.neoforged.neoforge.common.NeoForgeMod.MILK.isBound()"))
+        assertTrue(transformed.contains("NeoForgeMod.MILK_TYPE.isBound()"))
+        assertTrue(transformed.contains("optional.isPresent()"))
+        assertTrue(!transformed.contains("EntityRegistry.DEER.isPresent()"))
+        assertTrue(!transformed.contains("NeoForgeMod.MILK_TYPE.isPresent()"))
+    }
+
+    @Test
+    fun `deferred holder presence checks use declared owners and executable code`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RegistryDeclarations.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            class ActualRegistry {
+                public static final DeferredHolder<Item, Item> GEM = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("Usage.java").writeText("""
+            package com.example;
+
+            public class Usage {
+                public void verify() {
+                    String text = "ActualRegistry.GEM.isPresent()";
+                    // ActualRegistry.GEM.isPresent();
+                    boolean bound = ActualRegistry.GEM.isPresent();
+                    boolean filenameGuess = RegistryDeclarations.GEM.isPresent();
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(tempDir)
+        val transformed = srcDir.resolve("Usage.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-deferredholder-isbound" })
+        assertTrue(transformed.contains("""String text = "ActualRegistry.GEM.isPresent()";"""), transformed)
+        assertTrue(transformed.contains("// ActualRegistry.GEM.isPresent();"), transformed)
+        assertTrue(transformed.contains("boolean bound = ActualRegistry.GEM.isBound();"), transformed)
+        assertTrue(transformed.contains("boolean filenameGuess = RegistryDeclarations.GEM.isPresent();"), transformed)
+        assertFalse(transformed.contains("RegistryDeclarations.GEM.isBound()"), transformed)
+    }
+
+    @Test
+    fun `moves mod bus event listener registration off common NeoForge bus`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
+            import net.neoforged.neoforge.common.NeoForge;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "examplemod";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    modEventBus.addListener(this::commonSetup);
+                }
+
+                private void commonSetup(Object event) {
+                }
+
+                @EventBusSubscriber(modid = MODID, bus = EventBusSubscriber.Bus.MOD)
+                public static class ModEvents {
+                    @SubscribeEvent
+                    public static void onClientSetup(FMLClientSetupEvent event) {
+                        NeoForge.EVENT_BUS.addListener(ClientEvent::registerParticleFactories);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ClientEvent.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.client.event.RegisterParticleProvidersEvent;
+
+            public class ClientEvent {
+                public static void registerParticleFactories(RegisterParticleProvidersEvent event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-modbus-listener-registration" })
+        assertTrue(migrated.contains("modEventBus.addListener(ClientEvent::registerParticleFactories);"))
+        assertTrue(!migrated.contains("NeoForge.EVENT_BUS.addListener(ClientEvent::registerParticleFactories);"))
+        assertTrue(!migrated.contains("[forge2neo] Mod-bus event handlers extracted"))
+        assertTrue(migrated.trimEnd().endsWith("}"))
+    }
+
+    @Test
+    fun `empty event bus registration removal requires resolved mod bus event type`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
+            import net.neoforged.neoforge.common.NeoForge;
+
+            @Mod("examplemod")
+            public class ExampleMod {
+                public ExampleMod() {
+                    NeoForge.EVENT_BUS.register(this);
+                }
+
+                @SubscribeEvent
+                public void setup(FMLCommonSetupEvent event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-remove-empty-eventbus-register" })
+        assertFalse(migrated.contains("NeoForge.EVENT_BUS.register(this);"), migrated)
+    }
+
+    @Test
+    fun `empty event bus registration removal rejects local mod bus event simple names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("FMLCommonSetupEvent.java").writeText("""
+            package com.example;
+
+            public class FMLCommonSetupEvent {
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.common.NeoForge;
+
+            @Mod("examplemod")
+            public class ExampleMod {
+                public ExampleMod() {
+                    NeoForge.EVENT_BUS.register(this);
+                }
+
+                @SubscribeEvent
+                public void setup(FMLCommonSetupEvent event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.none { it.ruleId == "struct-remove-empty-eventbus-register" })
+        assertTrue(migrated.contains("NeoForge.EVENT_BUS.register(this);"), migrated)
+    }
+
+    @Test
+    fun `extracts mod bus event methods with source derived mod ids`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LiteralMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
+            import net.neoforged.neoforge.client.event.RegisterColorHandlersEvent;
+
+            @Mod("literalmod")
+            public class LiteralMod {
+                public LiteralMod(IEventBus modEventBus) {
+                    modEventBus.register(this);
+                }
+
+                @SubscribeEvent
+                public void setup(FMLCommonSetupEvent event) {
+                    event.toString();
+                }
+
+                @SubscribeEvent
+                public void colors(RegisterColorHandlersEvent.Item event) {
+                    event.toString();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ConstantMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
+
+            @Mod(ConstantMod.MODID)
+            public class ConstantMod {
+                public static final String MODID = "constantmod";
+
+                public ConstantMod(IEventBus modEventBus) {
+                    modEventBus.register(this);
+                }
+
+                @SubscribeEvent
+                public void setup(FMLCommonSetupEvent event) {
+                    event.toString();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val literal = srcDir.resolve("LiteralMod.java").readText()
+        val constant = srcDir.resolve("ConstantMod.java").readText()
+
+        assertTrue(result.changes.count { it.ruleId == "struct-extract-mod-bus-events" } >= 2)
+        assertTrue(literal.contains("""@EventBusSubscriber(modid = "literalmod", bus = EventBusSubscriber.Bus.MOD)"""), literal)
+        assertTrue(literal.contains("""@EventBusSubscriber(modid = "literalmod", bus = EventBusSubscriber.Bus.MOD, value = net.neoforged.api.distmarker.Dist.CLIENT)"""), literal)
+        assertTrue(constant.contains("@EventBusSubscriber(modid = ConstantMod.MODID, bus = EventBusSubscriber.Bus.MOD)"), constant)
+        assertFalse(literal.contains("modid = \"modid\""), literal)
+        assertFalse(constant.contains("modid = \"modid\""), constant)
+        assertFalse(literal.contains("modEventBus.register(this);"), literal)
+        assertFalse(constant.contains("modEventBus.register(this);"), constant)
+    }
+
+    @Test
+    fun `mod bus event extraction rejects local event simple names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RegisterColorHandlersEvent.java").writeText("""
+            package com.example;
+
+            public final class RegisterColorHandlersEvent {
+                public static final class Item {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("examplemod")
+            public class ExampleMod {
+                public ExampleMod(IEventBus modEventBus) {
+                    modEventBus.register(this);
+                }
+
+                @SubscribeEvent
+                public void colors(RegisterColorHandlersEvent.Item event) {
+                    event.toString();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.none { it.ruleId == "struct-extract-mod-bus-events" })
+        assertTrue(migrated.contains("modEventBus.register(this);"), migrated)
+        assertTrue(migrated.contains("public void colors(RegisterColorHandlersEvent.Item event)"), migrated)
+        assertFalse(migrated.contains("EventBusSubscriber.Bus.MOD"), migrated)
+    }
+
+    @Test
+    fun `mod bus event extraction ignores commented and text block handlers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("ExampleMod.java")
+        file.writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
+
+            @Mod("examplemod")
+            public class ExampleMod {
+                public ExampleMod(IEventBus modEventBus) {
+                    modEventBus.register(this);
+                }
+
+                /*
+                @SubscribeEvent
+                public void commented(FMLCommonSetupEvent event) {
+                }
+                */
+
+                private static final String DOC = ""${'"'}
+                    @SubscribeEvent
+                    public void documented(FMLCommonSetupEvent event) {
+                    }
+                ""${'"'};
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.changes.none { it.ruleId == "struct-extract-mod-bus-events" })
+        assertTrue(migrated.contains("modEventBus.register(this);"), migrated)
+        assertTrue(migrated.contains("@SubscribeEvent"), migrated)
+        assertFalse(migrated.contains("public static class ModEvents"), migrated)
+    }
+
+    @Test
+    fun `mod bus event extraction ignores braces inside comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("ExampleMod.java")
+        file.writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
+
+            @Mod("examplemod")
+            public class ExampleMod {
+                public ExampleMod(IEventBus modEventBus) {
+                    modEventBus.register(this);
+                }
+
+                @SubscribeEvent
+                public void setup(FMLCommonSetupEvent event) {
+                    String doc = "{";
+                    // { brace noise must not extend this method
+                    event.toString();
+                }
+
+                public void helper() {
+                    System.out.println("still here");
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-extract-mod-bus-events" })
+        assertTrue(migrated.contains("public static class ModEvents"), migrated)
+        assertTrue(migrated.contains("public static void setup(FMLCommonSetupEvent event)"), migrated)
+        assertTrue(migrated.contains("String doc = \"{\";"), migrated)
+        assertTrue(migrated.contains("public void helper()"), migrated)
+        assertFalse(migrated.contains("modEventBus.register(this);"), migrated)
+        assertFalse(migrated.contains("public void setup(FMLCommonSetupEvent event)"), migrated)
+    }
+
+    @Test
+    fun `event bus subscriber methods become static for automatic registration`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ClientEvents.java").writeText("""
+            package com.example;
+
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.fml.event.lifecycle.FMLLoadCompleteEvent;
+
+            @EventBusSubscriber(modid = ExampleMod.MODID, value = Dist.CLIENT)
+            public class ClientEvents {
+                private static boolean refreshPacks = false;
+
+                @SubscribeEvent
+                public void loadComplete(FMLLoadCompleteEvent event) {
+                    if (refreshPacks) {
+                        refreshPacks = false;
+                    }
+                }
+
+                public void helper() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ClientEvents.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-eventbussubscriber-static-methods" })
+        assertTrue(migrated.contains("@SubscribeEvent\n    public static void loadComplete(FMLLoadCompleteEvent event)"), migrated)
+        assertTrue(migrated.contains("public void helper()"), migrated)
+    }
+
+    @Test
+    fun `event bus subscriber static migration ignores commented and text block handlers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ClientEvents.java").writeText("""
+            package com.example;
+
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.fml.event.lifecycle.FMLLoadCompleteEvent;
+
+            @EventBusSubscriber(modid = ExampleMod.MODID, value = Dist.CLIENT)
+            public class ClientEvents {
+                /*
+                @SubscribeEvent
+                public void commented(FMLLoadCompleteEvent event) {
+                }
+                */
+
+                private static final String DOC = ""${'"'}
+                    @SubscribeEvent
+                    public void documented(FMLLoadCompleteEvent event) {
+                    }
+                ""${'"'};
+
+                @SubscribeEvent
+                public void real(FMLLoadCompleteEvent event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ClientEvents.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-eventbussubscriber-static-methods" })
+        assertTrue(migrated.contains("@SubscribeEvent\n    public static void real(FMLLoadCompleteEvent event)"), migrated)
+        assertTrue(migrated.contains("public void commented(FMLLoadCompleteEvent event)"), migrated)
+        assertTrue(migrated.contains("public void documented(FMLLoadCompleteEvent event)"), migrated)
+        assertFalse(migrated.contains("public static void commented"), migrated)
+        assertFalse(migrated.contains("public static void documented"), migrated)
+    }
+
+    @Test
+    fun `migrates static bus mod subscribers to constructor listener registration`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val dataDir = srcDir.resolve("data")
+        srcDir.createDirectories()
+        dataDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "examplemod";
+
+                public ExampleMod(IEventBus modEventBus, ModContainer modContainer) {
+                    Registry.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        dataDir.resolve("ModData.java").writeText("""
+            package com.example.data;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
+            public class ModData {
+                @SubscribeEvent
+                public static void gatherData(GatherDataEvent event) {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ClientHooks.java").writeText("""
+            package com.example;
+
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.api.distmarker.OnlyIn;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.neoforge.client.event.RegisterColorHandlersEvent;
+
+            @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
+            public class ClientHooks {
+                @OnlyIn(Dist.CLIENT)
+                @SubscribeEvent
+                public static void registerItemColors(RegisterColorHandlersEvent.Item event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val main = srcDir.resolve("ExampleMod.java").readText()
+        val data = dataDir.resolve("ModData.java").readText()
+        val clientHooks = srcDir.resolve("ClientHooks.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-static-modbus-subscriber-registration" })
+        assertTrue(result.changes.any { it.ruleId == "struct-static-modbus-subscriber-cleanup" })
+        assertTrue(main.contains("modEventBus.addListener(com.example.data.ModData::gatherData);"))
+        assertTrue(main.contains("FMLLoader.getDist() == net.neoforged.api.distmarker.Dist.CLIENT"), main)
+        assertTrue(main.contains("modEventBus.addListener(com.example.ClientHooks::registerItemColors);"))
+        assertTrue(!data.contains("@EventBusSubscriber"))
+        assertTrue(!data.contains("@SubscribeEvent"))
+        assertTrue(!data.contains("EventBusSubscriber.Bus.MOD"))
+        assertTrue(!clientHooks.contains("@EventBusSubscriber"))
+        assertTrue(!clientHooks.contains("@SubscribeEvent"))
+    }
+
+    @Test
+    fun `inserts static mod bus subscribers into constructor with local mod bus variable`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val dataDir = srcDir.resolve("data")
+        srcDir.createDirectories()
+        dataDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "examplemod";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    Registry.ITEMS.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        dataDir.resolve("ModData.java").writeText("""
+            package com.example.data;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
+            public class ModData {
+                @SubscribeEvent
+                public static void gatherData(GatherDataEvent event) {
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val main = srcDir.resolve("ExampleMod.java").readText()
+        val listenerIndex = main.indexOf("modEventBus.addListener(com.example.data.ModData::gatherData);")
+        val classEndIndex = main.lastIndexOf("}")
+
+        assertTrue(main.contains("Registry.ITEMS.register(modEventBus);\n        modEventBus.addListener(com.example.data.ModData::gatherData);"))
+        assertTrue(listenerIndex > 0)
+        assertTrue(listenerIndex < classEndIndex)
+    }
+
+    @Test
+    fun `static mod bus subscribers use declared type names instead of java file names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "examplemod";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ModData.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
+            class ActualData {
+                @SubscribeEvent
+                public static void gatherData(GatherDataEvent event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val main = srcDir.resolve("ExampleMod.java").readText()
+        val data = srcDir.resolve("ModData.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-static-modbus-subscriber-registration" })
+        assertTrue(main.contains("modEventBus.addListener(ActualData::gatherData);"), main)
+        assertFalse(main.contains("ModData::gatherData"), main)
+        assertFalse(data.contains("@EventBusSubscriber"), data)
+        assertFalse(data.contains("@SubscribeEvent"), data)
+    }
+
+    @Test
+    fun `static mod bus subscriber registration rejects local event simple names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "examplemod";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("FMLCommonSetupEvent.java").writeText("""
+            package com.example;
+
+            public class FMLCommonSetupEvent {
+            }
+        """.trimIndent())
+        srcDir.resolve("LocalEvents.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+
+            @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
+            class LocalEvents {
+                @SubscribeEvent
+                public static void setup(FMLCommonSetupEvent event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val main = srcDir.resolve("ExampleMod.java").readText()
+        val data = srcDir.resolve("LocalEvents.java").readText()
+
+        assertTrue(result.changes.none { it.ruleId == "struct-static-modbus-subscriber-registration" })
+        assertFalse(main.contains("LocalEvents::setup"), main)
+        assertTrue(data.contains("@EventBusSubscriber"), data)
+        assertTrue(data.contains("@SubscribeEvent"), data)
+    }
+
+    @Test
+    fun `event bus subscriber cleanup ignores commented and text block subscribe events`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("CommentOnlySubscriber.java")
+        file.writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+
+            @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
+            public class CommentOnlySubscriber {
+                /*
+                @SubscribeEvent
+                public static void commented(Object event) {
+                }
+                */
+                private static final String DOC = ""${'"'}
+                    @SubscribeEvent
+                    public static void documented(Object event) {
+                    }
+                ""${'"'};
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-cleanup-eventbus-subscriber" })
+        assertFalse(migrated.contains("@EventBusSubscriber(bus"), migrated)
+        assertFalse(migrated.contains("import net.neoforged.fml.common.EventBusSubscriber;"), migrated)
+        assertTrue(migrated.contains("@SubscribeEvent"), migrated)
+        assertTrue(migrated.contains("public static void documented(Object event)"), migrated)
+    }
+
+    @Test
+    fun `event bus subscriber bus cleanup preserves comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("ActualSubscriber.java")
+        file.writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+
+            @EventBusSubscriber(bus = EventBusSubscriber.Bus.FORGE)
+            public class ActualSubscriber {
+                private static final String DOC = "@EventBusSubscriber(bus = EventBusSubscriber.Bus.FORGE)";
+                // @EventBusSubscriber(bus = EventBusSubscriber.Bus.FORGE)
+
+                @Other(bus = EventBusSubscriber.Bus.FORGE)
+                private Object unrelated;
+
+                @SubscribeEvent
+                public static void setup(Object event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-cleanup-eventbus-subscriber" })
+        assertTrue(migrated.contains("@EventBusSubscriber\npublic class ActualSubscriber"), migrated)
+        assertTrue(migrated.contains("private static final String DOC = \"@EventBusSubscriber(bus = EventBusSubscriber.Bus.FORGE)\";"), migrated)
+        assertTrue(migrated.contains("// @EventBusSubscriber(bus = EventBusSubscriber.Bus.FORGE)"), migrated)
+        assertTrue(migrated.contains("@Other(bus = EventBusSubscriber.Bus.FORGE)"), migrated)
+    }
+
+    @Test
+    fun `item pickup event migration uses executable event receiver evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("PickupHooks.java")
+        file.writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.event.entity.player.ItemEntityPickupEvent;
+            import net.neoforged.neoforge.event.entity.player.ItemEntityPickupEvent.Pre;
+
+            public class PickupHooks {
+                @SubscribeEvent
+                public static void explicit(ItemEntityPickupEvent.Pre event, Other other) {
+                    String doc = "event.setCanceled(true); event.getEntity();";
+                    // event.setCanceled(true);
+                    other.getEntity();
+                    event.setCanceled(true);
+                    Object player = event.getEntity();
+                }
+
+                @SubscribeEvent
+                static void imported(Pre pickup) {
+                    pickup.setCanceled(true);
+                    Object player = pickup.getEntity();
+                }
+
+                static class Other {
+                    Object getEntity() {
+                        return new Object();
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-pickup-event-setcanpickup" })
+        assertTrue(result.changes.any { it.ruleId == "struct-pickup-event-getplayer" })
+        assertTrue(migrated.contains("import net.neoforged.neoforge.common.util.TriState;"), migrated)
+        assertTrue(migrated.contains("event.setCanPickup(TriState.FALSE);"), migrated)
+        assertTrue(migrated.contains("Object player = event.getPlayer();"), migrated)
+        assertTrue(migrated.contains("pickup.setCanPickup(TriState.FALSE);"), migrated)
+        assertTrue(migrated.contains("Object player = pickup.getPlayer();"), migrated)
+        assertTrue(migrated.contains("""String doc = "event.setCanceled(true); event.getEntity();";"""), migrated)
+        assertTrue(migrated.contains("// event.setCanceled(true);"), migrated)
+        assertTrue(migrated.contains("other.getEntity();"), migrated)
+    }

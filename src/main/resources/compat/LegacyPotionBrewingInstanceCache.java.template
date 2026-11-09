@@ -1,0 +1,20 @@
+class ModPorterPotionBrewingCacheMembers {
+    private static final java.util.Map<
+        net.minecraft.world.item.alchemy.PotionBrewing,
+        @TYPE@
+    > @CACHE@ = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    @VISIBILITY@ static @TYPE@ @ACCESSOR@(
+        net.minecraft.world.item.alchemy.PotionBrewing @PARAM@
+    ) {
+        java.util.Objects.requireNonNull(@PARAM@, "potionBrewing");
+        synchronized (@CACHE@) {
+            if (@CACHE@.containsKey(@PARAM@)) {
+                return @CACHE@.get(@PARAM@);
+            }
+            @TYPE@ @VALUE@ = @INITIALIZER@;
+            @CACHE@.put(@PARAM@, @VALUE@);
+            return @VALUE@;
+        }
+    }
+}

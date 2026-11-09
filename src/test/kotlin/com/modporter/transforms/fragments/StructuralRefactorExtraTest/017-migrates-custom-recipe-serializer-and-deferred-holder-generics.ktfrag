@@ -1,0 +1,1063 @@
+
+    @Test
+    fun `migrates custom recipe serializer and deferred holder generics`() {
+        val textBlockDelimiter = "\"\"\""
+        val projectDir = createFile("CustomFluidCraftingRecipe.java", """
+            package com.example;
+
+            import com.crabmod.hotbath.HotBath;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonParseException;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.*;
+            import net.minecraft.world.level.Level;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+            import net.minecraft.core.RegistryAccess;
+
+            public class CustomFluidCraftingRecipe implements CraftingRecipe {
+                public static final DeferredRegister<RecipeSerializer<?>> RECIPE_SERIALIZERS =
+                        DeferredRegister.create(Registries.RECIPE_SERIALIZER, HotBath.MOD_ID);
+                public static final DeferredHolder<RecipeSerializer<CustomFluidCraftingRecipe>, RecipeSerializer<CustomFluidCraftingRecipe>> SERIALIZER =
+                        RECIPE_SERIALIZERS.register("custom_fluid_crafting", Serializer::new);
+                private static final String METHOD_DOC = $textBlockDelimiter
+                    public ResourceLocation getId() { return ResourceLocation.parse("example:doc"); }
+                    public static class Serializer { public Object codec() { return null; } }
+                    $textBlockDelimiter;
+                private final ResourceLocation id;
+                private final ResourceLocation fluidId;
+                private final Item ingredient;
+                private final int ingredientCount;
+                public CustomFluidCraftingRecipe(ResourceLocation id, ResourceLocation fluidId, Item ingredient, int ingredientCount) {
+                    this.id = id;
+                    this.fluidId = fluidId;
+                    this.ingredient = ingredient;
+                    this.ingredientCount = ingredientCount;
+                }
+                public ResourceLocation getFluidId() { return fluidId; }
+                public Item getIngredient() { return ingredient; }
+                public int getIngredientCount() { return ingredientCount; }
+                public boolean matches(CraftingInput input, Level level) { return true; }
+                public ItemStack assemble(CraftingInput input, HolderLookup.Provider provider) { return ItemStack.EMPTY; }
+                public boolean canCraftInDimensions(int width, int height) { return true; }
+                @Override
+                public ItemStack getResultItem(RegistryAccess registryAccess) { return ItemStack.EMPTY; }
+                @Override
+                public ResourceLocation getId() { return id; }
+                public RecipeSerializer<?> getSerializer() { return SERIALIZER.get(); }
+                public CraftingBookCategory category() { return CraftingBookCategory.MISC; }
+                public static class Serializer implements RecipeSerializer<CustomFluidCraftingRecipe> {
+                    @Override
+                    public CustomFluidCraftingRecipe fromJson(ResourceLocation recipeId, JsonObject json) {
+                        String fluidIdStr = GsonHelper.getAsString(json, "fluid_id");
+                        ResourceLocation fluidId = ResourceLocation.parse(fluidIdStr);
+                        String ingredientStr = GsonHelper.getAsString(json, "ingredient");
+                        ResourceLocation ingredientId = ResourceLocation.parse(ingredientStr);
+                        Item ingredient = BuiltInRegistries.ITEM.get(ingredientId);
+                        if (ingredient == null) {
+                            throw new JsonParseException("Unknown item: " + ingredientStr);
+                        }
+                        int ingredientCount = GsonHelper.getAsInt(json, "ingredient_count", 4);
+                        return new CustomFluidCraftingRecipe(recipeId, fluidId, ingredient, ingredientCount);
+                    }
+                    @Override
+                    public CustomFluidCraftingRecipe fromNetwork(ResourceLocation recipeId, FriendlyByteBuf buffer) {
+                        ResourceLocation fluidId = buffer.readResourceLocation();
+                        Item ingredient = buffer.readById(BuiltInRegistries.ITEM);
+                        int ingredientCount = buffer.readInt();
+                        return new CustomFluidCraftingRecipe(recipeId, fluidId, ingredient, ingredientCount);
+                    }
+                    @Override
+                    public void toNetwork(FriendlyByteBuf buffer, CustomFluidCraftingRecipe recipe) {
+                        buffer.writeResourceLocation(recipe.fluidId);
+                        buffer.writeId(BuiltInRegistries.ITEM, recipe.ingredient);
+                        buffer.writeInt(recipe.ingredientCount);
+                    }
+                }
+            }
+        """.trimIndent())
+        val registryFile = projectDir.resolve("src/main/java/com/example/RegistryUse.java")
+        registryFile.writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.LiquidBlock;
+            import net.neoforged.neoforge.fluids.FluidType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class RegistryUse {
+                DeferredHolder<LiquidBlock, LiquidBlock> fluidBlock;
+                DeferredHolder<DynamicFluidType, DynamicFluidType> fluidType;
+                private static <T extends Block> DeferredHolder<T, T> registerBlock(String name, java.util.function.Supplier<T> block) { return null; }
+                private static <T extends Block> DeferredHolder<Item, Item> registerBlockItem(String name, DeferredHolder<T, T> block) { return null; }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val recipe = tempDir.resolve("src/main/java/com/example/CustomFluidCraftingRecipe.java").readText()
+        val registry = tempDir.resolve("src/main/java/com/example/RegistryUse.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-recipe-codec-121" })
+        assertTrue(result.changes.any { it.ruleId == "struct-deferredholder-generics" })
+        assertTrue(recipe.contains("DeferredHolder<RecipeSerializer<?>, Serializer> SERIALIZER"))
+        assertTrue(recipe.contains("public MapCodec<CustomFluidCraftingRecipe> codec()"))
+        assertTrue(recipe.contains("public StreamCodec<RegistryFriendlyByteBuf, CustomFluidCraftingRecipe> streamCodec()"))
+        assertTrue(recipe.contains("""ResourceLocation.CODEC.fieldOf("fluid_id").forGetter((recipe) -> recipe.fluidId)"""))
+        assertTrue(recipe.contains("""BuiltInRegistries.ITEM.byNameCodec().fieldOf("ingredient").forGetter((recipe) -> recipe.ingredient)"""))
+        assertTrue(recipe.contains("""Codec.INT.fieldOf("ingredient_count").orElse(4).forGetter((recipe) -> recipe.ingredientCount)"""))
+        assertTrue(recipe.contains("Item ingredient = BuiltInRegistries.ITEM.byId(buffer.readVarInt());"), recipe)
+        assertTrue(recipe.contains("int ingredientCount = buffer.readInt();"), recipe)
+        assertTrue(recipe.contains("buffer.writeVarInt(BuiltInRegistries.ITEM.getId(recipe.ingredient));"), recipe)
+        assertTrue(recipe.contains("buffer.writeInt(recipe.ingredientCount);"), recipe)
+        assertTrue(recipe.contains("new CustomFluidCraftingRecipe(fluidId, ingredient, ingredientCount)"))
+        assertTrue(recipe.contains("public ItemStack getResultItem(HolderLookup.Provider registryAccess)"))
+        assertFalse(recipe.contains("private final ResourceLocation id;"))
+        assertTrue(recipe.contains("private static final String METHOD_DOC = \"\"\""))
+        assertTrue(recipe.contains("""public ResourceLocation getId() { return ResourceLocation.parse("example:doc"); }"""))
+        assertTrue(recipe.contains("""public static class Serializer { public Object codec() { return null; } }"""))
+        assertFalse(recipe.contains("return id;"))
+        assertTrue(registry.contains("DeferredHolder<Block, LiquidBlock> fluidBlock"))
+        assertTrue(registry.contains("DeferredHolder<FluidType, DynamicFluidType> fluidType"))
+        assertTrue(registry.contains("DeferredHolder<Block, T> registerBlock"))
+        assertTrue(registry.contains("registerBlockItem(String name, DeferredHolder<Block, T> block)"))
+    }
+
+    @Test
+    fun `migrates structured recipe serializer with renamed locals and optional tag access`() {
+        val projectDir = createFile("IncubationRecipe.java", """
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSyntaxException;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.Container;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.level.Level;
+            import net.neoforged.neoforge.common.crafting.CraftingHelper;
+
+            public class IncubationRecipe implements Recipe<Container> {
+                protected final ResourceLocation id;
+                protected final String group;
+                protected final Ingredient ingredient;
+                protected final EntityType<?> entity;
+                protected final CompoundTag tag;
+                protected final int incubationTime;
+
+                public IncubationRecipe(ResourceLocation id, String group, Ingredient ingredient, EntityType<?> entity, CompoundTag tag, int incubationTime) {
+                    this.id = id;
+                    this.group = group;
+                    this.ingredient = ingredient;
+                    this.entity = entity;
+                    this.tag = tag;
+                    this.incubationTime = incubationTime;
+                }
+
+                public boolean matches(Container menu, Level level) { return this.ingredient.test(menu.getItem(0)); }
+                public ItemStack assemble(Container menu, HolderLookup.Provider provider) { return ItemStack.EMPTY; }
+                public boolean canCraftInDimensions(int width, int height) { return true; }
+                public EntityType<?> getEntity() { return this.entity; }
+                public CompoundTag getTag() { return this.tag; }
+                public int getIncubationTime() { return this.incubationTime; }
+                public NonNullList<Ingredient> getIngredients() { return NonNullList.of(Ingredient.EMPTY, this.ingredient); }
+                public ResourceLocation getId() { return this.id; }
+                public RecipeSerializer<?> getSerializer() { return new Serializer(); }
+
+                public static class Serializer implements RecipeSerializer<IncubationRecipe> {
+                    @Override
+                    public IncubationRecipe fromJson(ResourceLocation recipeLocation, JsonObject jsonObject) {
+                        String group = GsonHelper.getAsString(jsonObject, "group", "");
+                        Ingredient ingredient = Ingredient.fromJson(GsonHelper.getAsJsonObject(jsonObject, "ingredient"));
+                        EntityType<?> entityType = EntityType.byString(GsonHelper.getAsString(jsonObject, "entity")).orElseThrow(() -> new JsonSyntaxException("Entity type cannot be found"));
+                        CompoundTag tag = null;
+                        if (jsonObject.has("tag")) {
+                            tag = CraftingHelper.getNBT(jsonObject.get("tag"));
+                        }
+                        int incubationTime = GsonHelper.getAsInt(jsonObject, "incubationtime", 2500);
+                        return new IncubationRecipe(recipeLocation, group, ingredient, entityType, tag, incubationTime);
+                    }
+
+                    @Override
+                    public IncubationRecipe fromNetwork(ResourceLocation recipeLocation, FriendlyByteBuf buffer) {
+                        String group = buffer.readUtf();
+                        Ingredient ingredient = Ingredient.fromNetwork(buffer);
+                        EntityType<?> entityType = EntityType.byString(buffer.readUtf()).orElseThrow(() -> new JsonSyntaxException("Entity type cannot be found"));
+                        CompoundTag tag = null;
+                        if (buffer.readBoolean()) {
+                            tag = buffer.readNbt();
+                        }
+                        int incubationTime = buffer.readVarInt();
+                        return new IncubationRecipe(recipeLocation, group, ingredient, entityType, tag, incubationTime);
+                    }
+
+                    @Override
+                    public void toNetwork(FriendlyByteBuf buffer, IncubationRecipe recipe) {
+                        buffer.writeUtf(recipe.group);
+                        recipe.ingredient.toNetwork(buffer);
+                        buffer.writeUtf(EntityType.getKey(recipe.getEntity()).toString());
+                        if (recipe.tag != null) {
+                            buffer.writeBoolean(true);
+                            buffer.writeNbt(recipe.tag);
+                        } else {
+                            buffer.writeBoolean(false);
+                        }
+                        buffer.writeVarInt(recipe.getIncubationTime());
+                    }
+                }
+            }
+        """.trimIndent())
+        projectDir.resolve("src/main/java/com/example/IncubatorBlockEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
+            import net.minecraft.world.item.crafting.RecipeHolder;
+
+            public class IncubatorBlockEntity {
+                void spawn(RecipeHolder<IncubationRecipe> recipe, ClientboundBlockEntityDataPacket packet) {
+                    CompoundTag tag = recipe.value().getTag();
+                    CompoundTag packetTag = packet.getTag();
+                }
+            }
+        """.trimIndent())
+        projectDir.resolve("src/main/java/com/example/RecipeRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class RecipeRegistry {
+                public static final DeferredRegister<RecipeSerializer<?>> RECIPE_SERIALIZERS = DeferredRegister.create(Registries.RECIPE_SERIALIZER, "example");
+                public static final DeferredHolder<RecipeSerializer<IncubationRecipe>, RecipeSerializer<IncubationRecipe>> INCUBATION =
+                        RECIPE_SERIALIZERS.register("incubation", IncubationRecipe.Serializer::new);
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val recipe = tempDir.resolve("src/main/java/com/example/IncubationRecipe.java").readText()
+        val blockEntity = tempDir.resolve("src/main/java/com/example/IncubatorBlockEntity.java").readText()
+        val registry = tempDir.resolve("src/main/java/com/example/RecipeRegistry.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-recipe-codec-121" })
+        assertTrue(recipe.contains("public IncubationRecipe(String group, Ingredient ingredient, EntityType<?> entity, Optional<CompoundTag> tag, int incubationTime)"))
+        assertTrue(recipe.contains("public Optional<CompoundTag> getTag()"))
+        assertTrue(recipe.contains("""BuiltInRegistries.ENTITY_TYPE.byNameCodec().fieldOf("entity").forGetter((recipe) -> recipe.entity)"""))
+        assertTrue(recipe.contains("""CompoundTag.CODEC.optionalFieldOf("tag").forGetter((recipe) -> recipe.tag)"""))
+        assertTrue(recipe.contains("public MapCodec<IncubationRecipe> codec()"))
+        assertTrue(recipe.contains("public StreamCodec<RegistryFriendlyByteBuf, IncubationRecipe> streamCodec()"))
+        assertFalse(recipe.contains("ResourceLocation id"))
+        assertFalse(recipe.contains("fromJson(ResourceLocation"))
+        assertTrue(blockEntity.contains("CompoundTag tag = recipe.value().getTag().orElse(null);"))
+        assertTrue(blockEntity.contains("CompoundTag packetTag = packet.getTag();"))
+        assertTrue(registry.contains("DeferredHolder<RecipeSerializer<?>, IncubationRecipe.Serializer> INCUBATION"))
+    }
+
+    @Test
+    fun `migrates copied shaped recipe serializer and holder lookups from source structure`() {
+        val projectDir = createFile("GearBenchRecipe.java", """
+            package com.example;
+
+            import com.google.common.annotations.VisibleForTesting;
+            import com.google.common.collect.Maps;
+            import com.google.common.collect.Sets;
+            import com.google.gson.JsonArray;
+            import com.google.gson.JsonElement;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSyntaxException;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.crafting.*;
+            import net.minecraft.world.level.Level;
+            import net.neoforged.neoforge.common.crafting.CraftingHelper;
+            import java.util.Map;
+            import java.util.Set;
+
+            public class GearBenchRecipe implements Recipe<GearBenchInput> {
+                static int MAX_WIDTH = 4;
+                static int MAX_HEIGHT = 4;
+                final int width;
+                final int height;
+                final NonNullList<Ingredient> recipeItems;
+                final ItemStack result;
+                private final ResourceLocation id;
+                final String group;
+                final CraftingBookCategory category;
+                final boolean showNotification;
+
+                public GearBenchRecipe(ResourceLocation pId, String pGroup, CraftingBookCategory pCategory, int pWidth, int pHeight, NonNullList<Ingredient> pRecipeItems, ItemStack pResult, boolean pShowNotification) {
+                    this.id = pId;
+                    this.group = pGroup;
+                    this.category = pCategory;
+                    this.width = pWidth;
+                    this.height = pHeight;
+                    this.recipeItems = pRecipeItems;
+                    this.result = pResult;
+                    this.showNotification = pShowNotification;
+                }
+
+                public GearBenchRecipe(ResourceLocation pId, String pGroup, CraftingBookCategory pCategory, int pWidth, int pHeight, NonNullList<Ingredient> pRecipeItems, ItemStack pResult) {
+                    this(pId, pGroup, pCategory, pWidth, pHeight, pRecipeItems, pResult, true);
+                }
+
+                public ResourceLocation getId() { return this.id; }
+                public RecipeSerializer<?> getSerializer() { return new Serializer(); }
+                public RecipeType<?> getType() { return RecipeType.CRAFTING; }
+                public String getGroup() { return this.group; }
+                public CraftingBookCategory category() { return this.category; }
+                public ItemStack getResultItem(HolderLookup.Provider provider) { return this.result; }
+                public NonNullList<Ingredient> getIngredients() { return this.recipeItems; }
+                public boolean showNotification() { return this.showNotification; }
+                public boolean canCraftInDimensions(int width, int height) { return true; }
+                public boolean matches(GearBenchInput input, Level level) { return false; }
+                public ItemStack assemble(GearBenchInput input, HolderLookup.Provider provider) { return this.result.copy(); }
+
+                public boolean isIncomplete() {
+                    NonNullList<Ingredient> ingredients = this.getIngredients();
+                    return ingredients.isEmpty() || ingredients.stream().anyMatch((entry) -> {
+                        return net.neoforged.neoforge.common.CommonHooks.hasNoElements(entry);
+                    });
+                }
+
+                static NonNullList<Ingredient> dissolvePattern(String[] pattern, Map<String, Ingredient> keys, int width, int height) {
+                    return NonNullList.withSize(width * height, Ingredient.EMPTY);
+                }
+
+                @VisibleForTesting
+                static String[] shrink(String... pattern) {
+                    return pattern;
+                }
+
+                static String[] patternFromJson(JsonArray array) {
+                    return new String[] { "A" };
+                }
+
+                static Map<String, Ingredient> keyFromJson(JsonObject json) {
+                    Map<String, Ingredient> map = Maps.newHashMap();
+                    for (Map.Entry<String, JsonElement> entry : json.entrySet()) {
+                        map.put(entry.getKey(), Ingredient.fromJson(entry.getValue(), false));
+                    }
+                    map.put(" ", Ingredient.EMPTY);
+                    return map;
+                }
+
+                public static ItemStack itemStackFromJson(JsonObject stack) {
+                    return CraftingHelper.getItemStack(stack, true, true);
+                }
+
+                public static Item itemFromJson(JsonObject json) {
+                    String name = GsonHelper.getAsString(json, "item");
+                    Item item = BuiltInRegistries.ITEM.get(ResourceLocation.parse(name));
+                    if (item == Items.AIR) {
+                        throw new JsonSyntaxException("Empty ingredient not allowed here");
+                    }
+                    return item;
+                }
+
+                public static class Serializer implements RecipeSerializer<GearBenchRecipe> {
+                    public GearBenchRecipe fromJson(ResourceLocation recipeId, JsonObject json) {
+                        String group = GsonHelper.getAsString(json, "group", "");
+                        CraftingBookCategory category = CraftingBookCategory.CODEC.byName(GsonHelper.getAsString(json, "category", (String)null), CraftingBookCategory.MISC);
+                        Map<String, Ingredient> key = GearBenchRecipe.keyFromJson(GsonHelper.getAsJsonObject(json, "key"));
+                        String[] pattern = GearBenchRecipe.shrink(GearBenchRecipe.patternFromJson(GsonHelper.getAsJsonArray(json, "pattern")));
+                        int width = pattern[0].length();
+                        int height = pattern.length;
+                        NonNullList<Ingredient> ingredients = GearBenchRecipe.dissolvePattern(pattern, key, width, height);
+                        ItemStack result = GearBenchRecipe.itemStackFromJson(GsonHelper.getAsJsonObject(json, "result"));
+                        boolean show = GsonHelper.getAsBoolean(json, "show_notification", true);
+                        return new GearBenchRecipe(recipeId, group, category, width, height, ingredients, result, show);
+                    }
+
+                    public GearBenchRecipe fromNetwork(ResourceLocation recipeId, FriendlyByteBuf buffer) {
+                        int width = buffer.readVarInt();
+                        int height = buffer.readVarInt();
+                        String group = buffer.readUtf();
+                        CraftingBookCategory category = buffer.readEnum(CraftingBookCategory.class);
+                        NonNullList<Ingredient> ingredients = NonNullList.withSize(width * height, Ingredient.EMPTY);
+                        for (int i = 0; i < ingredients.size(); ++i) {
+                            ingredients.set(i, Ingredient.fromNetwork(buffer));
+                        }
+                        ItemStack result = buffer.readItem();
+                        boolean show = buffer.readBoolean();
+                        return new GearBenchRecipe(recipeId, group, category, width, height, ingredients, result, show);
+                    }
+
+                    public void toNetwork(FriendlyByteBuf buffer, GearBenchRecipe recipe) {
+                        buffer.writeVarInt(recipe.width);
+                        buffer.writeVarInt(recipe.height);
+                        buffer.writeUtf(recipe.group);
+                        buffer.writeEnum(recipe.category);
+                        for (Ingredient ingredient : recipe.recipeItems) {
+                            ingredient.toNetwork(buffer);
+                        }
+                        buffer.writeItem(recipe.result);
+                        buffer.writeBoolean(recipe.showNotification);
+                    }
+                }
+            }
+        """.trimIndent())
+        projectDir.resolve("src/main/java/com/example/GearBenchInput.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.RecipeInput;
+
+            public class GearBenchInput implements RecipeInput {
+                public ItemStack getItem(int slot) { return ItemStack.EMPTY; }
+                public int size() { return 16; }
+            }
+        """.trimIndent())
+        projectDir.resolve("src/main/java/com/example/GearBenchBE.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.crafting.RecipeHolder;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.Level;
+            import java.util.Optional;
+
+            public class GearBenchBE extends GearBenchInput {
+                private Level level;
+                void changeOutput() {
+                    Optional<RecipeHolder<GearBenchRecipe>> optional = level.getServer().getRecipeManager().getRecipeFor(RecipeType.CRAFTING, this, level);
+                    if (optional.isPresent()) {
+                        GearBenchRecipe recipe = optional.get();
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val recipe = tempDir.resolve("src/main/java/com/example/GearBenchRecipe.java").readText()
+        val blockEntity = tempDir.resolve("src/main/java/com/example/GearBenchBE.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-recipe-codec-121" })
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(recipe.contains("public GearBenchRecipe(String pGroup, CraftingBookCategory pCategory, int pWidth, int pHeight, NonNullList<Ingredient> pRecipeItems, ItemStack pResult, boolean pShowNotification)"), recipe)
+        assertTrue(recipe.contains("private static final MapCodec<GearBenchRecipe> CODEC"), recipe)
+        assertTrue(recipe.contains("public StreamCodec<RegistryFriendlyByteBuf, GearBenchRecipe> streamCodec()"), recipe)
+        assertTrue(recipe.contains("Ingredient.CODEC_NONEMPTY.parse(JsonOps.INSTANCE, entry.getValue()).getOrThrow()"), recipe)
+        assertTrue(recipe.contains("ItemStack.CODEC.parse(JsonOps.INSTANCE, stack).getOrThrow()"), recipe)
+        assertTrue(recipe.contains("return entry.hasNoItems();"), recipe)
+        assertFalse(recipe.contains("fromJson(ResourceLocation"), recipe)
+        assertFalse(recipe.contains("CraftingBookCategory.CODEC.byName"), recipe)
+        assertFalse(recipe.contains("CraftingHelper.getItemStack"), recipe)
+        assertFalse(recipe.contains("private final ResourceLocation id;"), recipe)
+        assertTrue(blockEntity.contains("GearBenchRecipe recipe = optional.get().value();"), blockEntity)
+    }
+
+    @Test
+    fun `migrates verified third party compat APIs to NeoForge 121`() {
+        val projectDir = createFile("AlexsCavesEventHandler.java", """
+            package com.example;
+
+            import com.github.alexmodguy.alexscaves.server.potion.ACEffectRegistry;
+            import net.minecraft.network.protocol.game.ClientboundRemoveMobEffectPacket;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.entity.LivingEntity;
+
+            public class AlexsCavesEventHandler {
+                void cure(LivingEntity living, ServerLevel serverLevel) {
+                    MobEffectInstance radiation = living.getEffect(ACEffectRegistry.IRRADIATED.get());
+                    living.removeEffect(ACEffectRegistry.IRRADIATED.get());
+                    serverLevel.getChunkSource().broadcastAndSend(living,
+                            new ClientboundRemoveMobEffectPacket(living.getId(), ACEffectRegistry.IRRADIATED.get()));
+                    living.addEffect(new MobEffectInstance(ACEffectRegistry.IRRADIATED.get(), 100, 0));
+                }
+            }
+        """.trimIndent())
+        projectDir.resolve("src/main/java/com/example/FarmersDelightEventHandler.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.server.level.ServerPlayer;
+            import vectorwing.farmersdelight.common.registry.ModEffects;
+
+            public class FarmersDelightEventHandler {
+                void grant(ServerPlayer player) {
+                    MobEffect nourishmentEffect = ModEffects.NOURISHMENT.get();
+                    MobEffectInstance currentEffect = player.getEffect(BuiltInRegistries.MOB_EFFECT.wrapAsHolder(nourishmentEffect));
+                    player.addEffect(new MobEffectInstance(BuiltInRegistries.MOB_EFFECT.wrapAsHolder(nourishmentEffect), 100, 0));
+                }
+            }
+        """.trimIndent())
+        projectDir.resolve("src/main/java/com/example/EpicFightClientHelper.java").writeText("""
+            package com.example;
+
+            import com.crabmod.hotbath.dirtiness.DirtinessOverlayRenderer;
+            import net.minecraft.world.entity.EntityType;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.client.event.ClientTickEvent;
+            import net.neoforged.neoforge.common.NeoForge;
+            import yesman.epicfight.api.client.forgeevent.PatchedRenderersEvent;
+            import yesman.epicfight.client.ClientEngine;
+            import yesman.epicfight.client.events.engine.RenderEngine;
+            import yesman.epicfight.client.renderer.FirstPersonRenderer;
+            import yesman.epicfight.client.renderer.patched.entity.PPlayerRenderer;
+
+            public class EpicFightClientHelper {
+                private static FirstPersonRenderer registeredFirstPersonRenderer;
+
+                static void registerLayers(IEventBus modEventBus) {
+                    modEventBus.addListener(EpicFightClientHelper::onModifyPatchedRenderers);
+                    NeoForge.EVENT_BUS.register(EpicFightClientHelper.class);
+                }
+
+                private static void onModifyPatchedRenderers(PatchedRenderersEvent.Modify event) {
+                    if (event.get(EntityType.PLAYER) instanceof PPlayerRenderer playerRenderer) {
+                        playerRenderer.addPatchedLayerAlways(DirtinessOverlayRenderer.class, new EpicFightDirtinessPatchedLayer());
+                    }
+                    registerFirstPersonLayerIfAvailable();
+                }
+
+                @SubscribeEvent
+                public static void onClientTick(ClientTickEvent.Post event) {
+                    registerFirstPersonLayerIfAvailable();
+                }
+
+                private static void registerFirstPersonLayerIfAvailable() {
+                    ClientEngine clientEngine = ClientEngine.getInstance();
+                    RenderEngine renderEngine = clientEngine != null ? clientEngine.renderEngine : null;
+                    if (renderEngine == null) {
+                        return;
+                    }
+                }
+            }
+        """.trimIndent())
+        projectDir.resolve("src/main/java/com/example/HotBath.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+
+            public class HotBath {
+                void register() {
+                    CompatManager.registerCompat("epicfight", "Epic Fight", () -> true, () -> {},
+                            "yesman.epicfight.api.client.forgeevent.PatchedRenderersEvent${'$'}Modify",
+                            "yesman.epicfight.client.ClientEngine",
+                            "yesman.epicfight.client.events.engine.RenderEngine");
+                }
+
+                @SubscribeEvent
+                public void onServerStarting(Object event) {
+                }
+            }
+        """.trimIndent())
+        projectDir.resolve("src/main/java/com/example/NitrogenTooltipOverrides.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.client.event.listeners.TooltipListeners;
+
+            public class NitrogenTooltipOverrides {
+                void register() {
+                    TooltipListeners.PREDICATES.put(ModItems.FIRST, (player, stack, components, component) -> component);
+                    TooltipListeners.PREDICATES.put(ModItems.SECOND, (player, stack, components, context) -> {
+                        String context1 = "outer";
+                        return context;
+                    });
+                    TooltipListeners.OTHER.put(ModItems.THIRD, (player, stack, components, component) -> component);
+                }
+            }
+        """.trimIndent())
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val alexsCaves = tempDir.resolve("src/main/java/com/example/AlexsCavesEventHandler.java").readText()
+        val farmers = tempDir.resolve("src/main/java/com/example/FarmersDelightEventHandler.java").readText()
+        val epicFight = tempDir.resolve("src/main/java/com/example/EpicFightClientHelper.java").readText()
+        val hotBath = tempDir.resolve("src/main/java/com/example/HotBath.java").readText()
+        val nitrogenTooltip = tempDir.resolve("src/main/java/com/example/NitrogenTooltipOverrides.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-verified-compat-121-api" })
+        assertTrue(alexsCaves.contains("living.getEffect(ACEffectRegistry.IRRADIATED)"))
+        assertTrue(alexsCaves.contains("living.removeEffect(ACEffectRegistry.IRRADIATED)"))
+        assertTrue(alexsCaves.contains("new ClientboundRemoveMobEffectPacket(living.getId(), ACEffectRegistry.IRRADIATED)"))
+        assertTrue(alexsCaves.contains("new MobEffectInstance(ACEffectRegistry.IRRADIATED, 100, 0)"))
+        assertTrue(!alexsCaves.contains("ACEffectRegistry.IRRADIATED.get()"))
+
+        assertTrue(farmers.contains("import net.minecraft.core.Holder;"))
+        assertTrue(farmers.contains("Holder<MobEffect> nourishmentEffect = ModEffects.NOURISHMENT;"))
+        assertTrue(farmers.contains("player.getEffect(nourishmentEffect)"))
+        assertTrue(farmers.contains("new MobEffectInstance(nourishmentEffect, 100, 0)"))
+        assertTrue(!farmers.contains("BuiltInRegistries.MOB_EFFECT.wrapAsHolder(nourishmentEffect)"))
+        assertTrue(!farmers.contains("ModEffects.NOURISHMENT.get()"))
+
+        assertTrue(epicFight.contains("import yesman.epicfight.api.client.event.EpicFightClientEventHooks;"))
+        assertTrue(epicFight.contains("import yesman.epicfight.api.client.event.types.registry.RegisterPatchedRenderersEvent;"))
+        assertTrue(epicFight.contains("EpicFightClientEventHooks.Registry.MODIFY_PATCHED_ENTITY.registerEvent(EpicFightClientHelper::onModifyPatchedRenderers);"))
+        assertTrue(epicFight.contains("NeoForge.EVENT_BUS.addListener(EpicFightClientHelper::onClientTick);"))
+        assertTrue(epicFight.contains("private static void onModifyPatchedRenderers(RegisterPatchedRenderersEvent.ModifyEntity event)"))
+        assertTrue(epicFight.contains("RenderEngine renderEngine = RenderEngine.getInstance();"))
+        assertTrue(!epicFight.contains("api.client.forgeevent.PatchedRenderersEvent"))
+        assertTrue(!epicFight.contains("onModifyPatchedRenderers(PatchedRenderersEvent.Modify"))
+        assertTrue(!epicFight.contains("ClientEngine"))
+        assertTrue(!epicFight.contains("@SubscribeEvent"))
+
+        assertTrue(hotBath.contains("import net.neoforged.bus.api.SubscribeEvent;"))
+        assertTrue(hotBath.contains("yesman.epicfight.api.client.event.types.registry.RegisterPatchedRenderersEvent${'$'}ModifyEntity"))
+        assertTrue(hotBath.contains("yesman.epicfight.api.client.event.EpicFightClientEventHooks"))
+        assertTrue(!hotBath.contains("yesman.epicfight.api.client.forgeevent.PatchedRenderersEvent${'$'}Modify"))
+        assertTrue(!hotBath.contains("yesman.epicfight.client.ClientEngine"))
+
+        assertTrue(nitrogenTooltip.contains("TooltipListeners.PREDICATES.put(ModItems.FIRST, (player, stack, components, context, component) -> component);"))
+        assertTrue(nitrogenTooltip.contains("TooltipListeners.PREDICATES.put(ModItems.SECOND, (player, stack, components, context2, context) ->"))
+        assertTrue(nitrogenTooltip.contains("TooltipListeners.OTHER.put(ModItems.THIRD, (player, stack, components, component) -> component);"))
+        assertTrue(!nitrogenTooltip.contains("PREDICATES.put(ModItems.FIRST, (player, stack, components, component)"))
+
+    }
+
+    @Test
+    fun `Nitrogen tooltip predicate migration ignores comments and text blocks`() {
+        val projectDir = createFile("NitrogenTooltipOverrides.java", """
+            package com.example;
+
+            import com.aetherteam.nitrogen.client.event.listeners.TooltipListeners;
+
+            public class NitrogenTooltipOverrides {
+                void register() {
+                    String docs = ${"\"\"\""}
+                    TooltipListeners.PREDICATES.put(ModItems.DOC, (player, stack, components, component) -> component);
+                    ${"\"\"\""};
+                    // TooltipListeners.PREDICATES.put(ModItems.COMMENT, (player, stack, components, component) -> component);
+                    TooltipListeners.PREDICATES.put(ModItems.REAL, (player, stack, components, component) -> component);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val transformed = tempDir.resolve("src/main/java/com/example/NitrogenTooltipOverrides.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-verified-compat-121-api" })
+        assertTrue(transformed.contains("TooltipListeners.PREDICATES.put(ModItems.REAL, (player, stack, components, context, component) -> component);"), transformed)
+        assertTrue(transformed.contains("TooltipListeners.PREDICATES.put(ModItems.DOC, (player, stack, components, component) -> component);"), transformed)
+        assertTrue(transformed.contains("// TooltipListeners.PREDICATES.put(ModItems.COMMENT, (player, stack, components, component) -> component);"), transformed)
+        assertFalse(transformed.contains("TooltipListeners.PREDICATES.put(ModItems.REAL, (player, stack, components, component) -> component);"), transformed)
+    }
+
+    @Test
+    fun `migrates ModLoadingContext config registration when constructor already has ModContainer`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.ModLoadingContext;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.config.ModConfig;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, ExampleConfig.SPEC);
+                    ModLoadingContext.get().getActiveContainer().registerConfig(ModConfig.Type.CLIENT, ClientConfig.SPEC);
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-modloadingcontext-register-config" })
+        assertTrue(migrated.contains("modContainer.registerConfig(ModConfig.Type.COMMON, ExampleConfig.SPEC);"))
+        assertTrue(migrated.contains("modContainer.registerConfig(ModConfig.Type.CLIENT, ClientConfig.SPEC);"))
+        assertTrue(!migrated.contains("ModLoadingContext.get()"))
+        assertTrue(!migrated.contains("import net.neoforged.fml.ModLoadingContext;"))
+    }
+
+    @Test
+    fun `mod loading context config migration ignores comments and string literals`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.ModLoadingContext;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.config.ModConfig;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+                private static final String DOC = "ModLoadingContext.get().registerConfig(";
+
+                /*
+                 ModContainer fakeContainer;
+                 ModLoadingContext.get().getActiveContainer().registerConfig(ModConfig.Type.SERVER, FakeConfig.SPEC);
+                 */
+
+                public ExampleMod(ModContainer modContainer) {
+                    ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, ExampleConfig.SPEC);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = tempDir.resolve("src/main/java/com/example/ExampleMod.java").readText()
+
+        assertTrue(migrated.contains("modContainer.registerConfig(ModConfig.Type.COMMON, ExampleConfig.SPEC);"), migrated)
+        assertFalse(migrated.contains("fakeContainer.registerConfig"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "ModLoadingContext.get().registerConfig(";"""), migrated)
+        assertTrue(migrated.contains("ModLoadingContext.get().getActiveContainer().registerConfig(ModConfig.Type.SERVER, FakeConfig.SPEC);"), migrated)
+        assertFalse(migrated.contains("import net.neoforged.fml.ModLoadingContext;"), migrated)
+    }
+
+    @Test
+    fun `migrates MobEffect helper parameters to Holder without deleting effect logic`() {
+        val projectDir = createFile("EffectHelper.java", """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.effect.MobEffects;
+            import net.minecraft.world.entity.LivingEntity;
+
+            public class EffectHelper {
+                private static void applyEffects(LivingEntity entity) {
+                    addStackingEffect(entity, MobEffects.REGENERATION, 400, 1);
+                    entity.removeEffect(MobEffects.POISON);
+                }
+
+                private static void addStackingEffect(LivingEntity entity, MobEffect effect, int durationIncrement, int amplifier) {
+                    CompoundTag data = entity.getPersistentData();
+                    String key = "example.last_stack." + effect.getDescriptionId();
+                    if (data.getLong(key) > 0) return;
+                    MobEffectInstance current = entity.getEffect(effect);
+                    int currentDuration = (current != null) ? current.getDuration() : 0;
+                    entity.addEffect(new MobEffectInstance(effect, currentDuration + durationIncrement, amplifier, true, false));
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/EffectHelper.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-mobeffect-holder-direct" })
+        assertTrue(migrated.contains("import net.minecraft.core.Holder;"))
+        assertTrue(migrated.contains("private static void addStackingEffect(LivingEntity entity, Holder<MobEffect> effect, int durationIncrement, int amplifier)"))
+        assertTrue(migrated.contains("effect.value().getDescriptionId()"))
+        assertTrue(migrated.contains("MobEffectInstance current = entity.getEffect(effect);"))
+        assertTrue(migrated.contains("entity.addEffect(new MobEffectInstance(effect, currentDuration + durationIncrement, amplifier, true, false));"))
+        assertTrue(migrated.contains("entity.removeEffect(MobEffects.POISON);"))
+    }
+
+    @Test
+    fun `migrates FlowerBlock constructors and call sites to MobEffect holders`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("FlowerEntityBlock.java").writeText("""
+            package com.example;
+
+            import java.util.function.Supplier;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.level.block.EntityBlock;
+            import net.minecraft.world.level.block.FlowerBlock;
+
+            public class FlowerEntityBlock extends FlowerBlock implements EntityBlock {
+                /*
+                public FlowerEntityBlock(Supplier<MobEffect> documentedEffect, int documentedDuration, Properties documentedProperties) {
+                    super(documentedEffect, documentedDuration, documentedProperties);
+                }
+                */
+                public FlowerEntityBlock(Supplier<MobEffect> effectSupplier, int effectDuration, Properties properties) {
+                    super(effectSupplier, effectDuration, properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("FlowerRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.effect.MobEffects;
+            import net.minecraft.world.level.block.FlowerBlock;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+
+            public class FlowerRegistry {
+                /*
+                Object commented = new FlowerEntityBlock(() -> MobEffects.HEAL, 3, BlockBehaviour.Properties.of());
+                */
+                private static final String DOC = "new FlowerEntityBlock(() -> MobEffects.HARM, 4, BlockBehaviour.Properties.of())";
+
+                public Object vanilla() {
+                    return new FlowerBlock(() -> MobEffects.POISON, 7, BlockBehaviour.Properties.of());
+                }
+
+                public Object customVanillaEffect() {
+                    return new FlowerEntityBlock(() -> MobEffects.REGENERATION, 5, BlockBehaviour.Properties.of());
+                }
+
+                public Object customDeferredEffect() {
+                    return new FlowerEntityBlock(() -> ModEffects.COMFORT.get(), 6, BlockBehaviour.Properties.of());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val block = srcDir.resolve("FlowerEntityBlock.java").readText()
+        val registry = srcDir.resolve("FlowerRegistry.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-flower-block-holder-constructor" })
+        assertTrue(block.contains("import net.minecraft.core.Holder;"), block)
+        assertTrue(!block.contains("import java.util.function.Supplier;"), block)
+        assertTrue(block.contains("public FlowerEntityBlock(Holder<MobEffect> effectSupplier, float effectDuration, Properties properties)"), block)
+        assertTrue(block.contains("super(effectSupplier, effectDuration, properties);"), block)
+        assertTrue(block.contains("public FlowerEntityBlock(Supplier<MobEffect> documentedEffect, int documentedDuration, Properties documentedProperties)"), block)
+        assertTrue(registry.contains("new FlowerBlock(MobEffects.POISON, 7, BlockBehaviour.Properties.of())"), registry)
+        assertTrue(registry.contains("new FlowerEntityBlock(MobEffects.REGENERATION, 5, BlockBehaviour.Properties.of())"), registry)
+        assertTrue(registry.contains("new FlowerEntityBlock(ModEffects.COMFORT, 6, BlockBehaviour.Properties.of())"), registry)
+        assertTrue(registry.contains("new FlowerEntityBlock(() -> MobEffects.HEAL, 3, BlockBehaviour.Properties.of())"), registry)
+        assertTrue(registry.contains("new FlowerEntityBlock(() -> MobEffects.HARM, 4, BlockBehaviour.Properties.of())"), registry)
+        assertFalse(registry.contains("return new FlowerBlock(() -> MobEffects"), registry)
+        assertFalse(registry.contains("return new FlowerEntityBlock(() -> MobEffects"), registry)
+        assertFalse(registry.contains("return new FlowerEntityBlock(() -> ModEffects"), registry)
+        assertTrue(!registry.contains("ModEffects.COMFORT.get()"), registry)
+    }
+
+    @Test
+    fun `migrates DeferredHolder registry base generics for entity types and multiline block item helpers`() {
+        val textBlockDelimiter = "\"\"\""
+        val projectDir = createFile("RegistryUse.java", """
+            package com.example;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.MobCategory;
+            import net.minecraft.world.item.BlockItem;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.level.block.Block;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            import java.util.function.Supplier;
+
+            public class RegistryUse {
+                public static final DeferredRegister<Block> BLOCKS = null;
+                public static final DeferredRegister<EntityType<?>> ENTITY_TYPES = null;
+                private static final String GENERIC_DOC = $textBlockDelimiter
+                    public static final DeferredHolder<EntityType<RubberDuckEntity>, EntityType<RubberDuckEntity>> DOC_DUCK =
+                            ENTITY_TYPES.register("doc_duck", () -> EntityType.Builder.<RubberDuckEntity>of(RubberDuckEntity::new, MobCategory.MISC).build("doc_duck"));
+                    $textBlockDelimiter;
+
+                public static final DeferredHolder<EntityType<RubberDuckEntity>, EntityType<RubberDuckEntity>> RUBBER_DUCK =
+                        ENTITY_TYPES.register("rubber_duck", () -> EntityType.Builder.<RubberDuckEntity>of(RubberDuckEntity::new, MobCategory.MISC).build("rubber_duck"));
+
+                private static <T extends Block> DeferredHolder<T, T> registerBlock(String name, Supplier<T> block) {
+                    DeferredHolder<Block, T> toReturn = BLOCKS.register(name, block);
+                    registerBlockItem(name, toReturn);
+                    return toReturn;
+                }
+
+                private static <T extends Block> DeferredHolder<Item, Item> registerBlockItem(
+                        String name, DeferredHolder<T, T> block) {
+                    return null;
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/RegistryUse.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-deferredholder-generics" })
+        assertTrue(migrated.contains("DeferredHolder<EntityType<?>, EntityType<RubberDuckEntity>> RUBBER_DUCK"))
+        assertTrue(migrated.contains("DeferredHolder<Block, T> registerBlock(String name, Supplier<T> block)"))
+        assertTrue(migrated.contains("registerBlockItem(String name, DeferredHolder<Block, T> block)"))
+        assertTrue(migrated.contains("DeferredHolder<EntityType<RubberDuckEntity>, EntityType<RubberDuckEntity>> DOC_DUCK"))
+        assertFalse(migrated.contains("DeferredHolder<EntityType<RubberDuckEntity>, EntityType<RubberDuckEntity>> RUBBER_DUCK"))
+        assertTrue(!migrated.contains("DeferredHolder<T, T> block"))
+    }
+
+    @Test
+    fun `migrates Sakura registry and vanilla 121 API compile surfaces`() {
+        val projectDir = createFile("ContentRegistry.java", """
+            package com.example;
+
+            import cn.mcmod_mmf.mmlib.item.ItemFoodBase;
+            import cn.mcmod_mmf.mmlib.registry.ItemRegistryUtil;
+            import com.google.common.collect.ImmutableSet;
+            import java.util.Map;
+            import java.util.function.Supplier;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.world.entity.npc.VillagerProfession;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.Tier;
+            import net.minecraft.world.entity.ai.village.poi.PoiType;
+            import net.minecraft.sounds.SoundEvents;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ContentRegistry {
+                public static final DeferredRegister<Item> ITEMS = null;
+                public static final DeferredHolder<ItemFoodBase, ItemFoodBase> FOOD =
+                        register("food", () -> new ItemFoodBase(new Item.Properties(), null));
+                public static final Map<TeaSet, DeferredHolder<Item, Item>> TEAS =
+                        ItemRegistryUtil.mapOfKeys(TeaSet.class, tea -> drink(tea.getEffects()));
+                public static final DeferredHolder<PoiType, PoiType> FARMER_POI = null;
+
+                public static Item axe(Tier tier) {
+                    return new net.minecraft.world.item.AxeItem(tier, 9.0F, -3.3F, new Item.Properties());
+                }
+
+                public static Item shovel(Tier tier, Item.Properties properties) {
+                    return new net.minecraft.world.item.ShovelItem(tier, 1.5F, -3.0F, properties.stacksTo(1));
+                }
+
+                public static VillagerProfession profession() {
+                    return new VillagerProfession("example:farmer",
+                            x -> x.get() == FARMER_POI.get(),
+                            x -> x.get() == FARMER_POI.get(),
+                            ImmutableSet.of(), ImmutableSet.of(),
+                            SoundEvents.VILLAGER_WORK_FARMER);
+                }
+
+                public static void recipe(RecipeOutput output) {
+                    CookingBuilder.cooking().requires(Items.GRASS).save(output);
+                }
+
+                private static Item drink(Object effects) {
+                    return new Item(new Item.Properties());
+                }
+
+                private static <V extends Item> DeferredHolder<V, V> register(String name, Supplier<V> item) {
+                    return ITEMS.register(name, item);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/ContentRegistry.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(result.changes.any { it.ruleId == "struct-deferredholder-generics" })
+        assertTrue(migrated.contains("DeferredHolder<Item, ItemFoodBase> FOOD"))
+        assertTrue(migrated.contains("private static <V extends Item> DeferredHolder<Item, V> register"))
+        assertTrue(migrated.contains("(DeferredHolder<Item, V>) (DeferredHolder<?, ?>) ITEMS.register(name, item)"))
+        assertTrue(migrated.contains("tea.getEffects()"))
+        assertTrue(migrated.contains("new net.minecraft.world.item.AxeItem(tier, new Item.Properties().attributes(net.minecraft.world.item.DiggerItem.createAttributes(tier, 9.0F, -3.3F)))"))
+        assertTrue(migrated.contains("new net.minecraft.world.item.ShovelItem(tier, properties.stacksTo(1).attributes(net.minecraft.world.item.DiggerItem.createAttributes(tier, 1.5F, -3.0F)))"))
+        assertTrue(migrated.contains("x -> x.value() == FARMER_POI.get()"))
+        assertTrue(migrated.contains("Items.SHORT_GRASS"))
+        assertTrue(!migrated.contains("Items.GRASS"))
+    }
+
+    @Test
+    fun `aligns deferred holder base generic with owning deferred register`() {
+        val projectDir = createFile("TypedRegistries.java", """
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.item.crafting.SimpleCraftingRecipeSerializer;
+            import net.minecraft.world.level.levelgen.structure.templatesystem.PosRuleTestType;
+            import net.minecraft.world.level.storage.loot.functions.LootItemFunctionType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class TypedRegistries {
+                public static final DeferredRegister<LootItemFunctionType> LOOT_FUNCTION_TYPES =
+                        DeferredRegister.create(Registries.LOOT_FUNCTION_TYPE, "example");
+                public static final DeferredHolder<LootItemFunctionType<?>, LootItemFunctionType<DoubleDrops>> DOUBLE_DROPS =
+                        LOOT_FUNCTION_TYPES.register("double_drops", () -> new LootItemFunctionType<>(DoubleDrops.CODEC));
+
+                public static final DeferredRegister<RecipeSerializer<?>> RECIPE_SERIALIZERS =
+                        DeferredRegister.create(Registries.RECIPE_SERIALIZER, "example");
+                public static final DeferredHolder<AetherCookingSerializer<EnchantingRecipe>, AetherCookingSerializer<EnchantingRecipe>> ENCHANTING =
+                        RECIPE_SERIALIZERS.register("enchanting", EnchantingRecipe.Serializer::new);
+                public static final DeferredHolder<RecipeSerializer<?>, SwetBannerRecipe> SWET_BANNER =
+                        RECIPE_SERIALIZERS.register("swet_banner", () -> new SimpleCraftingRecipeSerializer<>(SwetBannerRecipe::new));
+
+                public static final DeferredRegister<PosRuleTestType<?>> POS_RULE_TESTS =
+                        DeferredRegister.create(Registries.POS_RULE_TEST, "example");
+                public static final DeferredHolder<PosRuleTestType<BorderBoxPosTest>, PosRuleTestType<BorderBoxPosTest>> BORDER_BOX =
+                        POS_RULE_TESTS.register("border_box", () -> () -> BorderBoxPosTest.CODEC);
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = projectDir.resolve("src/main/java/com/example/TypedRegistries.java").readText()
+        assertTrue(migrated.contains("DeferredRegister<LootItemFunctionType<?>> LOOT_FUNCTION_TYPES"))
+        assertTrue(migrated.contains("DeferredHolder<LootItemFunctionType<?>, LootItemFunctionType<DoubleDrops>> DOUBLE_DROPS"))
+        assertTrue(migrated.contains("DeferredHolder<RecipeSerializer<?>, AetherCookingSerializer<EnchantingRecipe>> ENCHANTING"))
+        assertTrue(migrated.contains("DeferredHolder<RecipeSerializer<?>, SimpleCraftingRecipeSerializer<SwetBannerRecipe>> SWET_BANNER"))
+        assertTrue(migrated.contains("DeferredHolder<PosRuleTestType<?>, PosRuleTestType<BorderBoxPosTest>> BORDER_BOX"))
+    }
+
+    @Test
+    fun `mmlib block loot constructor migration ignores comments and strings`() {
+        val projectDir = createFile("MmlibBlockLootDocs.java", """
+            package com.example;
+
+            import cn.mcmod_mmf.mmlib.data.loot.AbstartctBlockLoot;
+            import java.util.Set;
+            import net.minecraft.world.item.Item;
+
+            public class MmlibBlockLootDocs extends AbstartctBlockLoot {
+                private static final String DOC = "public class FakeBlockLoot extends AbstartctBlockLoot { public FakeBlockLoot(Set<Item> items) { super(items); } }";
+
+                public MmlibBlockLootDocs(Set<Item> pExplosionResistant) {
+                    super(pExplosionResistant);
+                }
+
+                public MmlibBlockLootDocs() {
+                    super(Set.of());
+                }
+            }
+        """.trimIndent())
+        createFile("MmlibBlockLootGhost.java", """
+            package com.example;
+
+            public class MmlibBlockLootGhost {
+                private static final String DOC = "public class GhostBlockLoot extends AbstartctBlockLoot { public GhostBlockLoot() { super(Set.of()); } }";
+
+                public void docs() {
+                    // public class GhostBlockLoot extends AbstartctBlockLoot {}
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val docs = tempDir.resolve("src/main/java/com/example/MmlibBlockLootDocs.java").readText()
+        val ghost = tempDir.resolve("src/main/java/com/example/MmlibBlockLootGhost.java").readText()
+        assertTrue(docs.contains("public MmlibBlockLootDocs(net.minecraft.core.HolderLookup.Provider provider)"), docs)
+        assertFalse(docs.contains("public MmlibBlockLootDocs(Set<Item>"), docs)
+        assertFalse(docs.contains("public MmlibBlockLootDocs()"), docs)
+        assertFalse(docs.contains("import java.util.Set;"), docs)
+        assertFalse(docs.contains("import net.minecraft.world.item.Item;"), docs)
+        assertTrue(docs.contains("""private static final String DOC = "public class FakeBlockLoot extends AbstartctBlockLoot { public FakeBlockLoot(Set<Item> items) { super(items); } }";"""), docs)
+        assertFalse(ghost.contains("HolderLookup.Provider provider"), ghost)
+        assertTrue(ghost.contains("""private static final String DOC = "public class GhostBlockLoot extends AbstartctBlockLoot { public GhostBlockLoot() { super(Set.of()); } }";"""), ghost)
+        assertTrue(ghost.contains("// public class GhostBlockLoot extends AbstartctBlockLoot {}"), ghost)
+    }

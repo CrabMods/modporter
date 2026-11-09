@@ -1,0 +1,1174 @@
+
+    @Test
+    fun `screen render forwards its mouse and partial tick parameters to renderBackground`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/client")
+        srcDir.createDirectories()
+        srcDir.resolve("CaptureScreen.java").writeText("""
+            package com.example.client;
+
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.screens.Screen;
+            import net.minecraft.network.chat.Component;
+
+            public class CaptureScreen extends Screen {
+                protected CaptureScreen() { super(Component.empty()); }
+
+                @Override
+                public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+                    renderBackground(graphics);
+                    super.render(graphics, mouseX, mouseY, partialTick);
+                    this.renderBackground(graphics);
+                }
+
+                private void paint(GuiGraphics graphics) {
+                    // no mouse context here: must stay untouched for validation
+                    renderBackground(graphics);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val screen = srcDir.resolve("CaptureScreen.java").readText()
+
+        assertTrue(screen.contains("    renderBackground(graphics, mouseX, mouseY, partialTick);\n        super.render"), screen)
+        assertTrue(screen.contains("this.renderBackground(graphics, mouseX, mouseY, partialTick);"), screen)
+        assertTrue(screen.contains("// no mouse context here: must stay untouched for validation\n        renderBackground(graphics);"), screen)
+    }
+
+    @Test
+    fun `use item on ternary wraps only the helper branch into ItemInteractionResult`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/block")
+        srcDir.createDirectories()
+        srcDir.resolve("FeastBlock.java").writeText("""
+            package com.example.block;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.InteractionHand;
+            import net.minecraft.world.InteractionResult;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.phys.BlockHitResult;
+
+            public class FeastBlock extends Block {
+                public FeastBlock(Properties properties) { super(properties); }
+
+                public InteractionResult use(BlockState state, Level level, BlockPos pos, Player player, InteractionHand hand, BlockHitResult hit) {
+                    return level.isClientSide && this.takeServing(level, pos, state, player, hand).consumesAction() ? InteractionResult.SUCCESS : this.takeServing(level, pos, state, player, hand);
+                }
+
+                protected InteractionResult takeServing(Level level, BlockPos pos, BlockState state, Player player, InteractionHand hand) {
+                    return InteractionResult.PASS;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val block = srcDir.resolve("FeastBlock.java").readText()
+
+        assertTrue(block.contains("ItemInteractionResult useItemOn("), block)
+        assertTrue(block.contains("? net.minecraft.world.ItemInteractionResult.SUCCESS : switch (this.takeServing(level, pos, state, player, hand)) {"), block)
+        assertFalse(Regex("""return [^;]*\?[^;]*: this\.takeServing\(level, pos, state, player, hand\);""").containsMatchIn(block), block)
+    }
+
+    @Test
+    fun `advancement iteration moves to holders and display types`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/item")
+        srcDir.createDirectories()
+        srcDir.resolve("NoodleItem.java").writeText("""
+            package com.example.item;
+
+            import java.util.ArrayList;
+            import java.util.List;
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.advancements.AdvancementProgress;
+            import net.minecraft.advancements.AdvancementType;
+            import net.minecraft.advancements.DisplayInfo;
+            import net.minecraft.server.PlayerAdvancements;
+            import net.minecraft.server.level.ServerPlayer;
+
+            public class NoodleItem {
+                void revoke(ServerPlayer player) {
+                    PlayerAdvancements playerAdvancements = player.getAdvancements();
+                    for (Advancement advancement : player.server.getAdvancements().getAllAdvancements()) {
+                        DisplayInfo display = advancement.getDisplay();
+                        if (display == null || display.getFrame() != AdvancementType.CHALLENGE) {
+                            continue;
+                        }
+                        AdvancementProgress progress = playerAdvancements.getOrStartProgress(advancement);
+                        List<String> completed = new ArrayList<>();
+                        progress.getCompletedCriteria().forEach(completed::add);
+                        for (String criterion : completed) {
+                            playerAdvancements.revoke(advancement, criterion);
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val item = srcDir.resolve("NoodleItem.java").readText()
+
+        assertTrue(item.contains("for (AdvancementHolder advancement : player.server.getAdvancements().getAllAdvancements())"), item)
+        assertTrue(item.contains("DisplayInfo display = advancement.value().display().orElse(null);"), item)
+        assertTrue(item.contains("display.getType() != AdvancementType.CHALLENGE"), item)
+        assertTrue(item.contains("import net.minecraft.advancements.AdvancementHolder;"), item)
+        assertFalse(item.contains("import net.minecraft.advancements.Advancement;"), item)
+    }
+
+    @Test
+    fun `registry access dependent calls use the enclosing level or test helper`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/world")
+        srcDir.createDirectories()
+        srcDir.resolve("CopyService.java").writeText("""
+            package com.example.world;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.gametest.framework.GameTestHelper;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.Enchantments;
+            import net.minecraft.world.level.chunk.ChunkAccess;
+
+            public class CopyService {
+                static CompoundTag copy(ChunkAccess chunk, BlockPos pos, ServerLevel mirrorWorld) {
+                    CompoundTag tag = chunk.getBlockEntityNbtForSaving(pos);
+                    return tag;
+                }
+
+                static void sharpen(GameTestHelper helper, ItemStack sword) {
+                    sword.enchant(Enchantments.SHARPNESS, 3);
+                }
+
+                static void sharpenLater(ItemStack sword, java.util.function.Supplier<ServerLevel> levels) {
+                    sword.enchant(Enchantments.SHARPNESS, 3);
+                    ServerLevel declaredLater = levels.get();
+                    declaredLater.getServer();
+                }
+
+                static CompoundTag orphan(ChunkAccess chunk, BlockPos pos) {
+                    return chunk.getBlockEntityNbtForSaving(pos);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val service = srcDir.resolve("CopyService.java").readText()
+
+        assertTrue(service.contains("chunk.getBlockEntityNbtForSaving(pos, mirrorWorld.registryAccess());"), service)
+        assertTrue(service.contains("sword.enchant(helper.getLevel().registryAccess().lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.SHARPNESS), 3);"), service)
+        assertTrue(service.contains("return chunk.getBlockEntityNbtForSaving(pos);"), service)
+        assertTrue(service.contains("sword.enchant(Enchantments.SHARPNESS, 3);\n        ServerLevel declaredLater"), service)
+        assertTrue(service.contains("import net.minecraft.core.registries.Registries;"), service)
+    }
+
+    @Test
+    fun `config screen factory registration moves to the mod container extension point`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/client")
+        srcDir.createDirectories()
+        srcDir.resolve("ClientConfigAccess.java").writeText("""
+            package com.example.client;
+
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.client.gui.screens.Screen;
+            import net.neoforged.neoforge.client.ConfigScreenHandler;
+            import net.neoforged.fml.ModLoadingContext;
+
+            public final class ClientConfigAccess {
+                public static void registerConfigScreen() {
+                    ModLoadingContext.get().registerExtensionPoint(
+                            ConfigScreenHandler.ConfigScreenFactory.class,
+                            () -> new ConfigScreenHandler.ConfigScreenFactory(ClientConfigAccess::createConfigScreen)
+                    );
+                }
+
+                private static Screen createConfigScreen(Minecraft minecraft, Screen parent) {
+                    return parent;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val access = srcDir.resolve("ClientConfigAccess.java").readText()
+        val compact = access.filterNot(Char::isWhitespace)
+
+        assertTrue(compact.contains("ModLoadingContext.get().getActiveContainer().registerExtensionPoint(IConfigScreenFactory.class,()->"), access)
+        assertTrue(compact.contains("java.util.function.Function<java.util.function.BiFunction<net.minecraft.client.Minecraft,net.minecraft.client.gui.screens.Screen,net.minecraft.client.gui.screens.Screen>,net.neoforged.neoforge.client.gui.IConfigScreenFactory>"), access)
+        assertTrue(compact.contains("modporterConfigFactory.apply(net.minecraft.client.Minecraft.getInstance(),modporterParent)"), access)
+        assertTrue(compact.contains(".apply(ClientConfigAccess::createConfigScreen)"), access)
+        assertEquals(1, "ClientConfigAccess::createConfigScreen".toRegex().findAll(access).count())
+        assertTrue(access.contains("import net.neoforged.neoforge.client.gui.IConfigScreenFactory;"), access)
+        assertFalse(access.contains("ConfigScreenHandler"), access)
+    }
+
+    @Test
+    fun `curios slot modifiers use mod namespaced identifiers instead of uuids`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.resolve("item").createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("item/DockingStation.java").writeText("""
+            package com.example.item;
+
+            import com.google.common.collect.ArrayListMultimap;
+            import com.google.common.collect.Multimap;
+            import java.util.UUID;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.item.ItemStack;
+            import top.theillusivec4.curios.api.CuriosApi;
+            import top.theillusivec4.curios.api.SlotContext;
+            import top.theillusivec4.curios.api.type.capability.ICurioItem;
+
+            public class DockingStation implements ICurioItem {
+                @Override
+                public Multimap<Holder<Attribute>, AttributeModifier> getAttributeModifiers(SlotContext slotContext, UUID uuid, ItemStack stack) {
+                    Multimap<Holder<Attribute>, AttributeModifier> attributeMap = ArrayListMultimap.create();
+                    CuriosApi.addSlotModifier(attributeMap, "charm", UUID.fromString("55E5887F-58f7-4b00-8e51-47e86d0e3468"), 3, AttributeModifier.Operation.ADD_VALUE);
+                    return attributeMap;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val station = srcDir.resolve("item/DockingStation.java").readText()
+
+        assertTrue(station.contains("getAttributeModifiers(SlotContext slotContext, ResourceLocation uuid, ItemStack stack)"), station)
+        assertTrue(station.contains("""CuriosApi.addSlotModifier(attributeMap, "charm", ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "55e5887f-58f7-4b00-8e51-47e86d0e3468"), 3, AttributeModifier.Operation.ADD_VALUE);"""), station)
+        assertTrue(station.contains("import com.example.ExampleMod;"), station)
+        assertTrue(station.contains("import net.minecraft.resources.ResourceLocation;"), station)
+        assertFalse(station.contains("import java.util.UUID;"), station)
+    }
+
+    @Test
+    fun `fluid item providers chosen per class register their handlers for vanilla items and bucket mixins`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val fluidDir = srcDir.resolve("fluid")
+        val mixinDir = srcDir.resolve("mixin")
+        val metaInf = tempDir.resolve("src/main/resources")
+        fluidDir.createDirectories(); mixinDir.createDirectories(); metaInf.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.fluid.CustomFluidItems;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "example";
+                public ExampleMod(IEventBus modEventBus) {
+                    CustomFluidItems.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        fluidDir.resolve("CustomFluidItems.java").writeText("""
+            package com.example.fluid;
+
+            import net.minecraft.world.item.Item;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class CustomFluidItems {
+                public static final DeferredRegister<Item> ITEMS = null;
+                public static final DeferredHolder<Item, CustomFluidBottleItem> CUSTOM_FLUID_BOTTLE =
+                        ITEMS.register("custom_fluid_bottle", () -> new CustomFluidBottleItem(new Item.Properties()));
+                public static final DeferredHolder<Item, CustomFluidBucketItem> CUSTOM_FLUID_BUCKET =
+                        ITEMS.register("custom_fluid_bucket", () -> new CustomFluidBucketItem(new Item.Properties()));
+                public static void register(IEventBus eventBus) { ITEMS.register(eventBus); }
+            }
+        """.trimIndent())
+        fluidDir.resolve("CompatibleFluidBucketWrapper.java").writeText("""
+            package com.example.fluid;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.fluids.capability.wrappers.FluidBucketWrapper;
+
+            public final class CompatibleFluidBucketWrapper extends FluidBucketWrapper {
+                public CompatibleFluidBucketWrapper(ItemStack stack) { super(stack); }
+            }
+        """.trimIndent())
+        fluidDir.resolve("CustomFluidCapabilities.java").writeText("""
+            package com.example.fluid;
+
+            import net.minecraft.core.Direction;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import com.modporter.compat.LazyOptional;
+            import net.neoforged.neoforge.event.AttachCapabilitiesEvent;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.fluids.FluidStack;
+            import net.neoforged.neoforge.fluids.capability.IFluidHandlerItem;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import com.example.ExampleMod;
+
+            @EventBusSubscriber(modid = ExampleMod.MOD_ID)
+            public final class CustomFluidCapabilities {
+                public static final ResourceLocation CAPABILITY_ID = new ResourceLocation(ExampleMod.MOD_ID, "custom_fluid_container");
+                private CustomFluidCapabilities() {}
+
+                @SubscribeEvent
+                public static void attachCapabilities(AttachCapabilitiesEvent<ItemStack> event) {
+                    ItemStack stack = event.getObject();
+                    if (stack.is(Items.GLASS_BOTTLE)) { event.addCapability(CAPABILITY_ID, createProvider(stack, false)); }
+                }
+
+                public static ICapabilityProvider createProvider(ItemStack stack, boolean bucket) {
+                    return bucket ? new CompatibleFluidBucketWrapper(stack) : new BottleProvider(stack);
+                }
+
+                private static final class BottleProvider implements ICapabilityProvider {
+                    private final LazyOptional<IFluidHandlerItem> handler;
+                    private BottleProvider(ItemStack stack) { handler = LazyOptional.of(() -> new CustomFluidBottleHandler(stack)); }
+
+                    @Override
+                    public <T> LazyOptional<T> getCapability(Capability<T> capability, Direction side) {
+                        return capability == Capabilities.FLUID_HANDLER_ITEM ? handler.cast() : LazyOptional.empty();
+                    }
+                }
+
+                private static final class CustomFluidBottleHandler implements IFluidHandlerItem {
+                    private ItemStack container;
+                    private CustomFluidBottleHandler(ItemStack stack) { container = stack; }
+                    public int getTanks() { return 1; }
+                    public FluidStack getFluidInTank(int tank) { return FluidStack.EMPTY; }
+                    public int getTankCapacity(int tank) { return 250; }
+                    public boolean isFluidValid(int tank, FluidStack fluid) { return true; }
+                    public int fill(FluidStack fluid, FluidAction action) { return 0; }
+                    public FluidStack drain(FluidStack fluid, FluidAction action) { return FluidStack.EMPTY; }
+                    public FluidStack drain(int amount, FluidAction action) { return FluidStack.EMPTY; }
+                    public ItemStack getContainer() { return container; }
+                }
+            }
+        """.trimIndent())
+        fluidDir.resolve("CustomFluidBottleItem.java").writeText("""
+            package com.example.fluid;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import org.jetbrains.annotations.Nullable;
+
+            public class CustomFluidBottleItem extends Item {
+                public CustomFluidBottleItem(Properties properties) { super(properties); }
+
+                @Override
+                public ICapabilityProvider initCapabilities(ItemStack stack, @Nullable CompoundTag nbt) {
+                    return CustomFluidCapabilities.createProvider(stack, false);
+                }
+            }
+        """.trimIndent())
+        fluidDir.resolve("CustomFluidBucketItem.java").writeText("""
+            package com.example.fluid;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import org.jetbrains.annotations.Nullable;
+
+            public class CustomFluidBucketItem extends Item {
+                public CustomFluidBucketItem(Properties properties) { super(properties); }
+
+                @Override
+                public ICapabilityProvider initCapabilities(ItemStack stack, @Nullable CompoundTag nbt) {
+                    return CustomFluidCapabilities.createProvider(stack, true);
+                }
+            }
+        """.trimIndent())
+        mixinDir.resolve("EmptyBucketCapabilityMixin.java").writeText("""
+            package com.example.mixin;
+
+            import com.example.fluid.CustomFluidCapabilities;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.BucketItem;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.injection.At;
+            import org.spongepowered.asm.mixin.injection.Inject;
+            import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+
+            @Mixin(BucketItem.class)
+            public abstract class EmptyBucketCapabilityMixin {
+                @Inject(method = "initCapabilities", at = @At("HEAD"), cancellable = true, remap = false)
+                private void example${'$'}bucketProvider(ItemStack stack, CompoundTag nbt, CallbackInfoReturnable<ICapabilityProvider> cir) {
+                    if (stack.is(Items.BUCKET)) cir.setReturnValue(CustomFluidCapabilities.createProvider(stack, true));
+                }
+            }
+        """.trimIndent())
+        metaInf.resolve("example.mixins.json").writeText("""
+            {
+              "required": true,
+              "package": "com.example.mixin",
+              "mixins": [
+                "EmptyBucketCapabilityMixin",
+                "OtherMixin"
+              ]
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val capabilities = fluidDir.resolve("CustomFluidCapabilities.java").readText()
+        val mixins = metaInf.resolve("example.mixins.json").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-custom-fluid-bucket-mixin" }, result.changes.joinToString("\n") { it.ruleId })
+        assertTrue(capabilities.contains("(stack, context) -> new CustomFluidBottleHandler(stack),\n                CustomFluidItems.CUSTOM_FLUID_BOTTLE.get());"), capabilities)
+        assertTrue(capabilities.contains("(stack, context) -> new CompatibleFluidBucketWrapper(stack),\n                CustomFluidItems.CUSTOM_FLUID_BUCKET.get());"), capabilities)
+        assertTrue(capabilities.contains("(stack, context) -> new CustomFluidBottleHandler(stack),\n                Items.GLASS_BOTTLE);"), capabilities)
+        assertTrue(capabilities.contains("(stack, context) -> new CompatibleFluidBucketWrapper(stack),\n                Items.BUCKET);"), capabilities)
+        assertTrue(capabilities.contains("import net.minecraft.world.item.Items;"), capabilities)
+        assertFalse(capabilities.contains("BottleProvider"), capabilities)
+        assertFalse(mixinDir.resolve("EmptyBucketCapabilityMixin.java").exists())
+        assertFalse(mixins.contains("EmptyBucketCapabilityMixin"), mixins)
+        assertTrue(mixins.contains("OtherMixin"), mixins)
+    }
+
+    @Test
+    fun `sibling lambda locals with the same name are not treated as captured reassignments`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/tile")
+        srcDir.createDirectories()
+        srcDir.resolve("ShelfBlockEntity.java").writeText("""
+            package com.example.tile;
+
+            import java.util.Optional;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+
+            public class ShelfBlockEntity {
+                Optional<Object> holder = Optional.empty();
+
+                void interact(Player player, boolean empty) {
+                    ItemStack itemStack = player.getMainHandItem();
+                    if (empty) {
+                        holder.ifPresent(h -> {
+                            if (itemStack.getCount() == 1) {
+                                itemStack.shrink(1);
+                                ItemStack newStack = new ItemStack(Items.GLASS_BOTTLE);
+                                player.addItem(newStack);
+                            }
+                        });
+                    } else {
+                        holder.ifPresent(h -> {
+                            itemStack.shrink(1);
+                            ItemStack newStack = new ItemStack(Items.BUCKET);
+                            player.addItem(newStack);
+                        });
+                    }
+                    ItemStack reassigned = ItemStack.EMPTY;
+                    reassigned = player.getOffhandItem();
+                    holder.ifPresent(h -> player.addItem(reassigned));
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val tile = srcDir.resolve("ShelfBlockEntity.java").readText()
+
+        assertFalse(tile.contains("finalNewStack"), tile)
+        assertTrue(tile.contains("ItemStack finalReassigned = reassigned;"), tile)
+        assertTrue(tile.contains("holder.ifPresent(h -> player.addItem(finalReassigned));"), tile)
+    }
+
+    @Test
+    fun `final bush block subclasses receive a codec and qualified block holders use the block base`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.resolve("blocks").createDirectories()
+        srcDir.resolve("registers").createDirectories()
+        srcDir.resolve("blocks/BathHerbCropBlock.java").writeText("""
+            package com.example.blocks;
+
+            import net.minecraft.world.level.block.BushBlock;
+
+            public final class BathHerbCropBlock extends BushBlock {
+                public BathHerbCropBlock(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("registers/BlocksRegister.java").writeText("""
+            package com.example.registers;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.block.Block;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlocksRegister {
+                public static final DeferredRegister<Block> BLOCKS = DeferredRegister.create(Registries.BLOCK, "example");
+
+                public static final DeferredHolder<com.example.blocks.BathHerbCropBlock, com.example.blocks.BathHerbCropBlock> BATH_HERB_CROP =
+                        BLOCKS.register("bath_herb_crop", () -> new com.example.blocks.BathHerbCropBlock(
+                                net.minecraft.world.level.block.state.BlockBehaviour.Properties.of().noCollission()));
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val block = srcDir.resolve("blocks/BathHerbCropBlock.java").readText()
+        val register = srcDir.resolve("registers/BlocksRegister.java").readText()
+
+        assertTrue(block.contains("simpleCodec(BathHerbCropBlock::new)"), block)
+        assertTrue(block.contains("codec()"), block)
+        assertTrue(register.contains("DeferredHolder<Block, com.example.blocks.BathHerbCropBlock> BATH_HERB_CROP"), register)
+    }
+
+    @Test
+    fun `qualified config screen factory registrations migrate without imports`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/client")
+        srcDir.createDirectories()
+        srcDir.resolve("SettingsScreen.java").writeText("""
+            package com.example.client;
+
+            import net.minecraft.client.gui.screens.Screen;
+            import net.minecraft.network.chat.Component;
+
+            public final class SettingsScreen extends Screen {
+                public SettingsScreen(Screen parent) {
+                    super(Component.literal("settings"));
+                }
+
+                public static void register() {
+                    net.neoforged.fml.ModLoadingContext.get().registerExtensionPoint(
+                            net.neoforged.neoforge.client.ConfigScreenHandler.ConfigScreenFactory.class,
+                            () -> new net.neoforged.neoforge.client.ConfigScreenHandler.ConfigScreenFactory(
+                                    (minecraft, parent) -> new SettingsScreen(parent)));
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val screen = srcDir.resolve("SettingsScreen.java").readText()
+        val compact = screen.filterNot(Char::isWhitespace)
+
+        assertTrue(compact.contains("net.neoforged.fml.ModLoadingContext.get().getActiveContainer().registerExtensionPoint(net.neoforged.neoforge.client.gui.IConfigScreenFactory.class,(java.util.function.Supplier<net.neoforged.neoforge.client.gui.IConfigScreenFactory>)()->(minecraft,parent)->newSettingsScreen(parent))"), screen)
+        assertFalse(screen.contains("ConfigScreenHandler"), screen)
+        assertFalse(screen.contains("import net.neoforged.neoforge.client.gui.IConfigScreenFactory;"), screen)
+    }
+
+    @Test
+    fun `unary config screen constructor references bind the screen-only factory overload`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/client")
+        srcDir.createDirectories()
+        val source = """
+            package com.example.client;
+
+            import net.minecraft.client.gui.screens.Screen;
+            import net.minecraft.network.chat.Component;
+
+            public final class UnarySettingsScreen extends Screen {
+                public UnarySettingsScreen(Screen parent) {
+                    super(Component.literal("settings"));
+                }
+
+                public static void register(net.neoforged.fml.ModContainer container) {
+                    container.registerExtensionPoint(
+                            net.neoforged.neoforge.client.ConfigScreenHandler.ConfigScreenFactory.class,
+                            () -> new net.neoforged.neoforge.client.ConfigScreenHandler.ConfigScreenFactory(
+                                    UnarySettingsScreen::new));
+                }
+            }
+        """.trimIndent()
+        val file = srcDir.resolve("UnarySettingsScreen.java")
+        file.writeText(source)
+
+        StructuralRefactorPass().apply(tempDir)
+
+        // A one-parameter constructor can only bind Forge's ConfigScreenFactory(Function<Screen, Screen>)
+        // overload (Forge 47.2+), which delegated as (minecraft, screen) -> function.apply(screen).
+        val migrated = file.readText()
+        assertTrue(
+            migrated.filterNot(Char::isWhitespace).contains(
+                "container.registerExtensionPoint(net.neoforged.neoforge.client.gui.IConfigScreenFactory.class," +
+                    "(java.util.function.Supplier<net.neoforged.neoforge.client.gui.IConfigScreenFactory>)" +
+                    "()->(modporterContainer,modporterParent)->newUnarySettingsScreen(modporterParent))"
+            ),
+            migrated
+        )
+        assertFalse(migrated.contains("ConfigScreenHandler"), migrated)
+    }
+
+    @Test
+    fun `inline annotated living tick handlers guard var locals and qualified event types`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/compat")
+        srcDir.createDirectories()
+        srcDir.resolve("SeasonsHandler.java").writeText("""
+            package com.example.compat;
+
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.player.Player;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.event.entity.living.LivingEvent;
+
+            public final class SeasonsHandler {
+                private static final int MOB_INTERVAL = 40;
+
+                @SubscribeEvent public static void onLivingTick(LivingEvent.LivingTickEvent event) {
+                    var living=event.getEntity();
+                    if(!(living instanceof Player)&&living.tickCount%MOB_INTERVAL==0)
+                        applyWinterBenefits(living);
+                }
+
+                @SubscribeEvent
+                public static void onEntityTick(net.neoforged.neoforge.event.entity.living.LivingEvent.LivingTickEvent event) {
+                    net.minecraft.world.entity.Entity subject = event.getEntity();
+                    if (!(subject instanceof LivingEntity entity) || entity instanceof Player) return;
+                    applyWinterBenefits(entity);
+                }
+
+                private static void applyWinterBenefits(LivingEntity entity) {}
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val handler = srcDir.resolve("SeasonsHandler.java").readText()
+
+        assertTrue(handler.contains("public static void onLivingTick(EntityTickEvent.Pre event) {"), handler)
+        assertTrue(handler.contains("if (!(event.getEntity() instanceof LivingEntity living)) return;"), handler)
+        assertTrue(handler.contains("if(!(living instanceof Player)&&living.tickCount%MOB_INTERVAL==0)"), handler)
+        assertTrue(handler.contains("public static void onEntityTick(net.neoforged.neoforge.event.tick.EntityTickEvent.Pre event) {"), handler)
+        assertTrue(handler.contains("net.minecraft.world.entity.Entity subject = event.getEntity();"), handler)
+        assertFalse(handler.contains("LivingTickEvent"), handler)
+    }
+
+    @Test
+    fun `mob effect registry lookups and effect locals follow the holder api`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/effects")
+        srcDir.createDirectories()
+        srcDir.resolve("BathEffects.java").writeText("""
+            package com.example.effects;
+
+            import java.util.ArrayList;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.effect.MobEffectCategory;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.entity.LivingEntity;
+
+            public final class BathEffects {
+                public record Effect(ResourceLocation id, int duration, int amplifier) {
+                    public MobEffectInstance create() {
+                        return new MobEffectInstance(BuiltInRegistries.MOB_EFFECT.get(id), duration, amplifier, false, true, true);
+                    }
+                }
+
+                public static void tick(ServerPlayer player, Effect effect) {
+                    var type = BuiltInRegistries.MOB_EFFECT.get(effect.id());
+                    var existing = player.getEffect(type);
+                    if (existing == null || existing.getAmplifier() < effect.amplifier())
+                        player.addEffect(new MobEffectInstance(type, effect.duration(), effect.amplifier()));
+                }
+
+                public static void cleanse(LivingEntity entity, boolean nonBeneficial) {
+                    var matches=new ArrayList<MobEffectInstance>();
+                    for(var instance:entity.getActiveEffects()) {
+                        var effect=instance.getEffect();
+                        var id=BuiltInRegistries.MOB_EFFECT.getKey(effect);
+                        boolean category=nonBeneficial?!effect.isBeneficial():effect.getCategory()==MobEffectCategory.HARMFUL;
+                        if(category&&id!=null)matches.add(instance);
+                    }
+                    matches.forEach(effect->entity.removeEffect(effect.getEffect()));
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val effects = srcDir.resolve("BathEffects.java").readText()
+
+        assertTrue(effects.contains("new MobEffectInstance(BuiltInRegistries.MOB_EFFECT.getHolder(id).orElseThrow(), duration, amplifier, false, true, true)"), effects)
+        assertTrue(effects.contains("var type = BuiltInRegistries.MOB_EFFECT.getHolder(effect.id()).orElse(null);"), effects)
+        assertTrue(effects.contains("var effect=instance.getEffect().value();"), effects)
+        assertTrue(effects.contains("matches.forEach(effect->entity.removeEffect(effect.getEffect()));"), effects)
+    }
+
+    @Test
+    fun `chunk holder results replace the either left access`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/sync")
+        srcDir.createDirectories()
+        srcDir.resolve("LightRefresh.java").writeText("""
+            package com.example.sync;
+
+            import net.minecraft.server.MinecraftServer;
+            import net.minecraft.server.level.ChunkHolder;
+
+            public final class LightRefresh {
+                static void refresh(MinecraftServer server, Iterable<ChunkHolder> holders) {
+                    for(var level:server.getAllLevels()) {
+                        for(var holder:holders) {
+                            var result=holder.getFullChunkFuture().getNow(null);
+                            var chunk=result==null?null:result.left().orElse(null);if(chunk==null)continue;
+                            level.getLightEngine().checkBlock(chunk.getPos().getWorldPosition());
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val refresh = srcDir.resolve("LightRefresh.java").readText()
+
+        assertTrue(refresh.contains("var chunk=result==null?null:result.orElse(null);if(chunk==null)continue;"), refresh)
+    }
+
+    @Test
+    fun `name derived attribute modifier uuids resolve to their resource locations`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/fluid")
+        srcDir.createDirectories()
+        srcDir.resolve("PeonyBathBlock.java").writeText("""
+            package com.example.fluid;
+
+            import java.util.UUID;
+            import net.minecraft.core.Holder;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public final class PeonyBathBlock {
+                public static void applyAttributeModifier(LivingEntity player, Holder<Attribute> attribute, double value, ResourceLocation modifierName, boolean add, AttributeModifier.Operation operation) {
+                    AttributeInstance attributeInstance = player.getAttribute(attribute);
+                    UUID uuid = UUID.nameUUIDFromBytes(modifierName.toString().getBytes());
+                    if (attributeInstance != null) {
+                        if (add) {
+                            AttributeModifier modifier = new AttributeModifier(uuid, modifierName.toString(), value, operation);
+                            AttributeModifier previous = attributeInstance.getModifier(uuid);
+                            if (previous == null || previous.amount() != value || previous.operation() != operation) {
+                                attributeInstance.removeModifier(uuid);
+                                attributeInstance.addTransientModifier(modifier);
+                            }
+                        } else {
+                            attributeInstance.removeModifier(uuid);
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val block = srcDir.resolve("PeonyBathBlock.java").readText()
+
+        assertTrue(block.contains("AttributeModifier modifier = new AttributeModifier(modifierName, value, operation);"), block)
+        assertTrue(block.contains("AttributeModifier previous = attributeInstance.getModifier(modifierName);"), block)
+        assertTrue(block.contains("attributeInstance.removeModifier(modifierName);"), block)
+        assertFalse(block.contains("uuid"), block)
+        assertFalse(block.contains("import java.util.UUID;"), block)
+    }
+
+    @Test
+    fun `item capability lookups drop the lazy optional orElse`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/mixin")
+        srcDir.createDirectories()
+        srcDir.resolve("FillingMixin.java").writeText("""
+            package com.example.mixin;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.fluids.FluidStack;
+            import net.neoforged.neoforge.fluids.capability.IFluidHandler.FluidAction;
+
+            public abstract class FillingMixin {
+                private static int amount(ItemStack stack, FluidStack fluid) {
+                    var handler = stack.copyWithCount(1).getCapability(Capabilities.FluidHandler.ITEM).orElse(null);
+                    if (handler == null) {
+                        return -1;
+                    }
+                    return handler.fill(fluid, FluidAction.SIMULATE);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val mixin = srcDir.resolve("FillingMixin.java").readText()
+
+        assertTrue(mixin.contains("var handler = stack.copyWithCount(1).getCapability(Capabilities.FluidHandler.ITEM);"), mixin)
+    }
+
+    @Test
+    fun `armor trim sheets pass the pattern decal flag`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/render")
+        srcDir.createDirectories()
+        srcDir.resolve("GlovesRenderer.java").writeText("""
+            package com.example.render;
+
+            import com.mojang.blaze3d.vertex.VertexConsumer;
+            import net.minecraft.client.renderer.MultiBufferSource;
+            import net.minecraft.client.renderer.Sheets;
+            import net.minecraft.client.renderer.texture.TextureAtlasSprite;
+            import net.minecraft.core.component.DataComponents;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.armortrim.ArmorTrim;
+
+            public final class GlovesRenderer {
+                void renderTrim(ItemStack stack, MultiBufferSource buffer, TextureAtlasSprite sprite) {
+                    java.util.Optional.ofNullable(stack.get(DataComponents.TRIM)).ifPresent((trim) -> {
+                        VertexConsumer trimConsumer = sprite.wrap(buffer.getBuffer(Sheets.armorTrimsSheet()));
+                    });
+                    ArmorTrim current = stack.get(DataComponents.TRIM);
+                    if (current != null) {
+                        VertexConsumer trimConsumer = sprite.wrap(buffer.getBuffer(Sheets.armorTrimsSheet()));
+                    }
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val renderer = srcDir.resolve("GlovesRenderer.java").readText()
+
+        assertTrue(renderer.contains("sprite.wrap(buffer.getBuffer(Sheets.armorTrimsSheet(trim.pattern().value().decal())));"), renderer)
+        assertTrue(renderer.contains("sprite.wrap(buffer.getBuffer(Sheets.armorTrimsSheet(current.pattern().value().decal())));"), renderer)
+    }
+
+    @Test
+    fun `sibling java source sets are migrated like main sources`() {
+        val mainDir = tempDir.resolve("src/main/java/com/example")
+        val testDir = tempDir.resolve("src/bucketTest/java/com/example/buckettest")
+        mainDir.createDirectories()
+        testDir.createDirectories()
+        mainDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        testDir.resolve("EffectTest.java").writeText("""
+            package com.example.buckettest;
+
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.gametest.framework.GameTest;
+            import net.minecraft.gametest.framework.GameTestHelper;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.enchantment.Enchantments;
+
+            public class EffectTest {
+                @GameTest(template = "empty_1x1", timeoutTicks = 20)
+                public static void effect(GameTestHelper helper) {
+                    ItemStack sword = new ItemStack(Items.DIAMOND_SWORD);
+                    sword.enchant(Enchantments.SHARPNESS, 3);
+                    var effect = new MobEffectInstance(BuiltInRegistries.MOB_EFFECT.get(ResourceLocation.parse("minecraft:speed")), 20);
+                    helper.succeed();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val test = testDir.resolve("EffectTest.java").readText()
+
+        assertTrue(test.contains("sword.enchant(helper.getLevel().registryAccess().lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.SHARPNESS), 3);"), test)
+        assertTrue(test.contains("new MobEffectInstance(BuiltInRegistries.MOB_EFFECT.getHolder(ResourceLocation.parse(\"minecraft:speed\")).orElseThrow(), 20)"), test)
+    }
+
+    @Test
+    fun `game test tag writes update components and Create pipes use the 1_21 api`() {
+        val testDir = tempDir.resolve("src/bucketTest/java/com/example/buckettest")
+        testDir.createDirectories()
+        tempDir.resolve("src/main/java/com/example").createDirectories()
+        testDir.resolve("BucketTest.java").writeText("""
+            package com.example.buckettest;
+
+            import com.simibubi.create.content.fluids.OpenEndedPipe;
+            import com.simibubi.create.content.kinetics.mixer.MixingRecipe;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.neoforged.neoforge.fluids.FluidStack;
+
+            public class BucketTest {
+                static void tags(FluidStack missing) {
+                    FluidStack malformed = missing.copy();
+                    malformed.getOrCreateChildTag("HotbathCustomFluid").putString("FluidId", "Invalid ID!");
+                    ItemStack unknownBucket = new ItemStack(Items.BUCKET);
+                    unknownBucket.getOrCreateTagElement("HotbathCustomFluid").putString("FluidId", "hotbath:unregistered");
+                }
+
+                static ResourceLocation id(String value) { return ResourceLocation.parse(value); }
+                static java.util.List<String> names(ServerLevel level) { return java.util.List.of("honey"); }
+
+                static void pipes(ServerLevel level, CompoundTag saved, BlockPos pipePos) {
+                    var pipe = OpenEndedPipe.fromNBT(saved, pipePos);
+                    pipe.manageSource(level);
+                    var handler = pipe.provideHandler().orElseThrow(() -> new AssertionError("Missing open pipe handler"));
+                    var loaded = level.getRecipeManager().byKey(id("example:mix_" + names(level).get(0)))
+                            .orElseThrow(() -> new AssertionError("Missing recipe"));
+                    MixingRecipe mixing = (MixingRecipe) loaded;
+                    var fluids = mixing.getFluidIngredients();
+                    int amount = fluids.get(0).getRequiredAmount();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val test = testDir.resolve("BucketTest.java").readText()
+
+        assertTrue(test.contains("""malformed.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, malformed.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).update(tag -> { net.minecraft.nbt.CompoundTag child = tag.getCompound("HotbathCustomFluid"); child.putString("FluidId", "Invalid ID!"); tag.put("HotbathCustomFluid", child); }));"""), test)
+        assertTrue(test.contains("""net.minecraft.world.item.component.CustomData.update(net.minecraft.core.component.DataComponents.CUSTOM_DATA, unknownBucket, tag -> { net.minecraft.nbt.CompoundTag child = tag.getCompound("HotbathCustomFluid"); child.putString("FluidId", "hotbath:unregistered"); tag.put("HotbathCustomFluid", child); });"""), test)
+        assertTrue(test.contains("var pipe = OpenEndedPipe.fromNBT(saved, level.registryAccess(), pipePos);"), test)
+        assertTrue(test.contains("pipe.manageSource(level, null);"), test)
+        assertTrue(test.contains("var handler = pipe.provideHandler().getCapability();"), test)
+        assertTrue(test.contains("""byKey(id("example:mix_" + names(level).get(0)))"""), test)
+        assertTrue(test.contains(".map(net.minecraft.world.item.crafting.RecipeHolder::value)"), test)
+        assertTrue(test.contains("int amount = fluids.get(0).amount();"), test)
+    }
+
+    @Test
+    fun `mob effect identities flow as holders through registries maps and consumers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/surgery")
+        srcDir.createDirectories()
+        srcDir.resolve("OperationRegistry.java").writeText("""
+            package com.example.surgery;
+
+            import java.util.HashMap;
+            import java.util.Map;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffects;
+
+            public class OperationRegistry {
+                private static final Map<String, MobEffect> CHEST_EFFECT_INJECTIONS = new HashMap<>();
+                private static final Map<MobEffect, String> CHEST_EFFECT_INJECTION_REVERSE = new HashMap<>();
+
+                public static final String SPEED = chestEffectInjection("speed", MobEffects.MOVEMENT_SPEED);
+
+                private static String chestEffectInjection(String name, MobEffect effect) {
+                    CHEST_EFFECT_INJECTIONS.put(name, effect);
+                    CHEST_EFFECT_INJECTION_REVERSE.put(effect, name);
+                    return name;
+                }
+
+                public static MobEffect getChestEffectInjection(String name) {
+                    return CHEST_EFFECT_INJECTIONS.get(name);
+                }
+
+                public static String getNameForChestEffectInjection(MobEffect effect) {
+                    return CHEST_EFFECT_INJECTION_REVERSE.get(effect);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("PatientStatus.java").writeText("""
+            package com.example.surgery;
+
+            import java.util.HashMap;
+            import java.util.Map;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.effect.MobEffects;
+            import net.minecraft.world.entity.LivingEntity;
+
+            public class PatientStatus {
+                private final Map<MobEffect, Integer> chestEffects = new HashMap<>();
+
+                void tick(LivingEntity entity, String name) {
+                    MobEffect effect = OperationRegistry.getChestEffectInjection(name);
+                    if (effect != null) {
+                        chestEffects.put(effect, 1);
+                        entity.addEffect(new MobEffectInstance(effect, 300, chestEffects.getOrDefault(effect, 0)));
+                    }
+                    for (Map.Entry<MobEffect, Integer> e : chestEffects.entrySet()) {
+                        String key = OperationRegistry.getNameForChestEffectInjection(e.getKey());
+                        int timer = e.getKey() == MobEffects.HARM ? 20 : 1200;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val registry = srcDir.resolve("OperationRegistry.java").readText()
+        val status = srcDir.resolve("PatientStatus.java").readText()
+
+        assertTrue(registry.contains("private static String chestEffectInjection(String name, Holder<MobEffect> effect)"), registry)
+        assertTrue(registry.contains("Map<String, Holder<MobEffect>> CHEST_EFFECT_INJECTIONS"), registry)
+        assertTrue(registry.contains("Map<Holder<MobEffect>, String> CHEST_EFFECT_INJECTION_REVERSE"), registry)
+        assertTrue(registry.contains("public static Holder<MobEffect> getChestEffectInjection(String name)"), registry)
+        assertTrue(registry.contains("public static String getNameForChestEffectInjection(Holder<MobEffect> effect)"), registry)
+        assertTrue(status.contains("Holder<MobEffect> effect = OperationRegistry.getChestEffectInjection(name);"), status)
+        assertTrue(status.contains("Map<Holder<MobEffect>, Integer> chestEffects"), status)
+        assertTrue(status.contains("for (Map.Entry<Holder<MobEffect>, Integer> e : chestEffects.entrySet())"), status)
+        assertTrue(status.contains("int timer = e.getKey().is(MobEffects.HARM) ? 20 : 1200;"), status)
+        assertTrue(status.contains("import net.minecraft.core.Holder;"), status)
+    }
+
+    @Test
+    fun `provider attachments keep builder chains and dist call expressions become guards`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.resolve("capability").createDirectories()
+        srcDir.resolve("entity").createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(IEventBus modEventBus) {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("capability/ConvalescentData.java").writeText("""
+            package com.example.capability;
+
+            import net.minecraft.nbt.CompoundTag;
+
+            public class ConvalescentData {
+                private final boolean weeper;
+                public ConvalescentData(boolean weeper) { this.weeper = weeper; }
+                public void saveToNBT(CompoundTag tag) {}
+                public void loadFromNBT(CompoundTag tag) {}
+            }
+        """.trimIndent())
+        srcDir.resolve("capability/ConvalescentDataProvider.java").writeText("""
+            package com.example.capability;
+
+            import net.minecraft.core.Direction;
+            import net.minecraft.nbt.CompoundTag;
+            import net.neoforged.neoforge.common.capabilities.Capability;
+            import net.neoforged.neoforge.common.capabilities.CapabilityManager;
+            import net.neoforged.neoforge.common.capabilities.CapabilityToken;
+            import net.neoforged.neoforge.common.capabilities.ICapabilityProvider;
+            import net.neoforged.neoforge.common.util.INBTSerializable;
+            import net.neoforged.neoforge.common.util.LazyOptional;
+            import org.jetbrains.annotations.NotNull;
+            import org.jetbrains.annotations.Nullable;
+
+            public class ConvalescentDataProvider implements ICapabilityProvider, INBTSerializable<CompoundTag> {
+                public static Capability<ConvalescentData> CONVALESCENT_DATA = CapabilityManager.get(new CapabilityToken<>() {
+                });
+                private ConvalescentData convalescentData = null;
+                private final LazyOptional<ConvalescentData> opt = LazyOptional.of(this::getConvalescentData);
+                private boolean weeper;
+
+                private ConvalescentData getConvalescentData() {
+                    if (convalescentData == null) {
+                        convalescentData = new ConvalescentData(weeper);
+                    }
+                    return convalescentData;
+                }
+
+                @NotNull
+                @Override
+                public <T> LazyOptional<T> getCapability(@NotNull Capability<T> cap, @Nullable Direction side) {
+                    if (cap == CONVALESCENT_DATA) {
+                        return opt.cast();
+                    }
+                    return LazyOptional.empty();
+                }
+
+                @Override
+                public CompoundTag serializeNBT() {
+                    CompoundTag tag = new CompoundTag();
+                    getConvalescentData().saveToNBT(tag);
+                    return tag;
+                }
+
+                @Override
+                public void deserializeNBT(CompoundTag nbt) {
+                    getConvalescentData().loadFromNBT(nbt);
+                }
+
+                public ConvalescentDataProvider setWeeper(boolean weeper) {
+                    this.weeper = weeper;
+                    return this;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("capability/CapabilityEvents.java").writeText("""
+            package com.example.capability;
+
+            import com.example.ExampleMod;
+            import com.example.entity.WeeperEntity;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.npc.Villager;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.neoforge.event.AttachCapabilitiesEvent;
+
+            @EventBusSubscriber(modid = ExampleMod.MODID)
+            public class CapabilityEvents {
+                @SubscribeEvent
+                public static void onAttachCapabilities(AttachCapabilitiesEvent<Entity> event) {
+                    if (event.getObject() instanceof Villager || event.getObject() instanceof WeeperEntity) {
+                        if (!event.getObject().getCapability(ConvalescentDataProvider.CONVALESCENT_DATA).isPresent()) {
+                            event.addCapability(ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "convalescent_data"), new ConvalescentDataProvider().setWeeper(event.getObject() instanceof WeeperEntity));
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("entity/WeeperEntity.java").writeText("""
+            package com.example.entity;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.level.Level;
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.fml.DistExecutor;
+
+            public class WeeperEntity extends Mob {
+                private Object explodingAnimation;
+
+                protected WeeperEntity(EntityType<? extends Mob> type, Level level) {
+                    super(type, level);
+                }
+
+                public void startAnimation(Object template, boolean client) {
+                    explodingAnimation = DistExecutor.unsafeCallWhenOn(Dist.CLIENT, () -> () -> AnimationClient.newAnimation((template)));
+                    Object other = client ? DistExecutor.unsafeCallWhenOn(Dist.CLIENT, () -> () -> AnimationClient.newAnimation(template)) : new Object();
+                    Object pain = DistExecutor.unsafeCallWhenOn(Dist.CLIENT, () -> () -> AnimationClient.newAnimation(switch (template.hashCode()) {
+                        case 1 ->
+                            "back";
+                        default ->
+                            "chest";
+                    }));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("entity/AnimationClient.java").writeText("""
+            package com.example.entity;
+
+            public class AnimationClient {
+                public static Object newAnimation(Object template) { return template; }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val provider = srcDir.resolve("capability/ConvalescentDataProvider.java").readText()
+        val weeper = srcDir.resolve("entity/WeeperEntity.java").readText()
+
+        assertTrue(provider.contains("AttachmentType.<CompoundTag, ConvalescentDataProvider>serializable(holder -> new ConvalescentDataProvider().setWeeper(holder instanceof com.example.entity.WeeperEntity)).build()"), provider)
+        assertFalse(provider.contains("CapabilityManager.get("), provider)
+        assertTrue(weeper.contains("explodingAnimation = (FMLLoader.getDist() == Dist.CLIENT ? AnimationClient.newAnimation((template)) : null);"), weeper)
+        assertTrue(weeper.contains("Object other = client ? (FMLLoader.getDist() == Dist.CLIENT ? AnimationClient.newAnimation(template) : null) : new Object();"), weeper)
+        assertTrue(weeper.contains("Object pain = (FMLLoader.getDist() == Dist.CLIENT ? AnimationClient.newAnimation(switch"), weeper)
+        assertTrue(weeper.contains("}) : null);"), weeper)
+        assertFalse(weeper.contains("DistExecutor"), weeper)
+    }

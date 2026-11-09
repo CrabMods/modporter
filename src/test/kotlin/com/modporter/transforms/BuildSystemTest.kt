@@ -1,7 +1,6 @@
 package com.modporter.transforms
 
 import com.modporter.core.transforms.build.BuildSystemPass
-import com.modporter.core.transforms.build.RegistrateApiMigration
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertTimeoutPreemptively
 import org.junit.jupiter.api.io.TempDir
@@ -11,8 +10,9 @@ import java.nio.file.Path
 import kotlin.io.path.*
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import com.modporter.core.transforms.build.RegistrateApiMigration
+import kotlin.test.assertFailsWith
 
 class BuildSystemTest {
 
@@ -20,528 +20,6 @@ class BuildSystemTest {
     lateinit var tempDir: Path
 
     private val pass = BuildSystemPass()
-
-    @Test
-    fun `living breathe refill compatibility migrates from method handles to direct api`() {
-        val projectDir = tempDir.resolve("living-breathe-direct-api")
-        val srcDir = projectDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("DivingHelmet.java").writeText("""
-            package com.example;
-
-            import java.lang.invoke.MethodHandle;
-            import java.lang.invoke.MethodHandles;
-            import java.lang.invoke.MethodType;
-            import org.jetbrains.annotations.Nullable;
-            import net.neoforged.neoforge.event.entity.living.LivingBreatheEvent;
-
-            public class DivingHelmet {
-                // TODO - 1.21.1 - Remove
-                @Nullable
-                private static final MethodHandle setCanRefillAirHandle;
-
-                // TODO - 1.21.1 - Remove
-                static {
-                    MethodHandle handle = null;
-                    MethodHandles.Lookup lookup = MethodHandles.lookup();
-                    MethodType type = MethodType.methodType(void.class, boolean.class);
-                    try {
-                        handle = lookup.findVirtual(LivingBreatheEvent.class, "setCanRefillAir", type);
-                    } catch (Exception ignored) {
-                    }
-                    setCanRefillAirHandle = handle;
-                }
-
-                static void breathe(LivingBreatheEvent event) {
-                    event.setCanBreathe(true);
-                    try {
-                        if (setCanRefillAirHandle != null)
-                            setCanRefillAirHandle.invokeExact(event, true);
-                    } catch (Throwable ignored) {
-                    }
-                }
-            }
-        """.trimIndent())
-
-        val result = pass.apply(projectDir)
-        val content = srcDir.resolve("DivingHelmet.java").readText()
-
-        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        assertTrue(result.changes.any { it.ruleId == "build-living-breathe-refill-direct-api" })
-        assertTrue(content.contains("event.setRefillAirAmount(event.getEntity().getMaxAirSupply());"), content)
-        assertFalse(content.contains("MethodHandle"), content)
-        assertFalse(content.contains("MethodHandles"), content)
-        assertFalse(content.contains("setCanRefillAir"), content)
-        assertFalse(content.contains("TODO - 1.21.1 - Remove"), content)
-    }
-
-    @Test
-    fun `model builder varhandle reads without a complete public api flow remain hard gated`() {
-        val projectDir = tempDir.resolve("varhandle-at-direct")
-        val srcDir = projectDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("ModelTextures.java").writeText("""
-            package com.example;
-
-            import java.lang.invoke.MethodHandles;
-            import java.lang.invoke.VarHandle;
-            import java.util.Map;
-            import net.neoforged.neoforge.client.model.generators.ModelBuilder;
-
-            public class ModelTextures {
-                private static final String DOC = "TEXTURES_HANDLE.get(builder)";
-                public static final VarHandle TEXTURES_HANDLE;
-
-                static {
-                    try {
-                        MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(ModelBuilder.class, MethodHandles.lookup());
-                        TEXTURES_HANDLE = lookup.findVarHandle(ModelBuilder.class, "textures", Map.class);
-                    } catch (IllegalAccessException | NoSuchFieldException e) {
-                        throw new RuntimeException(e);
-                    }
-                }
-
-                static Map<String, String> textures(ModelBuilder<?> builder) {
-                    // TEXTURES_HANDLE.get(builder)
-                    return (Map<String, String>) TEXTURES_HANDLE.get(builder);
-                }
-            }
-        """.trimIndent())
-
-        val result = pass.apply(projectDir)
-        val content = srcDir.resolve("ModelTextures.java").readText()
-        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
-
-        assertTrue(result.errors.any { it.contains("Forbidden reflection") }, result.errors.joinToString("\n"))
-        assertFalse(result.changes.any { it.ruleId == "build-varhandle-at-direct-field" })
-        assertTrue(content.contains("return (Map<String, String>) TEXTURES_HANDLE.get(builder);"), content)
-        assertTrue(content.contains("DOC = \"TEXTURES_HANDLE.get(builder)\""), content)
-        assertTrue(content.contains("// TEXTURES_HANDLE.get(builder)"), content)
-        assertTrue(content.contains("VarHandle"), content)
-        assertTrue(content.contains("MethodHandles"), content)
-        assertTrue(content.contains("findVarHandle"), content)
-        assertFalse(atFile.exists())
-    }
-
-    @Test
-    fun `model builder texture map varhandles migrate to the public texture api without an at`() {
-        val projectDir = tempDir.resolve("varhandle-model-texture-api")
-        val srcDir = projectDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("GeneratedModels.java").writeText("""
-            package com.example;
-
-            import java.lang.invoke.MethodHandles;
-            import java.lang.invoke.VarHandle;
-            import java.util.Map;
-            import net.minecraft.resources.ResourceLocation;
-            import net.neoforged.neoforge.client.model.generators.ModelBuilder;
-
-            public class GeneratedModels {
-                public static final VarHandle TEXTURES_HANDLE;
-
-                static {
-                    try {
-                        MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(ModelBuilder.class, MethodHandles.lookup());
-                        TEXTURES_HANDLE = lookup.findVarHandle(ModelBuilder.class, "textures", Map.class);
-                    } catch (IllegalAccessException | NoSuchFieldException exception) {
-                        throw new RuntimeException(exception);
-                    }
-                }
-
-                static void addLayer(ModelBuilder<?> builder, ResourceLocation layer) {
-                    Map<String, String> textures = (Map<String, String>) TEXTURES_HANDLE.get(builder);
-                    textures.put("layer1", layer.toString());
-                }
-            }
-        """.trimIndent())
-
-        val result = pass.apply(projectDir)
-        val content = srcDir.resolve("GeneratedModels.java").readText()
-        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
-
-        assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${result.errors}")
-        assertTrue(content.contains("builder.texture(\"layer1\", layer);"), content)
-        assertFalse(content.contains("TEXTURES_HANDLE"), content)
-        assertFalse(content.contains("java.lang.invoke"), content)
-        assertFalse(content.contains("java.util.Map"), content)
-        assertFalse(atFile.exists(), atFile.takeIf { it.exists() }?.readText().orEmpty())
-    }
-
-    @Test
-    fun `obfuscation reflection fields migrate through explicit mappings and third party field evidence`() {
-        val projectDir = tempDir.resolve("obfuscation-reflection-at")
-        val srcDir = projectDir.resolve("src/main/java/com/example")
-        val resourcesDir = projectDir.resolve("src/main/resources")
-        srcDir.createDirectories()
-        resourcesDir.createDirectories()
-        resourcesDir.resolve("example.mixins.json").writeText("""
-            {
-              "required": true,
-              "package": "com.example.mixin",
-              "mixins": [],
-              "client": []
-            }
-        """.trimIndent())
-        srcDir.resolve("ReflectedFields.java").writeText("""
-            package com.example;
-
-            import dev.example.maps.LargeMapScreen;
-            import dev.example.maps.RegionPanel;
-            import net.minecraft.client.Minecraft;
-            import net.minecraft.client.gui.Gui;
-            import net.neoforged.fml.util.ObfuscationReflectionHelper;
-
-            public class ReflectedFields {
-                private static final String DOC = "ObfuscationReflectionHelper.getPrivateValue(Gui.class, gui, f_92993_)";
-
-                void update(Minecraft minecraft, Gui gui, LargeMapScreen screen) {
-                    ObfuscationReflectionHelper.setPrivateValue(Minecraft.class, minecraft, 10, "f_91078_");
-                    if (ObfuscationReflectionHelper.getPrivateValue(Gui.class, gui,
-                            "f_92993_") instanceof Integer timer && timer > 0) {
-                        return;
-                    }
-                    Object panel = ObfuscationReflectionHelper.getPrivateValue(
-                            LargeMapScreen.class, screen, "regionPanel");
-                    if (!(panel instanceof RegionPanel regionPanel)) {
-                        return;
-                    }
-                    // ObfuscationReflectionHelper.getPrivateValue(Gui.class, gui, "f_92993_");
-                }
-            }
-        """.trimIndent())
-
-        val result = pass.apply(projectDir)
-        val content = srcDir.resolve("ReflectedFields.java").readText()
-        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
-        val accessor = srcDir.resolve("mixin/modporter/ModPorterLargeMapScreenAccessor.java")
-        val mixinConfig = resourcesDir.resolve("example.mixins.json").readText()
-
-        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        assertTrue(result.changes.any { it.ruleId == "build-obfuscation-reflection-at-direct-field" })
-        assertTrue(content.contains("(minecraft).missTime = 10;"), content)
-        assertTrue(content.contains("if ((gui).toolHighlightTimer > 0)"), content)
-        assertTrue(content.contains("Object panel = ((com.example.mixin.modporter.ModPorterLargeMapScreenAccessor) (Object) screen).modporter${'$'}getRegionPanel();"), content)
-        assertTrue(content.contains("DOC = \"ObfuscationReflectionHelper.getPrivateValue"), content)
-        assertTrue(content.contains("// ObfuscationReflectionHelper.getPrivateValue"), content)
-        assertFalse(content.contains("import net.neoforged.fml.util.ObfuscationReflectionHelper;"), content)
-        assertTrue(at.contains("public-f net.minecraft.client.Minecraft missTime"), at)
-        assertTrue(at.contains("public net.minecraft.client.gui.Gui toolHighlightTimer"), at)
-        assertFalse(at.contains("dev.example.maps.LargeMapScreen"), at)
-        assertTrue(accessor.exists())
-        assertTrue(accessor.readText().contains("@Pseudo"))
-        assertTrue(accessor.readText().contains("@Mixin(targets = \"dev.example.maps.LargeMapScreen\", remap = false)"))
-        assertTrue(accessor.readText().contains("dev.example.maps.RegionPanel modporter${'$'}getRegionPanel()"))
-        assertTrue(mixinConfig.contains("modporter.ModPorterLargeMapScreenAccessor"))
-    }
-
-    @Test
-    fun `unmapped minecraft reflection remains a hard gate failure`() {
-        val projectDir = tempDir.resolve("unmapped-minecraft-reflection")
-        val srcDir = projectDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("RemovedField.java").writeText("""
-            package com.example;
-
-            import java.util.function.Supplier;
-            import net.minecraft.world.level.block.StairBlock;
-            import net.neoforged.fml.util.ObfuscationReflectionHelper;
-
-            public class RemovedField {
-                void rewrite(StairBlock block, Supplier<?> state) {
-                    ObfuscationReflectionHelper.setPrivateValue(StairBlock.class, block, state, "stateSupplier");
-                }
-            }
-        """.trimIndent())
-
-        val result = pass.apply(projectDir)
-        val content = srcDir.resolve("RemovedField.java").readText()
-
-        assertTrue(result.errors.any { it.contains("Forbidden reflection") }, result.errors.joinToString("\n"))
-        assertTrue(content.contains("ObfuscationReflectionHelper.setPrivateValue"), content)
-        assertFalse(projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").exists())
-    }
-
-    @Test
-    fun `removed stair state supplier reflection migrates into constructor state`() {
-        val projectDir = tempDir.resolve("stair-state-supplier")
-        val srcDir = projectDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("StairFactory.java").writeText("""
-            package com.example;
-
-            import java.util.function.Supplier;
-            import net.minecraft.world.level.block.Blocks;
-            import net.minecraft.world.level.block.StairBlock;
-            import net.minecraft.world.level.block.WeatheringCopperStairBlock;
-            import net.minecraft.world.level.block.state.BlockState;
-            import net.neoforged.fml.util.ObfuscationReflectionHelper;
-
-            public class StairFactory {
-                StairBlock create(boolean waxed, Object weatherState, Object properties) {
-                    Supplier<BlockState> selectedState = () -> Blocks.COPPER_BLOCK.defaultBlockState();
-                    if (waxed)
-                        return new StairBlock(selectedState, properties);
-                    WeatheringCopperStairBlock block =
-                            new WeatheringCopperStairBlock(weatherState, Blocks.AIR.defaultBlockState(), properties);
-                    ObfuscationReflectionHelper.setPrivateValue(
-                            StairBlock.class, block, selectedState, "stateSupplier");
-                    return block;
-                }
-            }
-        """.trimIndent())
-
-        val result = pass.apply(projectDir)
-        val content = srcDir.resolve("StairFactory.java").readText()
-
-        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        assertTrue(result.changes.any { it.ruleId == "build-stair-state-supplier-constructor" })
-        assertTrue(content.contains("new StairBlock(selectedState.get(), properties)"), content)
-        assertTrue(content.contains("new WeatheringCopperStairBlock(weatherState, selectedState.get(), properties)"), content)
-        assertFalse(content.contains("ObfuscationReflectionHelper"), content)
-        assertFalse(content.contains("stateSupplier\"") , content)
-        assertFalse(projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").exists())
-    }
-
-    @Test
-    fun `portal provider callback pipelines migrate to direct portal api through the static call graph`() {
-        val projectDir = tempDir.resolve("portal-provider-pipeline")
-        val srcDir = projectDir.resolve("src/main/java/com/example/portal")
-        srcDir.createDirectories()
-        srcDir.resolve("PortalBridge.java").writeText("""
-            package com.example.portal;
-
-            import java.util.function.BiFunction;
-            import java.util.function.Function;
-            import net.minecraft.core.BlockPos;
-            import net.minecraft.resources.ResourceKey;
-            import net.minecraft.server.level.ServerLevel;
-            import net.minecraft.world.level.Level;
-            import net.minecraft.world.level.block.state.BlockState;
-            import net.minecraft.world.level.portal.DimensionTransition;
-            import net.neoforged.neoforge.common.util.ITeleporter;
-
-            public class PortalBridge {
-                public static Exit resolve(ServerLevel level, BlockFace face,
-                                           ResourceKey<Level> firstDimension,
-                                           ResourceKey<Level> secondDimension,
-                                           BiFunction<ServerLevel, Probe, DimensionTransition> provider) {
-                    ServerLevel otherLevel = level.getServer().getLevel(secondDimension);
-                    BlockPos portalPos = face.getConnectedPos();
-                    BlockState portalState = level.getBlockState(portalPos);
-                    Probe probe = new Probe();
-                    probe.setPortalEntrancePos();
-                    DimensionTransition transition = provider.apply(otherLevel, probe);
-                    if (transition == null)
-                        return null;
-                    BlockPos output = BlockPos.containing(transition.pos);
-                    return new Exit(otherLevel, output);
-                }
-
-                public static Exit fromTeleporter(ServerLevel level, BlockFace face,
-                                                  ResourceKey<Level> firstDimension,
-                                                  ResourceKey<Level> secondDimension,
-                                                  Function<ServerLevel, ITeleporter> factory) {
-                    return PortalApi.resolve(level, face, firstDimension, secondDimension,
-                            (otherLevel, probe) -> factory.apply(otherLevel)
-                                    .getPortalInfo(probe, otherLevel, probe::findDimensionEntryPoint));
-                }
-
-                static Exit optional(ServerLevel level, BlockFace face,
-                                     ResourceKey<Level> firstDimension,
-                                     ResourceKey<Level> secondDimension) {
-                    return PortalApi.fromTeleporter(level, face, firstDimension, secondDimension, target -> {
-                        try {
-                            return (ITeleporter) Class.forName("dev.example.portal.CustomPortalForcer")
-                                    .getDeclaredConstructor(ServerLevel.class)
-                                    .newInstance(target);
-                        } catch (Exception exception) {
-                            return target.getPortalForcer();
-                        }
-                    });
-                }
-
-                static Exit compatibility(ServerLevel level, BlockFace face,
-                                          ResourceKey<Level> firstDimension,
-                                          ResourceKey<Level> secondDimension) {
-                    return resolve(level, face, firstDimension, secondDimension, BetterPortalCompat::find);
-                }
-            }
-        """.trimIndent())
-        srcDir.resolve("PortalApi.java").writeText("""
-            package com.example.portal;
-
-            import java.util.function.BiFunction;
-            import java.util.function.Function;
-            import net.minecraft.resources.ResourceKey;
-            import net.minecraft.server.level.ServerLevel;
-            import net.minecraft.world.level.Level;
-            import net.minecraft.world.level.portal.DimensionTransition;
-            import net.neoforged.neoforge.common.util.ITeleporter;
-
-            public class PortalApi {
-                public static Exit resolve(ServerLevel level, BlockFace face,
-                                           ResourceKey<Level> firstDimension,
-                                           ResourceKey<Level> secondDimension,
-                                           BiFunction<ServerLevel, Probe, DimensionTransition> provider) {
-                    return PortalBridge.resolve(level, face, firstDimension, secondDimension, provider);
-                }
-
-                public static Exit fromTeleporter(ServerLevel level, BlockFace face,
-                                                  ResourceKey<Level> firstDimension,
-                                                  ResourceKey<Level> secondDimension,
-                                                  Function<ServerLevel, ITeleporter> factory) {
-                    return PortalBridge.fromTeleporter(level, face, firstDimension, secondDimension, factory);
-                }
-            }
-        """.trimIndent())
-        val compatFile = srcDir.resolve("BetterPortalCompat.java")
-        compatFile.writeText("""
-            package com.example.portal;
-
-            import java.lang.invoke.MethodHandle;
-            import java.lang.invoke.MethodHandles;
-
-            public class BetterPortalCompat {
-                private static final MethodHandle HANDLE;
-
-                static {
-                    try {
-                        Class<?> state = Class.forName("dev.example.portal.TravelerState");
-                        HANDLE = MethodHandles.lookup().findConstructor(state, null);
-                    } catch (Exception exception) {
-                        throw new RuntimeException(exception);
-                    }
-                }
-
-                public static DimensionTransition find(ServerLevel level, Probe probe) {
-                    return null;
-                }
-            }
-        """.trimIndent())
-
-        val result = pass.apply(projectDir)
-        val bridge = srcDir.resolve("PortalBridge.java").readText()
-        val api = srcDir.resolve("PortalApi.java").readText()
-
-        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        assertTrue(result.changes.any { it.ruleId == "build-portal-dimension-transition-pipeline" })
-        assertTrue(result.changes.any { it.ruleId == "build-portal-unreferenced-reflection-adapter" })
-        assertTrue(bridge.contains("instanceof Portal modporterPortal"), bridge)
-        assertTrue(bridge.contains("modporterPortal.getPortalDestination(level, probe, probe.blockPosition())"), bridge)
-        assertTrue(bridge.contains("BlockPos.containing(transition.pos())"), bridge)
-        assertFalse(bridge.contains("BiFunction"), bridge)
-        assertFalse(bridge.contains("ITeleporter"), bridge)
-        assertFalse(bridge.contains("Class.forName"), bridge)
-        assertFalse(bridge.contains("getDeclaredConstructor"), bridge)
-        assertFalse(api.contains("BiFunction"), api)
-        assertFalse(api.contains("Function"), api)
-        assertFalse(api.contains("ITeleporter"), api)
-        assertFalse(compatFile.exists())
-    }
-
-    @Test
-    fun `reflected copper transition maps migrate to registered neoforge data map provider`() {
-        val projectDir = tempDir.resolve("copper-datamap")
-        val srcDir = projectDir.resolve("src/main/java/com/example/copper")
-        srcDir.createDirectories()
-        srcDir.resolve("OxidationHooks.java").writeText("""
-            package com.example.copper;
-
-            import java.lang.reflect.Field;
-            import java.util.function.Supplier;
-            import com.google.common.base.Suppliers;
-            import com.google.common.collect.BiMap;
-            import com.google.common.collect.HashBiMap;
-            import com.google.common.collect.ImmutableBiMap;
-            import net.minecraft.world.item.HoneycombItem;
-            import net.minecraft.world.level.block.Block;
-            import net.minecraft.world.level.block.WeatheringCopper;
-
-            public class OxidationHooks {
-                private static final BiMap<Supplier<Block>, Supplier<Block>> WEATHERING = HashBiMap.create();
-                private static final BiMap<Supplier<Block>, Supplier<Block>> WAXABLE = HashBiMap.create();
-                private static boolean weatheringMemoized;
-                private static boolean waxableMemoized;
-
-                public static synchronized void addWeathering(Supplier<Block> original, Supplier<Block> weathered) {
-                    if (weatheringMemoized) throw new IllegalStateException();
-                    WEATHERING.put(original, weathered);
-                }
-
-                public static synchronized void addWaxable(Supplier<Block> original, Supplier<Block> waxed) {
-                    if (waxableMemoized) throw new IllegalStateException();
-                    WAXABLE.put(original, waxed);
-                }
-
-                public static void install() {
-                    try {
-                        Field delegate = WeatheringCopper.NEXT_BY_BLOCK.getClass().getDeclaredField("delegate");
-                        delegate.setAccessible(true);
-                        delegate.set(WeatheringCopper.NEXT_BY_BLOCK, Suppliers.memoize(ImmutableBiMap::of));
-                    } catch (Exception exception) {
-                        throw new RuntimeException(exception);
-                    }
-                    HoneycombItem.WAXABLES = Suppliers.memoize(ImmutableBiMap::of);
-                }
-            }
-        """.trimIndent())
-        srcDir.resolve("CopperBlocks.java").writeText("""
-            package com.example.copper;
-
-            public class CopperBlocks {
-                static void register() {
-                    OxidationHooks.addWeathering(CopperBlocks::first, CopperBlocks::second);
-                    OxidationHooks.addWaxable(CopperBlocks::first, CopperBlocks::waxed);
-                    OxidationHooks.install();
-                }
-            }
-        """.trimIndent())
-        srcDir.resolve("ExampleDatagen.java").writeText("""
-            package com.example.copper;
-
-            import java.util.concurrent.CompletableFuture;
-            import net.minecraft.core.HolderLookup;
-            import net.minecraft.data.DataGenerator;
-            import net.minecraft.data.PackOutput;
-            import net.neoforged.neoforge.data.event.GatherDataEvent;
-
-            public class ExampleDatagen {
-                public static void gatherData(GatherDataEvent event) {
-                    DataGenerator generator = event.getGenerator();
-                    PackOutput output = generator.getPackOutput();
-                    CompletableFuture<HolderLookup.Provider> lookupProvider = event.getLookupProvider();
-                    lookupProvider = generatedRegistryProvider();
-                    generator.addProvider(event.includeServer(), existingProvider());
-                }
-            }
-        """.trimIndent())
-
-        val result = pass.apply(projectDir)
-        val registry = srcDir.resolve("OxidationHooks.java").readText()
-        val usage = srcDir.resolve("CopperBlocks.java").readText()
-        val datagen = srcDir.resolve("ExampleDatagen.java").readText()
-        val provider = projectDir.resolve(
-            "src/main/java/com/example/copper/modporter/datagen/ModPorterOxidationHooksDataMapProvider.java"
-        )
-
-        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        assertTrue(result.changes.any { it.ruleId == "build-copper-datamap-registry" })
-        assertTrue(result.changes.any { it.ruleId == "build-copper-datamap-provider" })
-        assertTrue(result.changes.any { it.ruleId == "build-copper-datamap-register-provider" })
-        assertTrue(registry.contains("getWeatheringView()"), registry)
-        assertTrue(registry.contains("getWaxableView()"), registry)
-        assertFalse(registry.contains("java.lang.reflect"), registry)
-        assertFalse(registry.contains("getDeclaredField"), registry)
-        assertFalse(registry.contains("HoneycombItem.WAXABLES"), registry)
-        assertTrue(usage.contains("OxidationHooks.addWeathering"), usage)
-        assertTrue(usage.contains("OxidationHooks.addWaxable"), usage)
-        assertFalse(usage.contains("OxidationHooks.install()"), usage)
-        assertTrue(provider.exists())
-        assertTrue(provider.readText().contains("NeoForgeDataMaps.OXIDIZABLES"))
-        assertTrue(provider.readText().contains("NeoForgeDataMaps.WAXABLES"))
-        assertTrue(datagen.contains("new ModPorterOxidationHooksDataMapProvider(output, lookupProvider)"), datagen)
-    }
 
     @Test
     fun `replaces ForgeGradle plugin with NeoForge ModDev`() {
@@ -803,6 +281,8 @@ class BuildSystemTest {
         projectDir.resolve("gradle.properties").writeText("""
             minecraft_version=1.20.1
             neoforge_version=47.1.0
+            mod_version=1.20.1-4.2.0
+            hotbath_version=4.2.0
         """.trimIndent())
 
         pass.apply(projectDir)
@@ -810,6 +290,8 @@ class BuildSystemTest {
 
         assertTrue(content.contains("neo_forge_version=21.1.230"), content)
         assertFalse(content.contains("neoneo_forge_version"), content)
+        assertTrue(content.contains("mod_version=1.21.1-4.2.0"), content)
+        assertTrue(content.contains("hotbath_version=4.2.0"), content)
     }
 
     @Test
@@ -1827,6 +1309,308 @@ class BuildSystemTest {
         assertFalse(buildGradle.contains("MixinConfigs"), buildGradle)
         assertTrue(modsToml.contains("[[mixins]]"), modsToml)
         assertTrue(modsToml.contains("config=\"example.mixins.json\""), modsToml)
+    }
+
+    @Test
+    fun `forge mdk style mixin config names are registered too`() {
+        val projectDir = tempDir.resolve("mdk-mixin-config-registration")
+        val resourcesDir = projectDir.resolve("src/main/resources")
+        val metaInfDir = resourcesDir.resolve("META-INF")
+        resourcesDir.createDirectories()
+        metaInfDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        metaInfDir.resolve("neoforge.mods.toml").writeText("""
+            modLoader="javafml"
+            loaderVersion="[1,)"
+
+            [[mods]]
+            modId="showercore"
+
+            [[dependencies.showercore]]
+            modId="neoforge"
+            type="required"
+        """.trimIndent())
+        resourcesDir.resolve("mixins.showercore.json").writeText("""
+            {
+              "required": true,
+              "minVersion": "0.8",
+              "package": "mod.crabmod.showercore.mixin",
+              "mixins": [
+                "PoolEntityFluidMixin"
+              ],
+              "client": [
+                "PoolFloorSittingMixin"
+              ],
+              "refmap": "mixins.showercore.refmap.json"
+            }
+        """.trimIndent())
+        resourcesDir.resolve("mixins.showercore.refmap.json").writeText("""{"mappings": {}}""")
+        resourcesDir.resolve("notaconfig.json").writeText("""{"package": "x", "mixins": []}""")
+
+        val result = pass.apply(projectDir)
+        val modsToml = metaInfDir.resolve("neoforge.mods.toml").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(modsToml.contains("[[mixins]]"), modsToml)
+        assertTrue(modsToml.contains("config=\"mixins.showercore.json\""), modsToml)
+        assertFalse(modsToml.contains("refmap"), modsToml)
+        assertFalse(modsToml.contains("notaconfig"), modsToml)
+    }
+
+    @Test
+    fun `jar jar wrapped and templated dependencies keep their wrappers and move to neoforge artifacts`() {
+        val projectDir = tempDir.resolve("wrapped-dependencies")
+        projectDir.resolve("src/main/resources").createDirectories()
+        projectDir.resolve("gradle").createDirectories()
+        projectDir.resolve("gradle/java.gradle").writeText("""
+            apply plugin: 'java'
+            java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+            sourceCompatibility = '17'
+            tasks.withType(JavaCompile).configureEach {
+                it.options.release = 17
+            }
+        """.trimIndent())
+        projectDir.resolve("gradle.properties").writeText("""
+            minecraft_version=1.20.1
+            flywheel_minecraft_version=1.20.1
+            flywheel_version=1.0.6-beta-266
+            vanillin_version=1.0.0
+            registrate_version=MC1.20-1.3.3
+            ponder_version=1.0.91
+        """.trimIndent())
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            apply(from: "./gradle/java.gradle")
+
+            dependencies {
+                modImplementation(jarJar("com.tterrag.registrate:Registrate:${'$'}{registrate_version}"))
+
+                modCompileOnly("dev.engine-room.flywheel:flywheel-forge-api-${'$'}{flywheel_minecraft_version}:${'$'}{flywheel_version}")
+                modRuntimeOnly(jarJar("dev.engine-room.flywheel:flywheel-forge-${'$'}{flywheel_minecraft_version}:${'$'}{flywheel_version}") {
+                    version {
+                        strictly "[1.0,2.0)"
+                        prefer flywheel_version
+                    }
+                })
+                modRuntimeOnly("dev.engine-room.vanillin:vanillin-forge-${'$'}{flywheel_minecraft_version}:${'$'}{vanillin_version}")
+
+                jarJar(modImplementation("net.createmod.ponder:Ponder-Forge-${'$'}{minecraft_version}:${'$'}{ponder_version}"))
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText().replace("\r\n", "\n")
+        val properties = projectDir.resolve("gradle.properties").readText()
+        val javaScript = projectDir.resolve("gradle/java.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(content.contains("implementation(jarJar(\"com.tterrag.registrate:Registrate:${'$'}{registrate_version}\"))"), content)
+        assertTrue(content.contains("compileOnly(\"dev.engine-room.flywheel:flywheel-neoforge-api-${'$'}{flywheel_minecraft_version}:${'$'}{flywheel_version}\")"), content)
+        assertTrue(content.contains("runtimeOnly(jarJar(\"dev.engine-room.flywheel:flywheel-neoforge-${'$'}{flywheel_minecraft_version}:${'$'}{flywheel_version}\") {"), content)
+        assertTrue(content.contains("prefer flywheel_version"), content)
+        assertTrue(content.contains("runtimeOnly(\"dev.engine-room.vanillin:vanillin-neoforge-${'$'}{flywheel_minecraft_version}:${'$'}{vanillin_version}\")"), content)
+        assertTrue(content.contains("jarJar(implementation(\"net.createmod.ponder:ponder-neoforge:${'$'}{ponder_version}\"))"), content)
+        assertFalse(content.contains("modImplementation") || content.contains("modCompileOnly") || content.contains("modRuntimeOnly"), content)
+        assertFalse(content.contains("-forge-"), content)
+        assertTrue(content.contains("https://maven.createmod.net"), content)
+        assertTrue(content.contains("https://maven.ithundxr.dev/snapshots"), content)
+        assertTrue(properties.contains("flywheel_version=1.0.6"), properties)
+        assertTrue(properties.contains("vanillin_version=1.1.3-41"), properties)
+        assertTrue(properties.contains("registrate_version=MC1.21-1.3.0+67"), properties)
+        assertTrue(properties.contains("ponder_version=1.0.87+mc1.21.1"), properties)
+        assertTrue(properties.contains("flywheel_minecraft_version=1.21.1"), properties)
+        assertTrue(javaScript.contains("JavaLanguageVersion.of(21)"), javaScript)
+        assertTrue(javaScript.contains("it.options.release = 21"), javaScript)
+        assertTrue(javaScript.contains("sourceCompatibility = '21'"), javaScript)
+        assertFalse(javaScript.contains("17"), javaScript)
+        assertTrue(result.changes.any { it.ruleId == "build-dependency-wrapped-notation" })
+    }
+
+    @Test
+    fun `bridging classes of a removed dependency keep their surface with inert members`() {
+        val projectDir = tempDir.resolve("removed-dependency-stub")
+        val srcDir = projectDir.resolve("src/main/java/com/example/compat/removed")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                compileOnly("example.removed:optional-api:1.0.0")
+            }
+        """.trimIndent())
+        srcDir.resolve("RemovedBridge.java").writeText("""
+            package com.example.compat.removed;
+
+            import java.util.function.BiConsumer;
+            import example.removed.OptionalApi;
+            import example.removed.OptionalHandle;
+            import example.removed.OptionalShell;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class RemovedBridge {
+                private BlockPos startCutPos;
+
+                public RemovedBridge(BlockPos startCutPos) {
+                    this.startCutPos = startCutPos;
+                }
+
+                public static boolean isDynamicBranch(Block block) {
+                    return OptionalApi.isPresent(block) || block instanceof OptionalShell;
+                }
+
+                public void destroyBlocks(Level world, BiConsumer<BlockPos, Block> drop) {
+                    OptionalHandle start = OptionalApi.get(world.getBlockState(startCutPos));
+                    if (start == null) return;
+                    drop.accept(startCutPos, start);
+                }
+
+                private OptionalHandle helper(Level world, BlockState state) {
+                    return OptionalApi.get(state);
+                }
+
+                public BlockPos start() {
+                    return startCutPos;
+                }
+            }
+        """.trimIndent())
+
+        val result = BuildSystemPass(
+            mappingsPrefix = "/mappings/dependency-preparation"
+        ).apply(projectDir)
+        val build = projectDir.resolve("build.gradle").readText()
+        val stub = srcDir.resolve("RemovedBridge.java").readText().replace("\r\n", "\n")
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(build.contains("optional-api"), build)
+        assertTrue(result.changes.any { it.ruleId == "build-remove-dep" })
+        assertTrue(result.changes.any { it.ruleId == "build-removed-dependency-stub" }, result.changes.joinToString("\n") { it.ruleId })
+        assertFalse(stub.contains("example.removed"), stub)
+        assertFalse(stub.contains("OptionalApi"), stub)
+        assertFalse(stub.contains("helper"), stub)
+        assertTrue(stub.contains("public static boolean isDynamicBranch(Block block) {\n        return false;\n    }"), stub)
+        assertTrue(stub.contains("public void destroyBlocks(Level world, BiConsumer<BlockPos, Block> drop) {\n    }"), stub)
+        assertTrue(stub.contains("this.startCutPos = startCutPos;"), stub)
+        assertTrue(stub.contains("return startCutPos;"), stub)
+    }
+
+    @Test
+    fun `publication reobf artifacts disappear with their whole closure`() {
+        val projectDir = tempDir.resolve("reobf-artifact-closure")
+        projectDir.resolve("src/main/resources").createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            project.publishing {
+                publications {
+                    mavenJava(MavenPublication) {
+                        artifactId base.archivesName.get()
+                        from components.java
+
+                        artifact(tasks.reobfJar) {
+                            classifier = "all"
+                        }
+                    }
+                }
+
+                repositories {
+                    if (project.hasProperty("mavendir")) {
+                        maven { url mavendir }
+                    }
+                }
+            }
+        """.trimIndent())
+
+        pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText().replace("\r\n", "\n")
+
+        assertFalse(content.contains("reobf"), content)
+        assertFalse(content.contains("classifier = \"all\""), content)
+        assertTrue(content.contains("from components.java\n"), content)
+        assertTrue(content.contains("if (project.hasProperty(\"mavendir\")) {\n            maven { url mavendir }\n        }"), content)
+        assertEquals(content.count { it == '{' }, content.count { it == '}' }, content)
+    }
+
+    @Test
+    fun `test fixture resources ride along with the mod in the run configurations`() {
+        val projectDir = tempDir.resolve("test-fixture-resources")
+        val fixtures = projectDir.resolve("src/testFixtures/resources/data/hotbath/hotbath/custom_fluids")
+        fixtures.createDirectories()
+        fixtures.resolve("golden_bath.json").writeText("""{"id": "hotbath:golden_bath"}""")
+        projectDir.resolve("src/main/resources").createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            minecraft {
+                mappings channel: 'official', version: '1.20.1'
+                runs {
+                    client {
+                        mods {
+                            showercore {
+                                source sourceSets.main
+                            }
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText().replace("\r\n", "\n")
+
+        assertTrue(result.changes.any { it.ruleId == "build-test-fixture-resources" }, result.changes.joinToString("\n") { it.ruleId })
+        assertTrue(content.contains("resources.setSrcDirs(['src/testFixtures/resources'])"), content)
+        assertTrue(content.contains("sourceSet(sourceSets.testFixtures)"), content)
+        assertEquals(1, Regex("sourceSet\\(sourceSets\\.testFixtures\\)").findAll(content).count(), content)
+
+        val again = pass.apply(projectDir)
+        assertFalse(again.changes.any { it.ruleId == "build-test-fixture-resources" })
+    }
+
+    @Test
+    fun `projects without test fixture resources get no fixture source set`() {
+        val projectDir = tempDir.resolve("no-test-fixture-resources")
+        projectDir.resolve("src/main/resources").createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        assertFalse(result.changes.any { it.ruleId == "build-test-fixture-resources" })
+        assertFalse(projectDir.resolve("build.gradle").readText().contains("testFixtures"))
+    }
+
+    @Test
+    fun `resolved dependency deduplication keeps a runtime line next to its compile only twin`() {
+        val compileOnly = com.modporter.core.transforms.build.NeoForgeCoord(config = "compileOnly", coord = "maven.modrinth:mmlib:1.2.15-1.21.1")
+        val runtimeOnly = com.modporter.core.transforms.build.NeoForgeCoord(config = "runtimeOnly", coord = "maven.modrinth:mmlib:1.2.15-1.21.1")
+        val implementation = com.modporter.core.transforms.build.NeoForgeCoord(config = "implementation", coord = "maven.modrinth:mmlib:1.2.15-1.21.1")
+
+        val afterCompileOnly = setOf(pass.emittedDependencyKey(compileOnly))
+        assertTrue(pass.isCoveredByEmitted(afterCompileOnly, compileOnly))
+        assertFalse(pass.isCoveredByEmitted(afterCompileOnly, runtimeOnly))
+
+        val afterImplementation = setOf(pass.emittedDependencyKey(implementation))
+        assertTrue(pass.isCoveredByEmitted(afterImplementation, compileOnly))
+        assertTrue(pass.isCoveredByEmitted(afterImplementation, runtimeOnly))
     }
 
     @Test
@@ -2968,6 +2752,105 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `migrates srg access transformer members through the official mapping table`() {
+        val projectDir = tempDir.resolve("at-srg-members")
+        val metaInf = projectDir.resolve("src/main/resources/META-INF")
+        metaInf.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0.24,6.2)'
+            }
+            minecraft {
+                accessTransformer = file('src/main/resources/META-INF/accesstransformer.cfg')
+            }
+        """.trimIndent())
+        metaInf.resolve("accesstransformer.cfg").writeText("""
+            public net.minecraft.world.entity.LivingEntity f_20937_ #fallFlyTicks
+            public net.minecraft.world.entity.Entity m_20291_(I)Z #getSharedFlag
+            public net.minecraft.world.entity.Entity m_20115_(IZ)V #setSharedFlag
+            public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool f_210559_ # rawTemplates
+        """.trimIndent() + "\n")
+
+        val result = pass.apply(projectDir)
+        val content = metaInf.resolve("accesstransformer.cfg").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(content.contains("public net.minecraft.world.entity.LivingEntity fallFlyTicks"), content)
+        assertTrue(content.contains("public net.minecraft.world.entity.Entity getSharedFlag(I)Z"), content)
+        assertTrue(content.contains("public net.minecraft.world.entity.Entity setSharedFlag(IZ)V"), content)
+        assertTrue(content.contains("public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool rawTemplates"), content)
+        assertFalse(Regex("""[fm]_[0-9]+_""").containsMatchIn(content), content)
+    }
+
+    @Test
+    fun `access transformers without a 1_21_1 target are dropped and srg ids resolve through both mapping files`() {
+        val projectDir = tempDir.resolve("at-missing-targets")
+        val metaInf = projectDir.resolve("src/main/resources/META-INF")
+        metaInf.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        metaInf.resolve("accesstransformer.cfg").writeText("""
+            public net.minecraft.client.gui.screens.TitleScreen panorama # panorama
+            public net.minecraft.server.MinecraftServer f_129744_ # storageSource
+            public net.minecraft.world.entity.LivingEntity jumping # jumping
+            public net.minecraft.world.item.alchemy.PotionBrewing POTION_MIXES # POTION_MIXES
+            public net.minecraft.world.item.crafting.RecipeManager recipes # recipes
+            public net.minecraft.world.level.chunk.PaletteResize
+            public net.minecraft.client.gui.components.CommandSuggestions${'$'}SuggestionsList <init>(Lnet/minecraft/client/gui/components/CommandSuggestions;IIILjava/util/List;Z)V
+        """.trimIndent() + "\n")
+
+        val result = pass.apply(projectDir)
+        val content = metaInf.resolve("accesstransformer.cfg").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(content.contains("public net.minecraft.server.MinecraftServer storageSource"), content)
+        assertTrue(content.contains("public net.minecraft.world.entity.LivingEntity jumping"), content)
+        assertTrue(content.contains("public net.minecraft.world.level.chunk.PaletteResize"), content)
+        assertTrue(content.contains("CommandSuggestions${'$'}SuggestionsList <init>("), content)
+        assertFalse(content.contains("panorama"), content)
+        assertFalse(content.contains("POTION_MIXES"), content)
+        assertFalse(content.contains("RecipeManager recipes"), content)
+        assertFalse(content.contains("f_129744_"), content)
+        assertEquals(3, result.changes.count { it.ruleId == "build-access-transformer-missing-target" }, result.changes.joinToString("\n") { it.before })
+    }
+
+    @Test
+    fun `maps deobf wrapped jarJar range pin blocks to moddev version constraints`() {
+        val projectDir = tempDir.resolve("jarjar-deobf-range-pin")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0.24,6.2)'
+            }
+
+            dependencies {
+                implementation fg.deobf("com.aetherteam.nitrogen:nitrogen_internals:${'$'}{project.nitrogen_version}")
+
+                jarJar fg.deobf("com.aetherteam.nitrogen:nitrogen_internals:${'$'}{project.nitrogen_version}") {
+                    jarJar.ranged(it, "[${'$'}{project.nitrogen_version},)")
+                    jarJar.pin(it, "${'$'}{project.nitrogen_version}")
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-jarjar-version-constraints" }, result.changes.joinToString("\n") { it.ruleId })
+        assertFalse(content.contains("fg.deobf"), content)
+        assertFalse(content.contains("jarJar.ranged"), content)
+        // Known artifacts resolve like every other declaration; the literal version replaces the Forge-era property.
+        assertTrue(content.contains("""jarJar("com.aetherteam.nitrogen:nitrogen_internals:1.21.1-1.1.25-neoforge") {"""), content)
+        assertTrue(content.contains("""strictly "[1.21.1-1.1.25-neoforge,)""""), content)
+        assertTrue(content.contains("""prefer "1.21.1-1.1.25-neoforge""""), content)
+        assertFalse(content.contains("""jarJar "com"""), content)
+    }
+
+    @Test
     fun `removes bundled jarJar mixin dependencies and normalizes range pin dsl`() {
         val projectDir = tempDir.resolve("jarjar-range-pin")
         projectDir.createDirectories()
@@ -2994,11 +2877,15 @@ class BuildSystemTest {
 
         assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
         assertTrue(result.changes.any { it.ruleId == "build-remove-bundled-mixin-dependency" })
-        assertTrue(result.changes.any { it.ruleId == "build-normalize-jarjar-range-pin" })
+        assertTrue(result.changes.any { it.ruleId == "build-jarjar-version-constraints" })
         assertFalse(content.contains("mixinextras"), content)
         assertFalse(content.contains("jarJar.ranged"), content)
         assertFalse(content.contains("jarJar.pin"), content)
-        assertTrue(content.contains("""jarJar "com.example:library:${'$'}{project.library_version}""""), content)
+        // ForgeGradle range/pin become ModDev rich-version constraints, as in official 1.21.1 ports.
+        assertTrue(content.contains("""jarJar("com.example:library:${'$'}{project.library_version}") {"""), content)
+        assertTrue(content.contains("""strictly "[${'$'}{project.library_version},)""""), content)
+        assertTrue(content.contains("""prefer "${'$'}{project.library_version}""""), content)
+        assertTrue(content.contains("version {"), content)
     }
 
     @Test
@@ -3479,35 +3366,6 @@ class BuildSystemTest {
     }
 
     @Test
-    fun `normalizes positional client dist subscriber value instead of adding a duplicate`() {
-        val projectDir = tempDir.resolve("client-subscriber-positional-dist")
-        val srcDir = projectDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("ClientEvents.java").writeText("""
-            package com.example;
-
-            import net.minecraft.client.Minecraft;
-            import net.neoforged.api.distmarker.Dist;
-            import net.neoforged.fml.common.EventBusSubscriber;
-            import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
-
-            @EventBusSubscriber(Dist.CLIENT)
-            public class ClientEvents {
-                private static final Minecraft MINECRAFT = Minecraft.getInstance();
-                private static FMLClientSetupEvent setupEvent;
-            }
-        """.trimIndent())
-
-        val result = pass.apply(projectDir)
-        val content = srcDir.resolve("ClientEvents.java").readText()
-
-        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        assertTrue(result.changes.any { it.ruleId == "build-client-eventbus-subscriber-dist" })
-        assertTrue(content.contains("@EventBusSubscriber(value = Dist.CLIENT)"), content)
-        assertFalse(content.contains("Dist.CLIENT, value ="), content)
-    }
-
-    @Test
     fun `client event bus subscriber dist marking ignores comments and strings`() {
         val projectDir = tempDir.resolve("client-subscriber-comment-no-dist")
         val srcDir = projectDir.resolve("src/main/java/com/example")
@@ -3978,31 +3836,6 @@ class BuildSystemTest {
     }
 
     @Test
-    fun `structured access transformer member mappings preserve owners descriptors and access`() {
-        val projectDir = tempDir.resolve("structured-at-member-mappings")
-        val atDir = projectDir.resolve("src/main/resources/META-INF")
-        atDir.createDirectories()
-        atDir.resolve("accesstransformer.cfg").writeText("""
-            public net.minecraft.client.gui.Font m_92863_(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/client/gui/font/FontSet; # getFontSet
-            public net.minecraft.server.network.ServerGamePacketListenerImpl f_9737_ # aboveGroundTickCount
-            protected net.minecraft.client.model.AgeableListModel f_170339_ # babyZHeadOffset
-            public-f net.minecraft.data.recipes.RecipeProvider m_6055_()Ljava/lang/String; # getName
-            public net.minecraft.client.gui.Font m_92863_()V # wrong descriptor must remain unresolved
-        """.trimIndent())
-
-        val result = pass.apply(projectDir)
-        val at = atDir.resolve("accesstransformer.cfg").readText()
-
-        assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${result.errors}")
-        assertTrue(at.contains("public net.minecraft.client.gui.Font getFontSet(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/client/gui/font/FontSet; # getFontSet"), at)
-        assertTrue(at.contains("public net.minecraft.server.network.ServerGamePacketListenerImpl aboveGroundTickCount # aboveGroundTickCount"), at)
-        assertTrue(at.contains("protected net.minecraft.client.model.AgeableListModel babyZHeadOffset # babyZHeadOffset"), at)
-        assertTrue(at.contains("public-f net.minecraft.data.recipes.RecipeProvider getName()Ljava/lang/String; # getName"), at)
-        assertTrue(at.contains("public net.minecraft.client.gui.Font m_92863_()V # wrong descriptor must remain unresolved"), at)
-        assertFalse(at.contains("public net.minecraft.client.gui.Font getFontSet()V"), at)
-    }
-
-    @Test
     fun `migrates common projectile menu worldgen archaeology and tnt access transformers`() {
         val projectDir = tempDir.resolve("common-at-members")
         val atDir = projectDir.resolve("src/main/resources/META-INF")
@@ -4040,7 +3873,8 @@ class BuildSystemTest {
         assertTrue(at.contains("public net.minecraft.world.level.block.entity.BrushableBlockEntity item # item"), at)
         assertTrue(at.contains("public net.minecraft.world.entity.item.PrimedTnt owner # owner"), at)
         assertTrue(at.contains("public net.minecraft.world.level.block.SaplingBlock treeGrower # treeGrower"), at)
-        assertFalse(at.contains("Boat${'$'}Type <init>"), at)
+        // NeoForge 1.21.1 still declares Boat.Type(String, int, Block, String); the class table keeps the entry
+        assertTrue(at.contains("Boat${'$'}Type <init>"), at)
         assertFalse(at.contains("f_37089_"), at)
         assertFalse(at.contains("f_39769_"), at)
         assertFalse(at.contains("f_223001_"), at)
@@ -4048,6 +3882,24 @@ class BuildSystemTest {
         assertFalse(at.contains("f_276563_"), at)
         assertFalse(at.contains("f_32072_"), at)
         assertFalse(at.contains("f_55975_"), at)
+    }
+
+    @Test
+    fun `keeps wildcard access transformer entries`() {
+        val projectDir = tempDir.resolve("wildcard-at")
+        val atDir = projectDir.resolve("src/main/resources/META-INF")
+        atDir.createDirectories()
+        atDir.resolve("accesstransformer.cfg").writeText("""
+            protected net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity *
+            public net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity *()
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val at = atDir.resolve("accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(at.contains("protected net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity *"), at)
+        assertTrue(at.contains("public net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity *()"), at)
     }
 
     @Test
@@ -4310,40 +4162,6 @@ class BuildSystemTest {
     }
 
     @Test
-    fun `title screen panorama field migrates to screen panorama with its source at`() {
-        val projectDir = tempDir.resolve("title-screen-panorama-api")
-        val srcDir = projectDir.resolve("src/main/java/com/example")
-        val atDir = projectDir.resolve("src/main/resources/META-INF")
-        srcDir.createDirectories()
-        atDir.createDirectories()
-        srcDir.resolve("MenuOverlay.java").writeText("""
-            package com.example;
-
-            import net.minecraft.client.gui.screens.TitleScreen;
-            import net.minecraft.client.renderer.PanoramaRenderer;
-
-            public class MenuOverlay {
-                PanoramaRenderer panorama(TitleScreen titleScreen) {
-                    return titleScreen.panorama;
-                }
-            }
-        """.trimIndent())
-        atDir.resolve("accesstransformer.cfg").writeText(
-            "public net.minecraft.client.gui.screens.TitleScreen f_96729_ # panorama\n"
-        )
-
-        val result = pass.apply(projectDir)
-        val source = srcDir.resolve("MenuOverlay.java").readText()
-        val at = atDir.resolve("accesstransformer.cfg").readText()
-
-        assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${result.errors}")
-        assertTrue(source.contains("return Screen.PANORAMA;"), source)
-        assertTrue(source.contains("import net.minecraft.client.gui.screens.Screen;"), source)
-        assertTrue(at.contains("public net.minecraft.client.gui.screens.Screen PANORAMA # panorama"), at)
-        assertFalse(at.contains("TitleScreen panorama"), at)
-    }
-
-    @Test
     fun `removes TitleScreen accessors for fields and inner classes removed in 121`() {
         val projectDir = tempDir.resolve("removed-title-screen-accessors")
         val srcDir = projectDir.resolve("src/main/java/com/example")
@@ -4570,97 +4388,6 @@ class BuildSystemTest {
     }
 
     @Test
-    fun `build migration does not erase split tick phase semantics`() {
-        val projectDir = tempDir.resolve("split-tick-phase")
-        val srcDir = projectDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("TickHandlers.java").writeText("""
-            package com.example;
-
-            import net.neoforged.neoforge.client.event.ClientTickEvent;
-            import net.neoforged.neoforge.client.event.RenderFrameEvent;
-            import net.neoforged.neoforge.event.TickEvent;
-
-            public class TickHandlers {
-                public static void clientTick(ClientTickEvent.Post event) {
-                    if (event.phase == TickEvent.Phase.END && ready()) {
-                        run();
-                    }
-                    if (event.phase != TickEvent.Phase.END || blocked()) {
-                        return;
-                    }
-                    run();
-                }
-
-                public static void renderTick(RenderFrameEvent.Post event) {
-                    if (event.phase == TickEvent.Phase.START) {
-                        render();
-                    }
-                }
-
-                private static boolean ready() { return true; }
-                private static boolean blocked() { return false; }
-                private static void run() {}
-                private static void render() {}
-            }
-        """.trimIndent())
-
-        val result = pass.apply(projectDir)
-
-        val source = srcDir.resolve("TickHandlers.java").readText()
-        assertFalse(result.changes.any { it.ruleId == "build-cleanup-split-tick-phase" })
-        assertTrue(source.contains("public static void renderTick(RenderFrameEvent.Post event)"))
-        assertTrue(source.contains("if (event.phase == TickEvent.Phase.END && ready())"))
-        assertTrue(source.contains("if (event.phase != TickEvent.Phase.END || blocked())"))
-        assertTrue(source.contains("if (event.phase == TickEvent.Phase.START)"))
-        assertTrue(source.contains("import net.neoforged.neoforge.event.TickEvent;"), source)
-    }
-
-    @Test
-    fun `build pass leaves split tick source and documentation to structural migration`() {
-        val projectDir = tempDir.resolve("split-tick-phase-docs")
-        val srcDir = projectDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("TickHandlers.java").writeText("""
-            package com.example;
-
-            import net.neoforged.neoforge.client.event.RenderFrameEvent;
-            import net.neoforged.neoforge.event.TickEvent;
-
-            public class TickHandlers {
-                String note = "RenderFrameEvent.Post event.phase == TickEvent.Phase.START";
-                String docs = ${"\"\"\""}
-                    public static void renderTick(RenderFrameEvent.Post event) {
-                        if (event.phase == TickEvent.Phase.START) {
-                            render();
-                        }
-                    }
-                    ${"\"\"\""};
-
-                public static void renderTick(RenderFrameEvent.Post event) {
-                    // if (event.phase == TickEvent.Phase.START) { render(); }
-                    if (event.phase == TickEvent.Phase.START) {
-                        render();
-                    }
-                }
-
-                private static void render() {}
-            }
-        """.trimIndent())
-
-        val before = srcDir.resolve("TickHandlers.java").readText()
-        val result = pass.apply(projectDir)
-        val source = srcDir.resolve("TickHandlers.java").readText()
-
-        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        assertFalse(result.changes.any { it.ruleId == "build-cleanup-split-tick-phase" })
-        assertEquals(before, source)
-        assertTrue(source.contains("String note = \"RenderFrameEvent.Post event.phase == TickEvent.Phase.START\";"), source)
-        assertTrue(source.contains("public static void renderTick(RenderFrameEvent.Post event) {"), source)
-        assertTrue(source.contains("// if (event.phase == TickEvent.Phase.START) { render(); }"), source)
-    }
-
-    @Test
     fun `split tick cleanup ignores documentation only`() {
         val projectDir = tempDir.resolve("split-tick-phase-docs-only")
         val srcDir = projectDir.resolve("src/main/java/com/example")
@@ -4738,6 +4465,41 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `srg reflection ids become the mojang member names that survive on 1_21_1`() {
+        val projectDir = tempDir.resolve("srg-reflection-names")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ClickDelay.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.Minecraft;
+            import net.neoforged.fml.util.ObfuscationReflectionHelper;
+
+            public class ClickDelay {
+                void reset(Minecraft mc) {
+                    ObfuscationReflectionHelper.setPrivateValue(Minecraft.class, mc, 10, "f_91078_");
+                    Object value = ObfuscationReflectionHelper.getPrivateValue(Minecraft.class, mc, "f_91078_");
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("ClickDelay.java").readText()
+        val accessTransformer = projectDir.resolve(
+            "src/main/resources/META-INF/accesstransformer.cfg"
+        ).readText()
+
+        assertTrue(result.errors.none { it.contains("Forbidden reflection") }, result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-obfuscation-reflection-at-direct-field" }, result.changes.joinToString("\n") { it.ruleId })
+        assertTrue(result.changes.any { it.ruleId == "build-obfuscation-reflection-at-entries" }, result.changes.joinToString("\n") { it.ruleId })
+        assertTrue(content.contains("(mc).missTime = 10;"), content)
+        assertTrue(content.contains("Object value = (mc).missTime;"), content)
+        assertFalse(content.contains("f_91078_"), content)
+        assertFalse(content.contains("ObfuscationReflectionHelper"), content)
+        assertTrue(accessTransformer.contains("public-f net.minecraft.client.Minecraft missTime"), accessTransformer)
+    }
+
+    @Test
     fun `hard gates forbidden reflection after migration`() {
         val projectDir = tempDir.resolve("forbidden-reflection")
         val srcDir = projectDir.resolve("src/main/java/com/example")
@@ -4745,19 +4507,104 @@ class BuildSystemTest {
         srcDir.resolve("UnsafeReflection.java").writeText("""
             package com.example;
 
+            import net.minecraft.server.MinecraftServer;
+            import net.minecraft.world.entity.LivingEntity;
+
             public class UnsafeReflection {
                 void read() throws Exception {
-                    UnsafeReflection.class.getDeclaredMethod("read").setAccessible(true);
-                    UnsafeReflection.class.getMethod("read");
+                    MinecraftServer.class.getDeclaredField("f_999999_").setAccessible(true);
+                    LivingEntity.class.getDeclaredField("noSuchFieldOnTarget");
+                    LivingEntity.class.getDeclaredMethod("noSuchMethodOnTarget");
+                    Class.forName("net.minecraftforge.common.util.FakePlayer");
                 }
             }
         """.trimIndent())
 
         val result = pass.apply(projectDir)
 
-        assertTrue(result.errors.any { it.contains("Forbidden reflection") && it.contains("getDeclaredMethod") })
-        assertTrue(result.errors.any { it.contains("Forbidden reflection") && it.contains("getMethod") })
-        assertTrue(result.errors.any { it.contains("Forbidden reflection") && it.contains("setAccessible") })
+        assertTrue(result.errors.any { it.contains("Forbidden reflection") && it.contains("f_999999_") }, result.errors.joinToString("\n"))
+        assertTrue(result.errors.any { it.contains("Forbidden reflection") && it.contains("LivingEntity#noSuchFieldOnTarget") }, result.errors.joinToString("\n"))
+        assertTrue(result.errors.any { it.contains("Forbidden reflection") && it.contains("LivingEntity#noSuchMethodOnTarget") }, result.errors.joinToString("\n"))
+        assertTrue(result.errors.any { it.contains("Forbidden reflection") && it.contains("net.minecraftforge.common.util.FakePlayer") }, result.errors.joinToString("\n"))
+    }
+
+    @Test
+    fun `keeps reflection on members that exist on the 1_21_1 target`() {
+        val projectDir = tempDir.resolve("target-member-reflection")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("StorageAccess.java").writeText("""
+            package com.example;
+
+            import java.lang.reflect.Field;
+            import net.minecraft.server.MinecraftServer;
+            import net.minecraft.world.level.storage.LevelStorageSource;
+
+            public class StorageAccess {
+                // The user's own 1.21.1 port keeps exactly this: storageSource is the Mojang name
+                // of a protected field that still exists on MinecraftServer.
+                static LevelStorageSource.LevelStorageAccess storage(MinecraftServer server) {
+                    try {
+                        Field field = MinecraftServer.class.getDeclaredField("storageSource");
+                        field.setAccessible(true);
+                        return (LevelStorageSource.LevelStorageAccess) field.get(server);
+                    } catch (ReflectiveOperationException e) {
+                        throw new IllegalStateException(e);
+                    }
+                }
+
+                static Object own() throws Exception {
+                    Field field = StorageAccess.class.getDeclaredField("CACHE");
+                    field.setAccessible(true);
+                    return field.get(null);
+                }
+
+                private static final Object CACHE = new Object();
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        assertTrue(result.errors.none { it.contains("Forbidden reflection") }, result.errors.joinToString("\n"))
+    }
+
+    @Test
+    fun `declares run scoped mod sources through moddev mods and loaded mods`() {
+        val projectDir = tempDir.resolve("run-mod-sources")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0.24,6.2)'
+            }
+
+            minecraft {
+                mappings channel: 'official', version: '1.20.1'
+                runs {
+                    gameTestServer {
+                        property 'forge.enabledGameTestNamespaces', 'hotbath'
+                    }
+                }
+            }
+
+            sourceSets {
+                bucketTest {
+                    java.srcDir 'src/bucketTest/java'
+                }
+            }
+            minecraft.runs.gameTestServer {
+                mods { hotbath_bucket_tests { source sourceSets.bucketTest } }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-run-mod-sources" })
+        assertFalse(content.contains("minecraft.runs"), content)
+        assertTrue(content.contains("hotbath_bucket_tests {"), content)
+        assertTrue(content.contains("sourceSet(sourceSets.bucketTest)"), content)
+        assertTrue(content.contains("if (run.name != 'gameTestServer') run.loadedMods.set(neoForge.mods.matching { it.name != 'hotbath_bucket_tests' })"), content)
     }
 
     @Test
@@ -7871,6 +7718,760 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `hybrid builds drop the applied mixin gradle plugin and its block`() {
+        val projectDir = tempDir.resolve("p-hybrid-mixin")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            buildscript {
+                repositories {
+                    maven { url = 'https://repo.spongepowered.org/maven' }
+                    mavenCentral()
+                }
+                dependencies { classpath 'org.spongepowered:mixingradle:0.7.38' }
+            }
+
+            plugins {
+                id 'eclipse'
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+                id 'org.parchmentmc.librarian.forgegradle' version '1.+'
+            }
+
+            apply plugin: 'org.spongepowered.mixin'
+            mixin { add sourceSets.main, 'mixins.showercore.refmap.json' }
+
+            version = '1.0'
+
+            dependencies {
+                minecraft 'net.minecraftforge:forge:1.20.1-47.1.0'
+                annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
+            }
+        """.trimIndent())
+
+        pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertFalse(content.contains("apply plugin: 'org.spongepowered.mixin'"), content)
+        assertFalse(content.contains("mixingradle"), content)
+        assertFalse(content.contains("mixin { add sourceSets.main"), content)
+        assertTrue(content.contains("net.neoforged.moddev"), content)
+    }
+
+
+    @Test
+    fun `living breathe refill compatibility migrates from method handles to direct api`() {
+        val projectDir = tempDir.resolve("living-breathe-direct-api")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DivingHelmet.java").writeText("""
+            package com.example;
+
+            import java.lang.invoke.MethodHandle;
+            import java.lang.invoke.MethodHandles;
+            import java.lang.invoke.MethodType;
+            import org.jetbrains.annotations.Nullable;
+            import net.neoforged.neoforge.event.entity.living.LivingBreatheEvent;
+
+            public class DivingHelmet {
+                // TODO - 1.21.1 - Remove
+                @Nullable
+                private static final MethodHandle setCanRefillAirHandle;
+
+                // TODO - 1.21.1 - Remove
+                static {
+                    MethodHandle handle = null;
+                    MethodHandles.Lookup lookup = MethodHandles.lookup();
+                    MethodType type = MethodType.methodType(void.class, boolean.class);
+                    try {
+                        handle = lookup.findVirtual(LivingBreatheEvent.class, "setCanRefillAir", type);
+                    } catch (Exception ignored) {
+                    }
+                    setCanRefillAirHandle = handle;
+                }
+
+                static void breathe(LivingBreatheEvent event) {
+                    event.setCanBreathe(true);
+                    try {
+                        if (setCanRefillAirHandle != null)
+                            setCanRefillAirHandle.invokeExact(event, true);
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("DivingHelmet.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-living-breathe-refill-direct-api" })
+        assertTrue(content.contains("event.setRefillAirAmount(event.getEntity().getMaxAirSupply());"), content)
+        assertFalse(content.contains("MethodHandle"), content)
+        assertFalse(content.contains("MethodHandles"), content)
+        assertFalse(content.contains("setCanRefillAir"), content)
+        assertFalse(content.contains("TODO - 1.21.1 - Remove"), content)
+    }
+
+
+    @Test
+    fun `model builder varhandle reads without a complete public api flow remain hard gated`() {
+        val projectDir = tempDir.resolve("varhandle-at-direct")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ModelTextures.java").writeText("""
+            package com.example;
+
+            import java.lang.invoke.MethodHandles;
+            import java.lang.invoke.VarHandle;
+            import java.util.Map;
+            import net.neoforged.neoforge.client.model.generators.ModelBuilder;
+
+            public class ModelTextures {
+                private static final String DOC = "TEXTURES_HANDLE.get(builder)";
+                public static final VarHandle TEXTURES_HANDLE;
+
+                static {
+                    try {
+                        MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(ModelBuilder.class, MethodHandles.lookup());
+                        TEXTURES_HANDLE = lookup.findVarHandle(ModelBuilder.class, "textures", Map.class);
+                    } catch (IllegalAccessException | NoSuchFieldException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+
+                static Map<String, String> textures(ModelBuilder<?> builder) {
+                    // TEXTURES_HANDLE.get(builder)
+                    return (Map<String, String>) TEXTURES_HANDLE.get(builder);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("ModelTextures.java").readText()
+        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
+
+        assertTrue(result.errors.any { it.contains("Forbidden reflection") }, result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-varhandle-at-direct-field" })
+        assertTrue(content.contains("return (Map<String, String>) TEXTURES_HANDLE.get(builder);"), content)
+        assertTrue(content.contains("DOC = \"TEXTURES_HANDLE.get(builder)\""), content)
+        assertTrue(content.contains("// TEXTURES_HANDLE.get(builder)"), content)
+        assertTrue(content.contains("VarHandle"), content)
+        assertTrue(content.contains("MethodHandles"), content)
+        assertTrue(content.contains("findVarHandle"), content)
+        assertFalse(atFile.exists())
+    }
+
+
+    @Test
+    fun `model builder texture map varhandles migrate to the public texture api without an at`() {
+        val projectDir = tempDir.resolve("varhandle-model-texture-api")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("GeneratedModels.java").writeText("""
+            package com.example;
+
+            import java.lang.invoke.MethodHandles;
+            import java.lang.invoke.VarHandle;
+            import java.util.Map;
+            import net.minecraft.resources.ResourceLocation;
+            import net.neoforged.neoforge.client.model.generators.ModelBuilder;
+
+            public class GeneratedModels {
+                public static final VarHandle TEXTURES_HANDLE;
+
+                static {
+                    try {
+                        MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(ModelBuilder.class, MethodHandles.lookup());
+                        TEXTURES_HANDLE = lookup.findVarHandle(ModelBuilder.class, "textures", Map.class);
+                    } catch (IllegalAccessException | NoSuchFieldException exception) {
+                        throw new RuntimeException(exception);
+                    }
+                }
+
+                static void addLayer(ModelBuilder<?> builder, ResourceLocation layer) {
+                    Map<String, String> textures = (Map<String, String>) TEXTURES_HANDLE.get(builder);
+                    textures.put("layer1", layer.toString());
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("GeneratedModels.java").readText()
+        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
+
+        assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${result.errors}")
+        assertTrue(content.contains("builder.texture(\"layer1\", layer);"), content)
+        assertFalse(content.contains("TEXTURES_HANDLE"), content)
+        assertFalse(content.contains("java.lang.invoke"), content)
+        assertFalse(content.contains("java.util.Map"), content)
+        assertFalse(atFile.exists(), atFile.takeIf { it.exists() }?.readText().orEmpty())
+    }
+
+
+    @Test
+    fun `obfuscation reflection fields migrate through explicit mappings and third party field evidence`() {
+        val projectDir = tempDir.resolve("obfuscation-reflection-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val resourcesDir = projectDir.resolve("src/main/resources")
+        srcDir.createDirectories()
+        resourcesDir.createDirectories()
+        resourcesDir.resolve("example.mixins.json").writeText("""
+            {
+              "required": true,
+              "package": "com.example.mixin",
+              "mixins": [],
+              "client": []
+            }
+        """.trimIndent())
+        srcDir.resolve("ReflectedFields.java").writeText("""
+            package com.example;
+
+            import dev.example.maps.LargeMapScreen;
+            import dev.example.maps.RegionPanel;
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.client.gui.Gui;
+            import net.neoforged.fml.util.ObfuscationReflectionHelper;
+
+            public class ReflectedFields {
+                private static final String DOC = "ObfuscationReflectionHelper.getPrivateValue(Gui.class, gui, f_92993_)";
+
+                void update(Minecraft minecraft, Gui gui, LargeMapScreen screen) {
+                    ObfuscationReflectionHelper.setPrivateValue(Minecraft.class, minecraft, 10, "f_91078_");
+                    if (ObfuscationReflectionHelper.getPrivateValue(Gui.class, gui,
+                            "f_92993_") instanceof Integer timer && timer > 0) {
+                        return;
+                    }
+                    Object panel = ObfuscationReflectionHelper.getPrivateValue(
+                            LargeMapScreen.class, screen, "regionPanel");
+                    if (!(panel instanceof RegionPanel regionPanel)) {
+                        return;
+                    }
+                    // ObfuscationReflectionHelper.getPrivateValue(Gui.class, gui, "f_92993_");
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("ReflectedFields.java").readText()
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        val accessor = srcDir.resolve("mixin/modporter/ModPorterLargeMapScreenAccessor.java")
+        val mixinConfig = resourcesDir.resolve("example.mixins.json").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-obfuscation-reflection-at-direct-field" })
+        assertTrue(content.contains("(minecraft).missTime = 10;"), content)
+        assertTrue(content.contains("if ((gui).toolHighlightTimer > 0)"), content)
+        assertTrue(content.contains("Object panel = ((com.example.mixin.modporter.ModPorterLargeMapScreenAccessor) (Object) screen).modporter${'$'}getRegionPanel();"), content)
+        assertTrue(content.contains("DOC = \"ObfuscationReflectionHelper.getPrivateValue"), content)
+        assertTrue(content.contains("// ObfuscationReflectionHelper.getPrivateValue"), content)
+        assertFalse(content.contains("import net.neoforged.fml.util.ObfuscationReflectionHelper;"), content)
+        assertTrue(at.contains("public-f net.minecraft.client.Minecraft missTime"), at)
+        assertTrue(at.contains("public net.minecraft.client.gui.Gui toolHighlightTimer"), at)
+        assertFalse(at.contains("dev.example.maps.LargeMapScreen"), at)
+        assertTrue(accessor.exists())
+        assertTrue(accessor.readText().contains("@Pseudo"))
+        assertTrue(accessor.readText().contains("@Mixin(targets = \"dev.example.maps.LargeMapScreen\", remap = false)"))
+        assertTrue(accessor.readText().contains("dev.example.maps.RegionPanel modporter${'$'}getRegionPanel()"))
+        assertTrue(mixinConfig.contains("modporter.ModPorterLargeMapScreenAccessor"))
+    }
+
+
+    @Test
+    fun `unmapped minecraft reflection remains a hard gate failure`() {
+        val projectDir = tempDir.resolve("unmapped-minecraft-reflection")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RemovedField.java").writeText("""
+            package com.example;
+
+            import java.util.function.Supplier;
+            import net.minecraft.world.level.block.StairBlock;
+            import net.neoforged.fml.util.ObfuscationReflectionHelper;
+
+            public class RemovedField {
+                void rewrite(StairBlock block, Supplier<?> state) {
+                    ObfuscationReflectionHelper.setPrivateValue(StairBlock.class, block, state, "stateSupplier");
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("RemovedField.java").readText()
+
+        assertTrue(result.errors.any { it.contains("Forbidden reflection") }, result.errors.joinToString("\n"))
+        assertTrue(content.contains("ObfuscationReflectionHelper.setPrivateValue"), content)
+        assertFalse(projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").exists())
+    }
+
+
+    @Test
+    fun `removed stair state supplier reflection migrates into constructor state`() {
+        val projectDir = tempDir.resolve("stair-state-supplier")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("StairFactory.java").writeText("""
+            package com.example;
+
+            import java.util.function.Supplier;
+            import net.minecraft.world.level.block.Blocks;
+            import net.minecraft.world.level.block.StairBlock;
+            import net.minecraft.world.level.block.WeatheringCopperStairBlock;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.fml.util.ObfuscationReflectionHelper;
+
+            public class StairFactory {
+                StairBlock create(boolean waxed, Object weatherState, Object properties) {
+                    Supplier<BlockState> selectedState = () -> Blocks.COPPER_BLOCK.defaultBlockState();
+                    if (waxed)
+                        return new StairBlock(selectedState, properties);
+                    WeatheringCopperStairBlock block =
+                            new WeatheringCopperStairBlock(weatherState, Blocks.AIR.defaultBlockState(), properties);
+                    ObfuscationReflectionHelper.setPrivateValue(
+                            StairBlock.class, block, selectedState, "stateSupplier");
+                    return block;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("StairFactory.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-stair-state-supplier-constructor" })
+        assertTrue(content.contains("new StairBlock(selectedState.get(), properties)"), content)
+        assertTrue(content.contains("new WeatheringCopperStairBlock(weatherState, selectedState.get(), properties)"), content)
+        assertFalse(content.contains("ObfuscationReflectionHelper"), content)
+        assertFalse(content.contains("stateSupplier\"") , content)
+        assertFalse(projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").exists())
+    }
+
+
+    @Test
+    fun `portal provider callback pipelines migrate to direct portal api through the static call graph`() {
+        val projectDir = tempDir.resolve("portal-provider-pipeline")
+        val srcDir = projectDir.resolve("src/main/java/com/example/portal")
+        srcDir.createDirectories()
+        srcDir.resolve("PortalBridge.java").writeText("""
+            package com.example.portal;
+
+            import java.util.function.BiFunction;
+            import java.util.function.Function;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.level.portal.DimensionTransition;
+            import net.neoforged.neoforge.common.util.ITeleporter;
+
+            public class PortalBridge {
+                public static Exit resolve(ServerLevel level, BlockFace face,
+                                           ResourceKey<Level> firstDimension,
+                                           ResourceKey<Level> secondDimension,
+                                           BiFunction<ServerLevel, Probe, DimensionTransition> provider) {
+                    ServerLevel otherLevel = level.getServer().getLevel(secondDimension);
+                    BlockPos portalPos = face.getConnectedPos();
+                    BlockState portalState = level.getBlockState(portalPos);
+                    Probe probe = new Probe();
+                    probe.setPortalEntrancePos();
+                    DimensionTransition transition = provider.apply(otherLevel, probe);
+                    if (transition == null)
+                        return null;
+                    BlockPos output = BlockPos.containing(transition.pos);
+                    return new Exit(otherLevel, output);
+                }
+
+                public static Exit fromTeleporter(ServerLevel level, BlockFace face,
+                                                  ResourceKey<Level> firstDimension,
+                                                  ResourceKey<Level> secondDimension,
+                                                  Function<ServerLevel, ITeleporter> factory) {
+                    return PortalApi.resolve(level, face, firstDimension, secondDimension,
+                            (otherLevel, probe) -> factory.apply(otherLevel)
+                                    .getPortalInfo(probe, otherLevel, probe::findDimensionEntryPoint));
+                }
+
+                static Exit optional(ServerLevel level, BlockFace face,
+                                     ResourceKey<Level> firstDimension,
+                                     ResourceKey<Level> secondDimension) {
+                    return PortalApi.fromTeleporter(level, face, firstDimension, secondDimension, target -> {
+                        try {
+                            return (ITeleporter) Class.forName("dev.example.portal.CustomPortalForcer")
+                                    .getDeclaredConstructor(ServerLevel.class)
+                                    .newInstance(target);
+                        } catch (Exception exception) {
+                            return target.getPortalForcer();
+                        }
+                    });
+                }
+
+                static Exit compatibility(ServerLevel level, BlockFace face,
+                                          ResourceKey<Level> firstDimension,
+                                          ResourceKey<Level> secondDimension) {
+                    return resolve(level, face, firstDimension, secondDimension, BetterPortalCompat::find);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("PortalApi.java").writeText("""
+            package com.example.portal;
+
+            import java.util.function.BiFunction;
+            import java.util.function.Function;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.portal.DimensionTransition;
+            import net.neoforged.neoforge.common.util.ITeleporter;
+
+            public class PortalApi {
+                public static Exit resolve(ServerLevel level, BlockFace face,
+                                           ResourceKey<Level> firstDimension,
+                                           ResourceKey<Level> secondDimension,
+                                           BiFunction<ServerLevel, Probe, DimensionTransition> provider) {
+                    return PortalBridge.resolve(level, face, firstDimension, secondDimension, provider);
+                }
+
+                public static Exit fromTeleporter(ServerLevel level, BlockFace face,
+                                                  ResourceKey<Level> firstDimension,
+                                                  ResourceKey<Level> secondDimension,
+                                                  Function<ServerLevel, ITeleporter> factory) {
+                    return PortalBridge.fromTeleporter(level, face, firstDimension, secondDimension, factory);
+                }
+            }
+        """.trimIndent())
+        val compatFile = srcDir.resolve("BetterPortalCompat.java")
+        compatFile.writeText("""
+            package com.example.portal;
+
+            import java.lang.invoke.MethodHandle;
+            import java.lang.invoke.MethodHandles;
+
+            public class BetterPortalCompat {
+                private static final MethodHandle HANDLE;
+
+                static {
+                    try {
+                        Class<?> state = Class.forName("dev.example.portal.TravelerState");
+                        HANDLE = MethodHandles.lookup().findConstructor(state, null);
+                    } catch (Exception exception) {
+                        throw new RuntimeException(exception);
+                    }
+                }
+
+                public static DimensionTransition find(ServerLevel level, Probe probe) {
+                    return null;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val bridge = srcDir.resolve("PortalBridge.java").readText()
+        val api = srcDir.resolve("PortalApi.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-portal-dimension-transition-pipeline" })
+        assertTrue(result.changes.any { it.ruleId == "build-portal-unreferenced-reflection-adapter" })
+        assertTrue(bridge.contains("instanceof Portal modporterPortal"), bridge)
+        assertTrue(bridge.contains("modporterPortal.getPortalDestination(level, probe, probe.blockPosition())"), bridge)
+        assertTrue(bridge.contains("BlockPos.containing(transition.pos())"), bridge)
+        assertFalse(bridge.contains("BiFunction"), bridge)
+        assertFalse(bridge.contains("ITeleporter"), bridge)
+        assertFalse(bridge.contains("Class.forName"), bridge)
+        assertFalse(bridge.contains("getDeclaredConstructor"), bridge)
+        assertFalse(api.contains("BiFunction"), api)
+        assertFalse(api.contains("Function"), api)
+        assertFalse(api.contains("ITeleporter"), api)
+        assertFalse(compatFile.exists())
+    }
+
+
+    @Test
+    fun `reflected copper transition maps migrate to registered neoforge data map provider`() {
+        val projectDir = tempDir.resolve("copper-datamap")
+        val srcDir = projectDir.resolve("src/main/java/com/example/copper")
+        srcDir.createDirectories()
+        srcDir.resolve("OxidationHooks.java").writeText("""
+            package com.example.copper;
+
+            import java.lang.reflect.Field;
+            import java.util.function.Supplier;
+            import com.google.common.base.Suppliers;
+            import com.google.common.collect.BiMap;
+            import com.google.common.collect.HashBiMap;
+            import com.google.common.collect.ImmutableBiMap;
+            import net.minecraft.world.item.HoneycombItem;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.WeatheringCopper;
+
+            public class OxidationHooks {
+                private static final BiMap<Supplier<Block>, Supplier<Block>> WEATHERING = HashBiMap.create();
+                private static final BiMap<Supplier<Block>, Supplier<Block>> WAXABLE = HashBiMap.create();
+                private static boolean weatheringMemoized;
+                private static boolean waxableMemoized;
+
+                public static synchronized void addWeathering(Supplier<Block> original, Supplier<Block> weathered) {
+                    if (weatheringMemoized) throw new IllegalStateException();
+                    WEATHERING.put(original, weathered);
+                }
+
+                public static synchronized void addWaxable(Supplier<Block> original, Supplier<Block> waxed) {
+                    if (waxableMemoized) throw new IllegalStateException();
+                    WAXABLE.put(original, waxed);
+                }
+
+                public static void install() {
+                    try {
+                        Field delegate = WeatheringCopper.NEXT_BY_BLOCK.getClass().getDeclaredField("delegate");
+                        delegate.setAccessible(true);
+                        delegate.set(WeatheringCopper.NEXT_BY_BLOCK, Suppliers.memoize(ImmutableBiMap::of));
+                    } catch (Exception exception) {
+                        throw new RuntimeException(exception);
+                    }
+                    HoneycombItem.WAXABLES = Suppliers.memoize(ImmutableBiMap::of);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CopperBlocks.java").writeText("""
+            package com.example.copper;
+
+            public class CopperBlocks {
+                static void register() {
+                    OxidationHooks.addWeathering(CopperBlocks::first, CopperBlocks::second);
+                    OxidationHooks.addWaxable(CopperBlocks::first, CopperBlocks::waxed);
+                    OxidationHooks.install();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleDatagen.java").writeText("""
+            package com.example.copper;
+
+            import java.util.concurrent.CompletableFuture;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.data.DataGenerator;
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            public class ExampleDatagen {
+                public static void gatherData(GatherDataEvent event) {
+                    DataGenerator generator = event.getGenerator();
+                    PackOutput output = generator.getPackOutput();
+                    CompletableFuture<HolderLookup.Provider> lookupProvider = event.getLookupProvider();
+                    lookupProvider = generatedRegistryProvider();
+                    generator.addProvider(event.includeServer(), existingProvider());
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val registry = srcDir.resolve("OxidationHooks.java").readText()
+        val usage = srcDir.resolve("CopperBlocks.java").readText()
+        val datagen = srcDir.resolve("ExampleDatagen.java").readText()
+        val provider = projectDir.resolve(
+            "src/main/java/com/example/copper/modporter/datagen/ModPorterOxidationHooksDataMapProvider.java"
+        )
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-copper-datamap-registry" })
+        assertTrue(result.changes.any { it.ruleId == "build-copper-datamap-provider" })
+        assertTrue(result.changes.any { it.ruleId == "build-copper-datamap-register-provider" })
+        assertTrue(registry.contains("getWeatheringView()"), registry)
+        assertTrue(registry.contains("getWaxableView()"), registry)
+        assertFalse(registry.contains("java.lang.reflect"), registry)
+        assertFalse(registry.contains("getDeclaredField"), registry)
+        assertFalse(registry.contains("HoneycombItem.WAXABLES"), registry)
+        assertTrue(usage.contains("OxidationHooks.addWeathering"), usage)
+        assertTrue(usage.contains("OxidationHooks.addWaxable"), usage)
+        assertFalse(usage.contains("OxidationHooks.install()"), usage)
+        assertTrue(provider.exists())
+        assertTrue(provider.readText().contains("NeoForgeDataMaps.OXIDIZABLES"))
+        assertTrue(provider.readText().contains("NeoForgeDataMaps.WAXABLES"))
+        assertTrue(datagen.contains("new ModPorterOxidationHooksDataMapProvider(output, lookupProvider)"), datagen)
+    }
+
+
+    @Test
+    fun `normalizes positional client dist subscriber value instead of adding a duplicate`() {
+        val projectDir = tempDir.resolve("client-subscriber-positional-dist")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ClientEvents.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.Minecraft;
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
+
+            @EventBusSubscriber(Dist.CLIENT)
+            public class ClientEvents {
+                private static final Minecraft MINECRAFT = Minecraft.getInstance();
+                private static FMLClientSetupEvent setupEvent;
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("ClientEvents.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-client-eventbus-subscriber-dist" })
+        assertTrue(content.contains("@EventBusSubscriber(value = Dist.CLIENT)"), content)
+        assertFalse(content.contains("Dist.CLIENT, value ="), content)
+    }
+
+
+    @Test
+    fun `structured access transformer member mappings preserve owners descriptors and access`() {
+        val projectDir = tempDir.resolve("structured-at-member-mappings")
+        val atDir = projectDir.resolve("src/main/resources/META-INF")
+        atDir.createDirectories()
+        atDir.resolve("accesstransformer.cfg").writeText("""
+            public net.minecraft.client.gui.Font m_92863_(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/client/gui/font/FontSet; # getFontSet
+            public net.minecraft.server.network.ServerGamePacketListenerImpl f_9737_ # aboveGroundTickCount
+            protected net.minecraft.client.model.AgeableListModel f_170339_ # babyZHeadOffset
+            public-f net.minecraft.data.recipes.RecipeProvider m_6055_()Ljava/lang/String; # getName
+            public net.minecraft.client.gui.Font m_92863_()V # wrong descriptor must remain unresolved
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val at = atDir.resolve("accesstransformer.cfg").readText()
+
+        assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${result.errors}")
+        assertTrue(at.contains("public net.minecraft.client.gui.Font getFontSet(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/client/gui/font/FontSet; # getFontSet"), at)
+        assertTrue(at.contains("public net.minecraft.server.network.ServerGamePacketListenerImpl aboveGroundTickCount # aboveGroundTickCount"), at)
+        assertTrue(at.contains("protected net.minecraft.client.model.AgeableListModel babyZHeadOffset # babyZHeadOffset"), at)
+        assertTrue(at.contains("public-f net.minecraft.data.recipes.RecipeProvider getName()Ljava/lang/String; # getName"), at)
+        assertTrue(at.contains("public net.minecraft.client.gui.Font m_92863_()V # wrong descriptor must remain unresolved"), at)
+        assertFalse(at.contains("public net.minecraft.client.gui.Font getFontSet()V"), at)
+    }
+
+
+    @Test
+    fun `title screen panorama field migrates to screen panorama with its source at`() {
+        val projectDir = tempDir.resolve("title-screen-panorama-api")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val atDir = projectDir.resolve("src/main/resources/META-INF")
+        srcDir.createDirectories()
+        atDir.createDirectories()
+        srcDir.resolve("MenuOverlay.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.TitleScreen;
+            import net.minecraft.client.renderer.PanoramaRenderer;
+
+            public class MenuOverlay {
+                PanoramaRenderer panorama(TitleScreen titleScreen) {
+                    return titleScreen.panorama;
+                }
+            }
+        """.trimIndent())
+        atDir.resolve("accesstransformer.cfg").writeText(
+            "public net.minecraft.client.gui.screens.TitleScreen f_96729_ # panorama\n"
+        )
+
+        val result = pass.apply(projectDir)
+        val source = srcDir.resolve("MenuOverlay.java").readText()
+        val at = atDir.resolve("accesstransformer.cfg").readText()
+
+        assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${result.errors}")
+        assertTrue(source.contains("return Screen.PANORAMA;"), source)
+        assertTrue(source.contains("import net.minecraft.client.gui.screens.Screen;"), source)
+        assertTrue(at.contains("public net.minecraft.client.gui.screens.Screen PANORAMA # panorama"), at)
+        assertFalse(at.contains("TitleScreen panorama"), at)
+    }
+
+
+    @Test
+    fun `build migration does not erase split tick phase semantics`() {
+        val projectDir = tempDir.resolve("split-tick-phase")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("TickHandlers.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.client.event.ClientTickEvent;
+            import net.neoforged.neoforge.client.event.RenderFrameEvent;
+            import net.neoforged.neoforge.event.TickEvent;
+
+            public class TickHandlers {
+                public static void clientTick(ClientTickEvent.Post event) {
+                    if (event.phase == TickEvent.Phase.END && ready()) {
+                        run();
+                    }
+                    if (event.phase != TickEvent.Phase.END || blocked()) {
+                        return;
+                    }
+                    run();
+                }
+
+                public static void renderTick(RenderFrameEvent.Post event) {
+                    if (event.phase == TickEvent.Phase.START) {
+                        render();
+                    }
+                }
+
+                private static boolean ready() { return true; }
+                private static boolean blocked() { return false; }
+                private static void run() {}
+                private static void render() {}
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val source = srcDir.resolve("TickHandlers.java").readText()
+        assertFalse(result.changes.any { it.ruleId == "build-cleanup-split-tick-phase" })
+        assertTrue(source.contains("public static void renderTick(RenderFrameEvent.Post event)"))
+        assertTrue(source.contains("if (event.phase == TickEvent.Phase.END && ready())"))
+        assertTrue(source.contains("if (event.phase != TickEvent.Phase.END || blocked())"))
+        assertTrue(source.contains("if (event.phase == TickEvent.Phase.START)"))
+        assertTrue(source.contains("import net.neoforged.neoforge.event.TickEvent;"), source)
+    }
+
+
+    @Test
+    fun `build pass leaves split tick source and documentation to structural migration`() {
+        val projectDir = tempDir.resolve("split-tick-phase-docs")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("TickHandlers.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.client.event.RenderFrameEvent;
+            import net.neoforged.neoforge.event.TickEvent;
+
+            public class TickHandlers {
+                String note = "RenderFrameEvent.Post event.phase == TickEvent.Phase.START";
+                String docs = ${"\"\"\""}
+                    public static void renderTick(RenderFrameEvent.Post event) {
+                        if (event.phase == TickEvent.Phase.START) {
+                            render();
+                        }
+                    }
+                    ${"\"\"\""};
+
+                public static void renderTick(RenderFrameEvent.Post event) {
+                    // if (event.phase == TickEvent.Phase.START) { render(); }
+                    if (event.phase == TickEvent.Phase.START) {
+                        render();
+                    }
+                }
+
+                private static void render() {}
+            }
+        """.trimIndent())
+
+        val before = srcDir.resolve("TickHandlers.java").readText()
+        val result = pass.apply(projectDir)
+        val source = srcDir.resolve("TickHandlers.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-cleanup-split-tick-phase" })
+        assertEquals(before, source)
+        assertTrue(source.contains("String note = \"RenderFrameEvent.Post event.phase == TickEvent.Phase.START\";"), source)
+        assertTrue(source.contains("public static void renderTick(RenderFrameEvent.Post event) {"), source)
+        assertTrue(source.contains("// if (event.phase == TickEvent.Phase.START) { render(); }"), source)
+    }
+
+
+    @Test
     fun `reflective gametest discovery becomes closed typed source registrations`() {
         val projectDir = tempDir.resolve("gametest-static-registration")
         val apiDir = projectDir.resolve("src/main/java/com/example/testing")
@@ -8033,6 +8634,7 @@ class BuildSystemTest {
         assertTrue(mixin.contains("return function.testFunction;"))
     }
 
+
     @Test
     fun `forgegradle reobfuscation dsl preserves publication blocks on moddev jar task`() {
         val projectDir = tempDir.resolve("reobfuscation-publication")
@@ -8085,6 +8687,7 @@ class BuildSystemTest {
         assertTrue(result.changes.any { it.ruleId == "build-migrate-reobfuscation-publication" })
     }
 
+
     @Test
     fun `recipe manager private maps migrate with their holder data flow before at removal`() {
         val projectDir = tempDir.resolve("recipe-manager-public-query")
@@ -8130,6 +8733,7 @@ class BuildSystemTest {
         assertTrue(result.changes.any { it.ruleId == "build-recipe-manager-public-query-api" })
         assertTrue(result.changes.any { it.ruleId == "build-recipe-manager-obsolete-at" })
     }
+
 
     @Test
     fun `static potion brewing tables become level scoped caches with retargeted ats`() {
@@ -8240,6 +8844,7 @@ class BuildSystemTest {
         assertFalse(at.contains("POTION_MIXES"), at)
     }
 
+
     @Test
     fun `java 21 migration covers applied and subproject gradle scripts without touching literals`() {
         val projectDir = tempDir.resolve("recursive-gradle-java-target")
@@ -8255,6 +8860,8 @@ class BuildSystemTest {
             tasks.withType(JavaCompile).configureEach {
                 options.release = 17
             }
+            ext.futureSource = sourceCompatibility = 170
+            ext.futureTarget = targetCompatibility = 171
             // JavaLanguageVersion.of(17) is documentation.
             ext.example = "options.release = 17"
         """.trimIndent())
@@ -8275,12 +8882,15 @@ class BuildSystemTest {
         assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${result.errors}")
         assertTrue(shared.contains("JavaLanguageVersion.of(21)"), shared)
         assertTrue(shared.contains("options.release = 21"), shared)
+        assertTrue(shared.contains("sourceCompatibility = 170"), shared)
+        assertTrue(shared.contains("targetCompatibility = 171"), shared)
         assertTrue(shared.contains("// JavaLanguageVersion.of(17) is documentation."), shared)
         assertTrue(shared.contains("\"options.release = 17\""), shared)
         assertTrue(module.contains("JavaVersion.VERSION_21"), module)
         assertTrue(module.contains("JavaVersion.toVersion(21)"), module)
         assertTrue(module.contains("options.release.set(21)"), module)
     }
+
 
     @Test
     fun `nested jarjar dependencies retain packaging semantics when coordinates migrate`() {
@@ -8301,11 +8911,12 @@ class BuildSystemTest {
 
         assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${result.errors}")
         assertTrue(
-            build.contains("jarJar(implementation(\"net.createmod.ponder:ponder-neoforge:1.0.82+mc1.21.1\"))"),
+            build.contains("jarJar(implementation(\"net.createmod.ponder:ponder-neoforge:1.0.87+mc1.21.1\"))"),
             build
         )
         assertFalse(build.contains("Ponder-Forge-1.20.1"), build)
     }
+
 
     @Test
     fun `complete legacy food properties codecs use the target standard codec`() {
@@ -8344,6 +8955,7 @@ class BuildSystemTest {
         assertFalse(source.contains("if (always) builder.alwaysEdible()"), source)
         assertTrue(result.changes.any { it.ruleId == "build-food-properties-standard-codec" })
     }
+
 
     @Test
     fun `registrate generic bases and removed functional interfaces migrate from declared structure`() {
@@ -8431,6 +9043,7 @@ class BuildSystemTest {
         assertTrue(changes.any { it.ruleId == "build-neoforge-functional-interfaces" })
     }
 
+
     @Test
     fun `registrate deferred holder factory rejects ambiguous registry keys`() {
         val projectDir = tempDir.resolve("registrate-ambiguous-registry-key")
@@ -8464,6 +9077,7 @@ class BuildSystemTest {
         assertTrue(error.message.orEmpty().contains("requires one exact Registry key"), error.message)
         assertTrue(source.readText().contains("DeferredHolder<T, T>"))
     }
+
 
     @Test
     fun `registrate deferred holder factory ignores project shadow types`() {

@@ -1,0 +1,29 @@
+package @PACKAGE@;
+
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.event.OnDatapackSyncEvent;
+import net.neoforged.neoforge.event.server.ServerStartingEvent;
+import net.neoforged.neoforge.event.server.ServerStoppedEvent;
+
+/** Maintains exact loaded recipe identities on the logical server. */
+@EventBusSubscriber(@MOD_ID_ARGUMENT@)
+public final class LegacyRecipeIdentityEvents {
+    private LegacyRecipeIdentityEvents() {
+    }
+
+    @SubscribeEvent
+    public static void onServerStarting(ServerStartingEvent event) {
+        LegacyRecipeIds.assignServerIds(event.getServer().getRecipeManager());
+    }
+
+    @SubscribeEvent
+    public static void onDatapackSync(OnDatapackSyncEvent event) {
+        LegacyRecipeIds.assignServerIds(event.getPlayerList().getServer().getRecipeManager());
+    }
+
+    @SubscribeEvent
+    public static void onServerStopped(ServerStoppedEvent event) {
+        LegacyRecipeIds.clearServerIds(event.getServer().getRecipeManager());
+    }
+}

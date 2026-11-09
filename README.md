@@ -1,92 +1,126 @@
 # ModPorter
 
-> **Work in progress / developer preview:** ModPorter helps move Forge 1.20.1 projects toward NeoForge 1.21.1. The v0.3.0 milestone proves the rules covered by the current benchmark set; it is not a guarantee that every untested mod will port fully hands-off.
+ModPorter is a rule-based migration tool for Minecraft mod developers. It
+produces a reviewable starting point for moving Forge 1.20.1 projects to
+NeoForge 1.21.1, reducing repetitive source, build-system, and resource work
+so developers can focus on mod-specific behavior and review.
 
-## What It Is
+The project is intended for development, research, and learning. Generated
+projects are candidates for human review and focused gameplay testing before
+wider distribution. Migration fixes belong in reusable ModPorter rules; the
+generated examples are not separately hand-maintained feature forks.
 
-ModPorter is a ruleset-driven migration tool. It applies deterministic source, build, and resource transformations collected from real mods, then protects those rules with regression tests and runtime gates.
+## Developer Workflow
 
-When a new mod fails, it usually means the mod uses an API surface, project structure, data format, or runtime behavior that the current rules do not cover yet. The intended path is to add a reusable rule with tests while keeping the existing benchmark set green. Contributions that expand general migration coverage without benchmark-specific bypasses are welcome.
+1. Keep an unchanged copy of the original mod source and record its revision.
+2. Run ModPorter into a separate output directory.
+3. Review the transformation report and generated code.
+4. Build and validate the generated project, then review its gameplay details.
+5. Report repeatable migration problems to
+   [ModPorter Issues](https://github.com/CrabMods/modporter/issues) so a general
+   rule can be fixed and the project regenerated.
 
-## Current Milestone
-
-As of `v0.3.0`, the strict real-mod gate has been locally verified for the public Git-backed benchmark snapshot below:
-
-<!-- MODPORTER:BENCHMARK-SNAPSHOT:START -->
-| Target | Provider | Source | Resolved Git commit | Strict gate status |
-|--------|----------|--------|---------------------|--------------------|
-| ConstructionWand | Git | `Theta-Dev/ConstructionWand`, `1.20` | `bc64f11a7d799e921995821878a031bcfde4e22a` | PASS |
-| InstantWorldMirror | Git | `CrabMods/InstantWorldMirror`, `1.20.1` | `5283fd1e20769aafc0a28225288f4be12d417680` | PASS |
-| HotBath | Git | `CrabMods/hotBath`, `1.20.1` | `6b2d0925cf04d58fc6dc21e687ef98324ac6d8cc` | PASS |
-| ShowerCore | Git | `CrabMods/ShowerCore`, `1.20.1` with `hotbath` dependency | `0b25a6d04ca7daa6dbdfb25d94434a8e7f8edaee` | PASS |
-| Sakura Mod | Git | `0999312/Sakura_mod`, `1.20.1` | `0201301e5aa371d7f0816b1d786ca89e99936912` | PASS |
-| Twilight Forest | Git | `TeamTwilight/twilightforest`, `1.20.1` | `1bc3a4c21213bc443967e92125613cb9ef47891e` | PASS |
-| The Aether | Git | `The-Aether-Team/The-Aether`, `1.20.1-develop` | `2f0be3a51bae2f434fbf5b5c0aecc56b50f921b7` | PASS |
-| Beyond the Veil | Git | `valeriotor/Beyond-The-Veil`, `1.20` | `ce8dfdbca00d956516c23de989d45bd138ee6867` | PASS |
-| StarMeowCraft | Git | `rawchickenNEG/StarMeowCraft`, `master` | `ec41c1a7331cd5b8103a81a482d99a9fb3df5933` | PASS |
-<!-- MODPORTER:BENCHMARK-SNAPSHOT:END -->
-
-Each PASS means that target cleared hands-off conversion, compile, dedicated server lifecycle, GameTest server, client boot, saved-world quick-load, and log-clean runtime audit at the resolved Git commit shown above. Accepted runtime findings must be machine-evidenced as source-inherited or external dependency behavior.
-
-## Quick Start
-
-```bash
-# Build the fat JAR
-./gradlew shadowJar
-
-# Port a mod
-java -jar build/libs/modporter-*-all.jar port \
+```sh
+java -jar modporter-0.4.0-all.jar analyze --src /path/to/forge-mod
+java -jar modporter-0.4.0-all.jar port \
   --src /path/to/forge-mod \
-  --out /path/to/output
-
-# Analyze a mod
-java -jar build/libs/modporter-*-all.jar analyze --src /path/to/forge-mod
-
-# Add an optional tool credit to supported mod metadata
-java -jar build/libs/modporter-*-all.jar port \
-  --src /path/to/forge-mod \
-  --out /path/to/output \
+  --out /path/to/neoforge-candidate \
   --add-tool-credit
 ```
 
-`--add-tool-credit` appends a concise `Ported with ModPorter: https://github.com/CrabMods/modporter` entry to supported `credits` metadata. It preserves existing credits and does not modify author metadata.
+`--add-tool-credit` adds a concise ModPorter entry to supported mod metadata
+while preserving the original authors and existing credits.
 
-## Pipeline
+## Recorded Strict Benchmark
 
-The current `forge2neo` pipeline migrates Forge 1.20.1 mods to NeoForge 1.21.1 through five passes:
+The November 9, 2026 engineering baseline passed all **11/11** required
+source-project strict targets, with no failed or skipped targets, no low
+confidence transformations, and no unresolved review signals.
 
-1. **TextReplacement** - package renames, API moves, import migrations, and targeted source rewrites
-2. **AST** - Java transformations that benefit from parsed structure
-3. **StructuralRefactor** - event bus cleanup, mod-bus event extraction, obsolete method removal, AT/mixin-aware rewrites
-4. **BuildSystem** - ForgeGradle to NeoForge ModDev, dependency migration, source-set hygiene, Access Transformer and mixin metadata preservation
-5. **ResourceMigration** - `mods.toml`, recipes, advancements, tags, models, and generated data/resource fixes
+| Target | Verified input |
+| --- | --- |
+| ConstructionWand | `Theta-Dev/ConstructionWand@bc64f11a7d79` |
+| InstantWorldMirror | `CrabMods/InstantWorldMirror@eeeafdb6d998` |
+| HotBath | `CrabMods/hotBath@7d284519936b` |
+| ShowerCore | `CrabMods/ShowerCore@2f17206e9cb2` |
+| Sakura Mod | `0999312/Sakura_mod@0201301e5aa3` |
+| Twilight Forest | `TeamTwilight/twilightforest@1bc3a4c21213` |
+| The Aether | `The-Aether-Team/The-Aether@2f0be3a51bae` |
+| Beyond the Veil | `valeriotor/Beyond-The-Veil@ba4940c10e52` |
+| StarMeowCraft | `rawchickenNEG/StarMeowCraft@77c9f63b73a7` |
+| Create | Original source snapshot, SHA-256 prefix `d6a7482014bf` |
+| WorldEdit | Prepared Forge-only input, derived from `b04ab0e26728` |
 
-Production rules are expected to be source-structure or API-surface rules with regression coverage. Strict validation rejects incomplete behavior such as TODO migrations, source excludes, skipped structural parsing, commented source logic, and unevidenced runtime warnings.
+### Verification Scope
 
-## Gates
+| Automated check | Coverage |
+| --- | --- |
+| Conversion and compilation | Source, build-system, and resource migration; generated project compiles |
+| Dedicated server | Server startup and the declared shutdown gate |
+| GameTest | The test suite present in each verified source project |
+| Client | Client boot and saved-world loading |
+| Item interface | Creative inventory opens; all displayed stacks in the relevant tabs are browsed |
+| Runtime logs | Strict warning/error audit; accepted upstream or dependency findings require source evidence |
 
-```bash
-# Default test and package gate
-./gradlew test shadowJar
+The checks cover project loading and item-interface presentation. Detailed
+behavior of individual items, blocks, machines, and integrations remains an
+area for developer review and focused playtesting.
 
-# Real-mod engineering loop
-./gradlew realModBenchmark
+The recorded baseline is a source-project validation result. A separately
+published candidate JAR is identified and tested as its own artifact. See
+[Benchmarking](docs/BENCHMARKING.md) for exact input scope and reproduction.
 
-# Strict release gate
-./gradlew strictRealModBenchmark
+## How the Rules Work
+
+The Forge-to-NeoForge pipeline applies source-contract checks followed by
+text, AST, structural, build-system, and resource transformations. Rules use
+source structure and API evidence, with regression tests for refusal cases
+and unchanged-input behavior as well as successful migration.
+
+New mods can expose additional API families or project structures. A useful
+issue report includes the input revision, ModPorter version, transformation
+report, and relevant build/runtime logs. Fixing the reusable rule improves
+later generated ports as well.
+
+## Build and Test
+
+The tool uses Java 17 or newer. NeoForge 1.21.1 verification uses Java 21.
+Python and PowerShell 7 are required for the project-owned public build/test
+entry point.
+
+```powershell
+# Canonical build, tests, coverage report, and fat JAR
+./mod-build.ps1 build shadowJar --no-daemon
+
+# Rule and integration tests
+./mod-build.ps1 gradle test --no-daemon
+
+# Strict source-project benchmark (prepares the declared WorldEdit input)
+./scripts/run_strict_benchmarks.ps1 -KeepWork
 ```
 
-`realModBenchmark` reads `src/test/resources/benchmarks/real-mods.tsv`, fetches configured Git sources, ports each target in a temporary workspace, deletes fetched/converted sources by default, and writes summaries under `build/real-mod-benchmark/reports/`.
+The public entry point uses the checked-in Gradle wrapper and
+`gradle/modporter-testing.gradle`; it does not require `gh`, a GitHub token, or
+private framework credentials. Maintainers may explicitly select an ignored
+local sidecar with `MODPORTER_PRIVATE_FRAMEWORK_ROOT`; a selected sidecar must
+pass its own authenticated check before the public build starts. CI builds and
+packages in the public profile on Windows and Ubuntu. Version tags publish a
+developer-preview JAR and its SHA-256 checksum after the CI gates pass.
 
-`strictRealModBenchmark` adds hands-off compile, dedicated server lifecycle, GameTest server, client boot, client saved-world quick-load, and log-clean runtime audit. A mod should only be treated as covered by ModPorter after this strict gate passes.
+## Generated Research Ports
 
-See `docs/BENCHMARKING.md` for provider configuration, runtime gate details, and one-target reproduction commands.
+Example repositories use `<mod-name>-modporter-port` and branches named for
+the target Minecraft version. They identify the upstream revision, generator,
+validation scope, and license, and route migration reports back to ModPorter.
+Human review remains part of preparing a generated project for wider release.
+The [upstream 1.21.1 release status](docs/UPSTREAM_RELEASE_STATUS.md) records
+which benchmark owners publish official binaries and which checks remain unresolved.
 
-## Development
+Original mod copyrights and licenses remain with their owners. ModPorter does
+not grant redistribution rights to an input project's code or assets.
 
-```bash
-./gradlew test
-./gradlew test jacocoTestReport
-```
+## License
 
-Requires Java 17+ for the tool itself. NeoForge 1.21.1 compile/runtime verification requires Java 21.
+ModPorter is licensed under [Apache-2.0](LICENSE). Third-party dependencies
+and regression fixtures retain their own licenses; see [NOTICE](NOTICE) and
+[third-party attribution](third_party/README.md).

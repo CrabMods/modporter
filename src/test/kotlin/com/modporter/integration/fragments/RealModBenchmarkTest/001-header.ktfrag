@@ -1,16 +1,22 @@
 package com.modporter.integration
 
+import com.modporter.core.pipeline.GradleModLayout
 import com.modporter.core.pipeline.Pipeline
 import com.modporter.core.pipeline.PipelineResult
 import com.modporter.core.pipeline.Confidence
+import com.modporter.core.pipeline.Change
 import com.modporter.mapping.MappingDatabase
 import com.modporter.registry.PipelineOptions
 import com.modporter.registry.PipelineRegistry
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable
@@ -18,9 +24,12 @@ import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import java.awt.image.BufferedImage
 import javax.imageio.ImageIO
+import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import java.util.jar.JarEntry
 import java.util.jar.JarOutputStream
@@ -32,6 +41,7 @@ import kotlin.io.path.name
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.assertTrue
+import kotlin.test.assertEquals
 
 /**
  * Real-mod benchmark harness.
@@ -53,6 +63,7 @@ import kotlin.test.assertTrue
  *                                           run runClientWorld and quick-load the smoke save
  *   MODPORTER_BENCHMARK_LOG_CLEAN=true    fail runtime gates on non-allowlisted WARN lines
  *   MODPORTER_BENCHMARK_KEEP_WORK=true    keep temporary sources/outputs for debugging
+ *   MODPORTER_BENCHMARK_RUN_ID=id          reserve a unique output root under build/real-mod-benchmark/runs
  *   MODPORTER_BENCHMARK_CASES=a,b         run only the listed manifest ids
  *   MODPORTER_BENCHMARK_PROGRESS_GRACE_SECONDS=75
  *                                           after a progress marker, fail fast if final markers never arrive
@@ -71,7 +82,8 @@ class RealModBenchmarkTest {
     @EnabledIfEnvironmentVariable(named = "MODPORTER_REAL_MOD_TEST", matches = "true")
     fun `real mod benchmark manifest`() {
         val repoRoot = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize()
-        val reportRoot = repoRoot.resolve("build/real-mod-benchmark").toAbsolutePath().normalize()
+        val options = BenchmarkOptions.fromEnvironment()
+        val reportRoot = prepareBenchmarkReportRoot(repoRoot, options.runId)
         val tempRoot = reportRoot.resolve("tmp")
         val sourceRoot = tempRoot.resolve("sources")
         val workRoot = tempRoot.resolve("work")
@@ -85,7 +97,6 @@ class RealModBenchmarkTest {
         workRoot.createDirectories()
         artifactRoot.createDirectories()
 
-        val options = BenchmarkOptions.fromEnvironment()
         val allCases = loadCases(repoRoot.resolve("src/test/resources/benchmarks/real-mods.tsv"))
         val cases = selectCases(
             allCases,
@@ -153,7 +164,8 @@ class RealModBenchmarkTest {
             tempDir,
             logFile,
             timeoutSeconds = outerTimeoutSeconds,
-            runtimeLogPolicy = RuntimeLogPolicy.clientWorld(failOnWarnings = false, progressGraceSeconds = 1)
+            runtimeLogPolicy = RuntimeLogPolicy.clientWorld(failOnWarnings = false, progressGraceSeconds = 1),
+            requiresScopedJavaCleanup = false
         )
 
         val elapsedSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started)
@@ -179,7 +191,8 @@ class RealModBenchmarkTest {
             tempDir,
             logFile,
             timeoutSeconds = outerTimeoutSeconds,
-            runtimeLogPolicy = RuntimeLogPolicy.gameTestServer(failOnWarnings = false)
+            runtimeLogPolicy = RuntimeLogPolicy.gameTestServer(failOnWarnings = false),
+            requiresScopedJavaCleanup = false
         )
 
         val elapsedSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started)
@@ -187,6 +200,35 @@ class RealModBenchmarkTest {
         assertTrue(
             elapsedSeconds < outerTimeoutSeconds,
             "Completed GameTest shutdown gate should not wait for the outer timeout; elapsed=${elapsedSeconds}s"
+        )
+    }
+
+    @Test
+    fun `gametest runtime gate releases captured owned descendant after parent exits`(@TempDir tempDir: Path) {
+        val logFile = tempDir.resolve("gametest-held-log.log")
+        val descendantPidFile = tempDir.resolve("gametest-held-log-descendant.pid")
+        val outerTimeoutSeconds = 20L
+        val started = System.nanoTime()
+
+        val result = runRuntimeProcess(
+            heldLogGameTestShutdownCommand(tempDir, logFile),
+            tempDir,
+            logFile,
+            timeoutSeconds = outerTimeoutSeconds,
+            runtimeLogPolicy = RuntimeLogPolicy.gameTestServer(failOnWarnings = false),
+            requiresScopedJavaCleanup = false
+        )
+
+        val elapsedSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started)
+        assertTrue(result.status == CheckStatus.PASS, "Expected held-log GameTest shutdown gate to pass: ${result.note}")
+        assertTrue(
+            elapsedSeconds < outerTimeoutSeconds,
+            "Captured owned descendant should be released after parent exit; elapsed=${elapsedSeconds}s"
+        )
+        val descendantPid = descendantPidFile.readText().trim().toLong()
+        assertTrue(
+            ProcessHandle.of(descendantPid).map { !it.isAlive }.orElse(true),
+            "Owned descendant retaining the runtime log must exit after its parent terminates: pid=$descendantPid"
         )
     }
 
@@ -209,6 +251,22 @@ class RealModBenchmarkTest {
             auditRuntimeLog(shutdownLog, failOnWarnings = false).findings.isEmpty(),
             "OpenAL invalid-name after Minecraft shutdown is benchmark harness noise"
         )
+    }
+
+    @Test
+    fun `runtime log audit rejects malformed UTF8 with raw evidence`(@TempDir tempDir: Path) {
+        val logFile = tempDir.resolve("malformed-runtime.log")
+        Files.write(
+            logFile,
+            "[12:00:00] [main/INFO] [example/]: prefix ".toByteArray(Charsets.US_ASCII) +
+                byteArrayOf(0xa6.toByte(), 0xcc.toByte())
+        )
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = false)
+
+        assertTrue(audit.findings.single().contains("runtime log is not strict UTF-8"), audit.findings.toString())
+        assertTrue(audit.findings.single().contains("sha256="), audit.findings.toString())
+        assertTrue(audit.findings.single().contains("invalidOffset="), audit.findings.toString())
     }
 
     @Test
@@ -809,6 +867,39 @@ class RealModBenchmarkTest {
     }
 
     @Test
+    fun `runtime log audit allowlists source inherited missing blockstate variant`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeBlockstateVariantEvidence(projectDir)
+        writeBlockstateVariantEvidence(sourceDir)
+        val logFile = tempDir.resolve("blockstate-variant-inherited.log")
+        logFile.writeText("""
+            [02:03:51] [Worker-Main-10/WARN] [minecraft/BlockStateModelLoader]: Exception loading blockstate definition: 'example:blockstates/server.json' missing model for variant: 'example:server#active=false,facing=west,state=2'
+            [02:03:52] [Worker-Main-10/WARN] [minecraft/ModelManager]: Missing textures in model example:server#active=true,facing=west,state=0:
+                minecraft:textures/atlas/blocks.png:minecraft:server_front_on
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected source-inherited blockstate findings to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("none of their 4 variants covers 'active=false,facing=west,state=2'") },
+            audit.allowedIssues.toString()
+        )
+        assertTrue(
+            audit.allowedIssues.any { it.contains("neither provides 'assets/minecraft/textures/server_front_on.png'") },
+            audit.allowedIssues.toString()
+        )
+
+        // a variant the porter dropped is not inherited: the converted blockstate differs from the input
+        projectDir.resolve("src/main/resources/assets/example/blockstates/server.json").writeText(
+            """{"variants":{"active=false":{"model":"example:block/server_off"}}}""" + "\n"
+        )
+        val dropped = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+        assertTrue(dropped.findings.any { it.contains("missing model for variant") }, dropped.findings.toString())
+    }
+
+    @Test
     fun `runtime log audit allowlists source inherited missing item model`(@TempDir tempDir: Path) {
         val projectDir = tempDir.resolve("work/example")
         val sourceDir = tempDir.resolve("sources/example")
@@ -1097,80 +1188,4 @@ class RealModBenchmarkTest {
             audit.findings.any { it.contains("Can't keep up") },
             "GameTest lag warnings require input source log-template evidence"
         )
-    }
-
-    @Test
-    fun `runtime log audit keeps texture mip warning when input dimensions differ`(@TempDir tempDir: Path) {
-        val projectDir = tempDir.resolve("work/example")
-        val sourceDir = tempDir.resolve("sources/example")
-        writeTextureMipEvidence(projectDir, width = 17, height = 17)
-        writeTextureMipEvidence(sourceDir, width = 16, height = 16)
-        val logFile = tempDir.resolve("texture-mip-regression.log")
-        logFile.writeText("""
-            [06:14:12] [Worker-Main-1/WARN] [minecraft/SpriteLoader]: Texture example:block/fluids/odd_mip_overlay with size 17x17 limits mip level from 4 to 0
-        """.trimIndent() + "\n")
-
-        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
-
-        assertTrue(
-            audit.findings.any { it.contains("Texture example:block/fluids/odd_mip_overlay") },
-            "Porter-changed texture dimensions must remain fatal"
-        )
-    }
-
-    @Test
-    fun `process scope matcher recognizes benchmark java command lines`(@TempDir tempDir: Path) {
-        val sakuraDir = tempDir.resolve("work/sakura").toAbsolutePath().normalize()
-        val hotbathDir = tempDir.resolve("work/hotbath").toAbsolutePath().normalize()
-        val commandLine = """
-            "C:\Program Files\Java\jdk-21\bin\java.exe"
-            -Dfml.modFolders=sakura%%$sakuraDir\build\classes\java\main;sakura%%$sakuraDir\build\resources\main
-            -cp $sakuraDir\build\moddev\artifacts\neoforge-21.1.219.jar
-            net.neoforged.devlaunch.Main
-        """.trimIndent()
-
-        assertTrue(processCommandMatchesScope(commandLine, sakuraDir))
-        assertTrue(!processCommandMatchesScope(commandLine, hotbathDir))
-    }
-
-    @Test
-    fun `benchmark gametest smoke harness is staged only when project has no gametests`(@TempDir tempDir: Path) {
-        val projectWithoutTests = tempDir.resolve("without-tests")
-        projectWithoutTests.createDirectories()
-        projectWithoutTests.resolve("gradle.properties").writeText("mod_id=resmod\n")
-
-        val issues = stageBenchmarkGameTestSmoke(projectWithoutTests)
-
-        assertTrue(issues.isEmpty(), "Expected smoke harness staging to succeed: $issues")
-        val stagedSmokeHarness = projectWithoutTests.resolve(
-            "src/main/java/com/modporter/generated/resmod/benchmark/ModPorterBenchmarkGameTests.java"
-        )
-        assertTrue(stagedSmokeHarness.exists())
-        assertTrue(!projectWithoutTests.resolve("src/main/java/com/modporter/benchmark/ModPorterBenchmarkGameTests.java").exists())
-        assertTrue(projectWithoutTests.resolve("src/main/resources/gameteststructures/modporter_benchmark_empty.snbt").exists())
-        assertTrue(
-            stagedSmokeHarness.readText().contains("package com.modporter.generated.resmod.benchmark;")
-        )
-        assertTrue(
-            stagedSmokeHarness.readText().contains("""@GameTestHolder("resmod")""")
-        )
-
-        val projectWithTests = tempDir.resolve("with-tests")
-        val existingTestDir = projectWithTests.resolve("src/main/java/com/example")
-        existingTestDir.createDirectories()
-        existingTestDir.resolve("ExistingGameTests.java").writeText("""
-            package com.example;
-
-            final class ExistingGameTests {
-                @GameTest(template = "empty")
-                static void existing(Object helper) {
-                }
-            }
-        """.trimIndent())
-
-        val existingIssues = stageBenchmarkGameTestSmoke(projectWithTests)
-
-        assertTrue(existingIssues.isEmpty(), "Expected existing GameTest detection to succeed: $existingIssues")
-        assertTrue(!projectWithTests.resolve("src/main/java/com/modporter/benchmark/ModPorterBenchmarkGameTests.java").exists())
-        assertTrue(!projectWithTests.resolve("src/main/java/com/modporter/generated/with_tests/benchmark/ModPorterBenchmarkGameTests.java").exists())
     }

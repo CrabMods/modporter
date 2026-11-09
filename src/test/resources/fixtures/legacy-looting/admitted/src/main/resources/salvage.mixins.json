@@ -1,0 +1,12 @@
+{
+  "required": true,
+  "package": "org.example.salvage.mixin",
+  "plugin": "org.example.salvage.mixin.SalvageMixinPlugin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "BonusCountMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

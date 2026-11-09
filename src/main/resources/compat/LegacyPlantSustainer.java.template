@@ -1,0 +1,24 @@
+package @PACKAGE@;
+
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.block.state.BlockState;
+
+/**
+ * Canonical shared dispatch surface for a converted Forge 1.20.1
+ * Block.canSustainPlant override.
+ *
+ * The plant remains the original object. In particular, Blocks.MELON is never wrapped merely to
+ * satisfy a removed interface type. Converted dependencies use this same interface or register a
+ * LegacySoilAdapter in the shared runtime.
+ */
+public interface LegacyPlantSustainer {
+    boolean modporter$legacyCanSustainPlant(
+        BlockState soil,
+        BlockGetter level,
+        BlockPos soilPosition,
+        Direction facing,
+        Object plantable
+    );
+}

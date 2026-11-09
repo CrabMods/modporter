@@ -1,0 +1,1104 @@
+import groovy.json.JsonOutput
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.artifacts.component.ProjectComponentIdentifier
+import org.gradle.api.artifacts.result.ResolvedDependencyResult
+import org.gradle.api.artifacts.result.UnresolvedDependencyResult
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
+
+/*
+ * Invoke only through the repository's managed Gradle entrypoint:
+ *
+ *   modporterLegacyPlantResolve
+ *   -p <staged-project>
+ *   -I <this-file>
+ *   -DmodporterLegacyPlantInventoryOutput=<absolute-output.json>
+ *   -DmodporterLegacyPlantInventoryPhase=source|target
+ *   -DmodporterLegacyPlantRuntimeJarSha256=<canonical-hash>
+ *   -DmodporterLegacyPlantClassRuntimeFeature=17|21
+ *
+ * The runtime hash property is required only when the target graph contains the producer-owned
+ * :modporterLegacyPlantCompat project artifact.
+ */
+gradle.projectsEvaluated {
+    def root = gradle.rootProject
+    def allowedRuntimeProject =
+        System.getProperty("modporterLegacyPlantRuntimeProject", ":modporterLegacyPlantCompat")
+    def resolverTask = root.tasks.register("modporterLegacyPlantResolve") {
+        doLast { resolverExecutionTask ->
+            def outputValue =
+                System.getenv("MODPORTER_PLANT_INVENTORY_OUTPUT") ?:
+                    System.getProperty("modporterLegacyPlantInventoryOutput")
+            if (outputValue == null || outputValue.trim().isEmpty()) {
+                throw new GradleException("Missing modporterLegacyPlantInventoryOutput")
+            }
+            def phase =
+                System.getenv("MODPORTER_PLANT_INVENTORY_PHASE") ?:
+                    System.getProperty("modporterLegacyPlantInventoryPhase")
+            if (!(phase in ["source", "target"])) {
+                throw new GradleException("Inventory phase must be source or target")
+            }
+            def output = new File(outputValue).canonicalFile
+            def expectedRuntimeHash =
+                System.getenv("MODPORTER_PLANT_RUNTIME_JAR_SHA256") ?:
+                    System.getProperty("modporterLegacyPlantRuntimeJarSha256")
+            def classRuntimeFeature =
+                (
+                    System.getenv("MODPORTER_PLANT_CLASS_RUNTIME_FEATURE") ?:
+                        System.getProperty("modporterLegacyPlantClassRuntimeFeature")
+                )?.toInteger()
+            if (!(classRuntimeFeature in [17, 21])) {
+                throw new GradleException(
+                    "Legacy plant class runtime feature must be exactly 17 or 21"
+                )
+            }
+            def runtimeProject = null
+            def consumerProjects
+            if (phase == "source") {
+                consumerProjects = root.allprojects.findAll {
+                    it.plugins.hasPlugin("net.neoforged.moddev.legacyforge")
+                }
+                if (consumerProjects.size() != 1) {
+                    throw new GradleException(
+                        "Expected exactly one LegacyModDev source consumer project, found " +
+                            consumerProjects*.path
+                    )
+                }
+            } else {
+                def modDevProjects = root.allprojects.findAll {
+                    it.plugins.hasPlugin("net.neoforged.moddev")
+                }
+                def runtimeProjects = modDevProjects.findAll {
+                    it.path == allowedRuntimeProject
+                }
+                if (runtimeProjects.size() != 1) {
+                    throw new GradleException(
+                        "Expected exact canonical runtime project " + allowedRuntimeProject +
+                            ", found " + runtimeProjects*.path
+                    )
+                }
+                runtimeProject = runtimeProjects[0]
+                def expectedRuntimeDirectory = new File(
+                    root.projectDir,
+                    ".modporter/legacy-plant-compat"
+                ).canonicalFile
+                if (runtimeProject.projectDir.canonicalFile != expectedRuntimeDirectory) {
+                    throw new GradleException(
+                        "Canonical runtime project points at an unowned directory: " +
+                            runtimeProject.projectDir
+                    )
+                }
+                if (expectedRuntimeHash == null) {
+                    throw new GradleException(
+                        "Target inventory requires the canonical runtime JAR hash"
+                    )
+                }
+                def runtimeRequest = new File(
+                    root.projectDir,
+                    ".modporter/legacy-plant-compat.required"
+                ).canonicalFile
+                if (!runtimeRequest.isFile()) {
+                    throw new GradleException(
+                        "Missing canonical runtime source identity request: " + runtimeRequest
+                    )
+                }
+                def requestValues = [:]
+                runtimeRequest.eachLine("UTF-8") { line ->
+                    if (line.contains("=")) {
+                        def separator = line.indexOf("=")
+                        def key = line.substring(0, separator).trim()
+                        def value = line.substring(separator + 1).trim()
+                        if (requestValues.put(key, value) != null) {
+                            throw new GradleException(
+                                "Duplicate canonical runtime request key: " + key
+                            )
+                        }
+                    }
+                }
+                if (requestValues["schema"] != "legacy-plant-runtime-request-v1" ||
+                    requestValues["package"] != "com.modporter.compat.plant.v1" ||
+                    requestValues["jarSha256"] != expectedRuntimeHash ||
+                    !(requestValues["sourceSha256"] ==~ /[0-9a-f]{64}/)
+                ) {
+                    throw new GradleException(
+                        "Canonical runtime request identity does not match the verified runtime"
+                    )
+                }
+                def runtimeBuildText = runtimeProject.buildFile.getText("UTF-8")
+                if (!runtimeBuildText.contains("group = 'com.modporter.compat'") ||
+                    !runtimeBuildText.contains("archivesName = 'legacy-plant-compat'") ||
+                    !runtimeBuildText.contains(expectedRuntimeHash)
+                ) {
+                    throw new GradleException(
+                        "Canonical runtime project build identity changed"
+                    )
+                }
+                consumerProjects = modDevProjects.findAll {
+                    it.path != allowedRuntimeProject
+                }
+                if (consumerProjects.size() != 1) {
+                    throw new GradleException(
+                        "Expected exactly one ModDevGradle target consumer project, found " +
+                            consumerProjects*.path
+                    )
+                }
+            }
+            def rows = [:]
+            def edges = []
+            def unresolved = []
+            def configurations = []
+            def sha256File = { File file ->
+                def digest = MessageDigest.getInstance("SHA-256")
+                file.withInputStream { input ->
+                    byte[] buffer = new byte[64 * 1024]
+                    int count
+                    while ((count = input.read(buffer)) >= 0) {
+                        if (count > 0) digest.update(buffer, 0, count)
+                    }
+                }
+                digest.digest().encodeHex().toString()
+            }
+            def attributesOf = { artifact ->
+                def attributes = [:]
+                artifact.variant.attributes.keySet().sort { it.name }.each { attribute ->
+                    attributes[attribute.name] =
+                        String.valueOf(artifact.variant.attributes.getAttribute(attribute))
+                }
+                attributes
+            }
+            def addRow = { Map candidate ->
+                def key = [
+                    candidate.project,
+                    candidate.component,
+                    candidate.componentKind,
+                    candidate.classifier,
+                    candidate.artifact,
+                    JsonOutput.toJson(candidate.variantAttributes),
+                    candidate.sha256
+                ].join("|")
+                def existing = rows[key]
+                if (existing == null) {
+                    rows[key] = candidate + [
+                        configurations: [candidate.configuration] as Set,
+                        configurationOrder: [
+                            (candidate.configuration): candidate.classpathOrder
+                        ]
+                    ]
+                } else {
+                    if (existing.file != candidate.file || existing.size != candidate.size) {
+                        throw new GradleException("Conflicting artifact identity for " + candidate.artifact)
+                    }
+                    existing.configurations << candidate.configuration
+                    def previousOrder =
+                        existing.configurationOrder[candidate.configuration]
+                    if (previousOrder != null &&
+                        previousOrder != candidate.classpathOrder
+                    ) {
+                        throw new GradleException(
+                            "Conflicting classpath order for " + candidate.artifact
+                        )
+                    }
+                    existing.configurationOrder[candidate.configuration] =
+                        candidate.classpathOrder
+                }
+            }
+            def generatedPlatformIdentity = { project, File candidate ->
+                def file = candidate.canonicalFile
+                def generatedRoot =
+                    new File(project.buildDir, "moddev/artifacts").canonicalFile
+                if (!file.isFile() || file.parentFile?.canonicalFile != generatedRoot) {
+                    return null
+                }
+
+                def expectedNames
+                if (phase == "source") {
+                    if (!project.plugins.hasPlugin("net.neoforged.moddev.legacyforge")) {
+                        return null
+                    }
+                    def minecraftVersion = project.findProperty("minecraft_version")
+                        ?.toString()?.trim()
+                    def forgeVersion = project.findProperty("forge_version")
+                        ?.toString()?.trim()
+                    if (!minecraftVersion || !forgeVersion) return null
+                    expectedNames = [
+                        "forge-${minecraftVersion}-${forgeVersion}.jar",
+                        "client-extra-${minecraftVersion}-${forgeVersion}.jar",
+                        "intermediateToNamed.zip"
+                    ].collect { it.toString() } as Set
+                } else {
+                    if (!project.plugins.hasPlugin("net.neoforged.moddev")) {
+                        return null
+                    }
+                    def neoForgeVersion = project.findProperty("neo_forge_version")
+                        ?.toString()?.trim()
+                    if (!neoForgeVersion) return null
+                    expectedNames = [
+                        "neoforge-${neoForgeVersion}.jar",
+                        "neoforge-${neoForgeVersion}-client-extra-aka-minecraft-resources.jar"
+                    ].collect { it.toString() } as Set
+                }
+                if (!(file.name in expectedNames)) return null
+
+                def relative = project.projectDir.toPath().relativize(file.toPath())
+                    .toString().replace(File.separatorChar, '/' as char)
+                def expectedRelative = "build/moddev/artifacts/${file.name}".toString()
+                if (relative != expectedRelative) return null
+                [
+                    component: "generated-platform:${project.path}:${relative}".toString(),
+                    componentKind: "generated-platform",
+                    classifier: null,
+                    artifact: relative,
+                    variantAttributes: [
+                        "modporter.generated": "true",
+                        "modporter.phase": phase
+                    ]
+                ]
+            }
+            def managedStagedModuleIdentity = {
+                project,
+                configuration,
+                String configurationName,
+                File candidate
+                ->
+                if (phase != "target" || configurationName != "runtimeClasspath") {
+                    return null
+                }
+                def managedRoot = new File(
+                    project.buildDir,
+                    "modporter/runtime-artifacts"
+                ).canonicalFile
+                def file = candidate.canonicalFile
+                if (!file.toPath().startsWith(managedRoot.toPath())) {
+                    return null
+                }
+                def relative = managedRoot.toPath().relativize(file.toPath())
+                if (relative.nameCount != 3) {
+                    throw new GradleException(
+                        "Managed runtime artifact path has an unexpected shape: " + file
+                    )
+                }
+                def policyId = relative.getName(0).toString()
+                def pathHash = relative.getName(1).toString()
+                def runtimeFilename = relative.getName(2).toString()
+                if (!(policyId ==~ /[a-z][a-z0-9._-]*/) ||
+                    !(pathHash ==~ /[0-9a-f]{64}/) ||
+                    runtimeFilename != file.name ||
+                    !runtimeFilename.toLowerCase(Locale.ROOT).endsWith(".jar")
+                ) {
+                    throw new GradleException(
+                        "Managed runtime artifact path identity is invalid: " + relative
+                    )
+                }
+                def receipt = new File(file.parentFile, "receipt.properties").canonicalFile
+                if (!receipt.isFile() || receipt.parentFile != file.parentFile) {
+                    throw new GradleException(
+                        "Managed runtime artifact receipt is missing or unowned: " + receipt
+                    )
+                }
+                def receiptValues = [:]
+                receipt.eachLine("UTF-8") { line ->
+                    if (line.trim().isEmpty()) return
+                    if (!line.contains("=")) {
+                        throw new GradleException(
+                            "Malformed managed runtime artifact receipt line: " + line
+                        )
+                    }
+                    def separator = line.indexOf("=")
+                    def key = line.substring(0, separator).trim()
+                    def value = line.substring(separator + 1).trim()
+                    if (key.isEmpty() || receiptValues.put(key, value) != null) {
+                        throw new GradleException(
+                            "Duplicate or empty managed runtime artifact receipt key: " + key
+                        )
+                    }
+                }
+                def expectedReceiptKeys = [
+                    "schemaVersion",
+                    "projectPath",
+                    "taskPath",
+                    "sourceConfiguration",
+                    "runtimeConfiguration",
+                    "coordinate",
+                    "sourceSha256",
+                    "stagedSha256",
+                    "byteLength",
+                    "runtimeFilename",
+                    "nestedJars"
+                ] as Set
+                if (receiptValues.keySet() != expectedReceiptKeys ||
+                    receiptValues["schemaVersion"] != "2" ||
+                    receiptValues["projectPath"] != project.path ||
+                    receiptValues["runtimeConfiguration"] != "runtimeOnly" ||
+                    receiptValues["runtimeFilename"] != runtimeFilename
+                ) {
+                    throw new GradleException(
+                        "Managed runtime artifact receipt identity changed: " + receipt
+                    )
+                }
+                def coordinate = receiptValues["coordinate"]
+                def coordinateParts = coordinate?.split(":", -1)?.toList()
+                if (coordinateParts?.size() != 3 ||
+                    coordinateParts.any { it.trim().isEmpty() }
+                ) {
+                    throw new GradleException(
+                        "Managed runtime artifact coordinate is not group:module:version: " +
+                            coordinate
+                    )
+                }
+                def sourceHash = receiptValues["sourceSha256"]
+                def stagedHash = receiptValues["stagedSha256"]
+                if (!(sourceHash ==~ /[0-9a-f]{64}/) ||
+                    stagedHash != sourceHash ||
+                    pathHash != sourceHash
+                ) {
+                    throw new GradleException(
+                        "Managed runtime artifact receipt hash identity changed: " + receipt
+                    )
+                }
+                def byteLength
+                try {
+                    byteLength = Long.parseLong(receiptValues["byteLength"])
+                } catch (Exception ignored) {
+                    throw new GradleException(
+                        "Managed runtime artifact receipt has an invalid byte length: " + receipt
+                    )
+                }
+                if (byteLength <= 0L ||
+                    file.length() != byteLength ||
+                    sha256File(file) != stagedHash
+                ) {
+                    throw new GradleException(
+                        "Managed runtime artifact bytes do not match the receipt: " + file
+                    )
+                }
+                def producerTask = root.tasks.findByPath(receiptValues["taskPath"])
+                if (producerTask == null ||
+                    producerTask.project.path != project.path ||
+                    !configuration.buildDependencies
+                        .getDependencies(resolverExecutionTask)
+                        .contains(producerTask)
+                ) {
+                    throw new GradleException(
+                        "Managed runtime artifact producer is not bound to the resolved " +
+                            "configuration: " + receiptValues["taskPath"]
+                    )
+                }
+                def producerOutputs = producerTask.outputs.files.files.collect {
+                    it.canonicalFile
+                } as Set
+                if (!(file in producerOutputs) || !(receipt in producerOutputs)) {
+                    throw new GradleException(
+                        "Managed runtime artifact producer does not own the file and receipt: " +
+                            producerTask.path
+                    )
+                }
+                def sourceConfiguration = project.configurations.findByName(
+                    receiptValues["sourceConfiguration"]
+                )
+                if (sourceConfiguration == null ||
+                    !sourceConfiguration.canBeResolved ||
+                    sourceConfiguration.name in ["compileClasspath", "runtimeClasspath"]
+                ) {
+                    throw new GradleException(
+                        "Managed runtime artifact source configuration is invalid: " +
+                            receiptValues["sourceConfiguration"]
+                    )
+                }
+                def sourceArtifacts = sourceConfiguration.incoming.artifactView {
+                    lenient(false)
+                }.artifacts.artifacts.toList()
+                if (sourceArtifacts.size() != 1) {
+                    throw new GradleException(
+                        "Managed runtime artifact source must resolve exactly one module: " +
+                            sourceConfiguration.name
+                    )
+                }
+                def sourceArtifact = sourceArtifacts[0]
+                def sourceComponent = sourceArtifact.id.componentIdentifier
+                if (!(sourceComponent instanceof ModuleComponentIdentifier)) {
+                    throw new GradleException(
+                        "Managed runtime artifact source is not a module component: " +
+                            sourceComponent.displayName
+                    )
+                }
+                def resolvedCoordinate =
+                    "${sourceComponent.group}:${sourceComponent.module}:${sourceComponent.version}"
+                        .toString()
+                def sourceFile = sourceArtifact.file.canonicalFile
+                if (resolvedCoordinate != coordinate ||
+                    !sourceFile.isFile() ||
+                    sourceFile == file ||
+                    sourceFile.length() != byteLength ||
+                    sha256File(sourceFile) != sourceHash ||
+                    Files.mismatch(sourceFile.toPath(), file.toPath()) != -1L
+                ) {
+                    throw new GradleException(
+                        "Managed runtime artifact source module and staged bytes differ: " +
+                            coordinate
+                    )
+                }
+                def producerInputs = producerTask.inputs.files.files.collect {
+                    it.canonicalFile
+                } as Set
+                if (!(sourceFile in producerInputs)) {
+                    throw new GradleException(
+                        "Managed runtime artifact producer is not bound to the resolved source " +
+                            "module: " + producerTask.path
+                    )
+                }
+                def receiptNestedJars = receiptValues["nestedJars"].isEmpty() ?
+                    ([] as Set) :
+                    (receiptValues["nestedJars"].split(",", -1).toList() as Set)
+                if (receiptNestedJars.any {
+                    it.trim().isEmpty() ||
+                        !it.startsWith("META-INF/jarjar/") ||
+                        !it.endsWith(".jar")
+                } ||
+                    receiptValues["nestedJars"] !=
+                        receiptNestedJars.toList().sort().join(",")
+                ) {
+                    throw new GradleException(
+                        "Managed runtime artifact nested-JAR receipt is invalid: " + receipt
+                    )
+                }
+                def actualNestedJars = new LinkedHashSet<String>()
+                def jar = new java.util.jar.JarFile(file)
+                try {
+                    def entries = jar.entries()
+                    while (entries.hasMoreElements()) {
+                        def entryName = entries.nextElement().name
+                        if (entryName.startsWith("META-INF/jarjar/") &&
+                            entryName.endsWith(".jar")
+                        ) {
+                            actualNestedJars.add(entryName)
+                        }
+                    }
+                } finally {
+                    jar.close()
+                }
+                if (actualNestedJars != receiptNestedJars) {
+                    throw new GradleException(
+                        "Managed runtime artifact nested-JAR inventory changed: " + file
+                    )
+                }
+                def managedAttributes = new TreeMap(attributesOf(sourceArtifact))
+                def managedEvidence = [
+                    "modporter.managedRuntimeArtifact": "true",
+                    "modporter.resolutionOrigin": "validated-staged-file",
+                    "modporter.sourceConfiguration": sourceConfiguration.name,
+                    "modporter.producerTask": producerTask.path,
+                    "modporter.receiptSha256": sha256File(receipt)
+                ]
+                managedEvidence.each { key, value ->
+                    if (managedAttributes.put(key, value) != null) {
+                        throw new GradleException(
+                            "Managed runtime artifact evidence attribute already exists: " + key
+                        )
+                    }
+                }
+                [
+                    component: coordinate,
+                    componentKind: "module",
+                    classifier: null,
+                    artifact: runtimeFilename,
+                    variantAttributes: managedAttributes
+                ]
+            }
+
+            consumerProjects.sort { it.path }.each { project ->
+                ["compileClasspath", "runtimeClasspath"].each { configurationName ->
+                    def configuration = project.configurations.findByName(configurationName)
+                    if (configuration == null || !configuration.canBeResolved) return
+                    configurations << [project: project.path, configuration: configurationName]
+                    def configurationKey =
+                        "${project.path}|${configurationName}".toString()
+                    def configurationFiles = configuration.files.collect {
+                        it.canonicalFile
+                    }.toList()
+                    def classpathOrder = [:]
+                    configurationFiles.eachWithIndex { file, index ->
+                        if (classpathOrder.put(file.absolutePath, index) != null) {
+                            throw new GradleException(
+                                "Duplicate file in resolved classpath: " + file
+                            )
+                        }
+                    }
+
+                    configuration.incoming.resolutionResult.allDependencies.each { dependency ->
+                        if (dependency instanceof UnresolvedDependencyResult) {
+                            unresolved << [
+                                project: project.path,
+                                configuration: configurationName,
+                                requested: dependency.requested.displayName,
+                                failure: dependency.failure.message
+                            ]
+                        } else if (dependency instanceof ResolvedDependencyResult) {
+                            edges << [
+                                project: project.path,
+                                configuration: configurationName,
+                                from: dependency.from.id.displayName,
+                                requested: dependency.requested.displayName,
+                                selected: dependency.selected.id.displayName
+                            ]
+                        }
+                    }
+
+                    def artifactFiles = [] as Set
+                    def artifacts = configuration.incoming.artifactView {
+                        lenient(false)
+                    }.artifacts.artifacts
+                    artifacts.sort { it.id.displayName }.each { artifact ->
+                        def file = artifact.file.canonicalFile
+                        if (!file.isFile()) {
+                            throw new GradleException(
+                                "Legacy plant inventory requires a regular artifact file: " +
+                                    artifact.id.displayName + " -> " + file
+                            )
+                        }
+                        def component = artifact.id.componentIdentifier
+                        def componentValue
+                        def componentKind
+                        def classifier = null
+                        def artifactDisplayName = artifact.id.displayName
+                        def variantAttributes = attributesOf(artifact)
+                        if (component instanceof ModuleComponentIdentifier) {
+                            if (!file.name.toLowerCase(Locale.ROOT).endsWith(".jar")) {
+                                throw new GradleException(
+                                    "Module dependency is not a regular JAR artifact: " +
+                                        artifact.id.displayName + " -> " + file
+                                )
+                            }
+                            def stem = file.name.substring(0, file.name.length() - ".jar".length())
+                            def baseName =
+                                "${component.module}-${component.version}".toString()
+                            if (stem != baseName) {
+                                if (!stem.startsWith(baseName + "-")) {
+                                    throw new GradleException(
+                                        "Cannot derive exact classifier for " +
+                                            component.displayName + " from " + file.name
+                                    )
+                                }
+                                classifier = stem.substring(baseName.length() + 1)
+                                if (classifier.trim().isEmpty()) {
+                                    throw new GradleException(
+                                        "Resolved artifact has an empty classifier: " + file
+                                    )
+                                }
+                            }
+                            componentValue = (
+                                "${component.group}:${component.module}:${component.version}" +
+                                    (classifier == null ? "" : ":${classifier}")
+                            ).toString()
+                            componentKind = "module"
+                        } else if (component instanceof ProjectComponentIdentifier) {
+                            if (!file.name.toLowerCase(Locale.ROOT).endsWith(".jar")) {
+                                throw new GradleException(
+                                    "Project dependency is not a regular JAR artifact: " +
+                                        artifact.id.displayName + " -> " + file
+                                )
+                            }
+                            if (component.projectPath != allowedRuntimeProject) {
+                                throw new GradleException(
+                                    "Unsupported project dependency in legacy plant closure: " +
+                                        component.displayName
+                                )
+                            }
+                            def digest = sha256File(file)
+                            if (expectedRuntimeHash == null || digest != expectedRuntimeHash) {
+                                throw new GradleException(
+                                    "Canonical runtime project artifact hash mismatch: " + digest
+                                )
+                            }
+                            componentValue =
+                                "project:${component.build.buildPath}:${component.projectPath}"
+                                    .toString()
+                            componentKind = "project"
+                            artifactDisplayName =
+                                "canonical-runtime:${allowedRuntimeProject}".toString()
+                            variantAttributes = [
+                                "modporter.canonicalRuntime": "true",
+                                "modporter.phase": phase,
+                                "modporter.runtimeJarSha256": expectedRuntimeHash
+                            ]
+                        } else {
+                            def managed = managedStagedModuleIdentity(
+                                project,
+                                configuration,
+                                configurationName,
+                                file
+                            )
+                            def generated = managed ?: generatedPlatformIdentity(project, file)
+                            if (generated == null) {
+                                throw new GradleException(
+                                    "Unsupported resolved artifact component: " +
+                                        component.displayName + " -> " + file
+                                )
+                            }
+                            componentValue = generated.component
+                            componentKind = generated.componentKind
+                            classifier = generated.classifier
+                            artifactDisplayName = generated.artifact
+                            variantAttributes = generated.variantAttributes
+                        }
+                        def order = classpathOrder[file.absolutePath]
+                        if (order == null) {
+                            throw new GradleException(
+                                "Resolved artifact is absent from ordered classpath: " + file
+                            )
+                        }
+                        artifactFiles << file.absolutePath
+                        addRow([
+                            project: project.path,
+                            configuration: configurationKey,
+                            classpathOrder: order,
+                            component: componentValue,
+                            componentKind: componentKind,
+                            classifier: classifier,
+                            artifact: artifactDisplayName,
+                            variantAttributes: variantAttributes,
+                            file: file.absolutePath,
+                            size: file.length(),
+                            sha256: sha256File(file)
+                        ])
+                    }
+
+                    /*
+                     * ModDevGradle contributes the transformed NeoForge/Minecraft compile JAR and
+                     * client resources as configuration files without ResolvedArtifactResult rows.
+                     * Admit only regular JARs under this staged project's owned build/moddev tree.
+                     */
+                    configurationFiles.each { file ->
+                        if (file.absolutePath in artifactFiles) return
+                        def generated = generatedPlatformIdentity(project, file)
+                        if (generated == null) {
+                            throw new GradleException(
+                                "Unowned configuration file in legacy plant closure: " + file
+                            )
+                        }
+                        def order = classpathOrder[file.absolutePath]
+                        if (order == null) {
+                            throw new GradleException(
+                                "Generated artifact is absent from ordered classpath: " + file
+                            )
+                        }
+                        addRow([
+                            project: project.path,
+                            configuration: configurationKey,
+                            classpathOrder: order,
+                            component: generated.component,
+                            componentKind: generated.componentKind,
+                            classifier: generated.classifier,
+                            artifact: generated.artifact,
+                            variantAttributes: generated.variantAttributes,
+                            file: file.absolutePath,
+                            size: file.length(),
+                            sha256: sha256File(file)
+                        ])
+                    }
+                }
+            }
+
+            if (!unresolved.isEmpty()) {
+                throw new GradleException(
+                    "Legacy plant dependency closure has unresolved edges: " +
+                        JsonOutput.toJson(unresolved)
+                )
+            }
+            if (!output.parentFile.mkdirs() && !output.parentFile.isDirectory()) {
+                throw new GradleException(
+                    "Cannot create legacy plant resolver output directory: " + output.parent
+                )
+            }
+            def buildFiles = [:]
+            Files.walk(root.projectDir.toPath()).withCloseable { paths ->
+                paths.filter { Files.isRegularFile(it) }.forEach { path ->
+                    def file = path.toFile().canonicalFile
+                    def relative = root.projectDir.toPath().relativize(file.toPath())
+                        .toString().replace(File.separatorChar, '/' as char)
+                    def name = file.name
+                    def segments = relative.tokenize('/')
+                    def sourceBoundary = segments.findIndexOf {
+                        it == "src" || it == "resources"
+                    }
+                    def generated = segments.withIndex().any { entry ->
+                        def segment = entry[0]
+                        def index = entry[1]
+                        segment in ["build", ".gradle"] &&
+                            (sourceBoundary < 0 || index < sourceBoundary)
+                    }
+                    def included =
+                        !generated && (
+                            name.endsWith(".gradle") ||
+                            name.endsWith(".gradle.kts") ||
+                            name in ["gradle.properties", "gradle-wrapper.properties"] ||
+                            relative == "gradle/libs.versions.toml" ||
+                            relative.startsWith("buildSrc/")
+                        )
+                    if (included) {
+                        if (buildFiles.put(relative, sha256File(file)) != null) {
+                            throw new GradleException(
+                                "Duplicate normalized build snapshot path: " + relative
+                            )
+                        }
+                    }
+                }
+            }
+            def settingsFiles = [
+                new File(root.projectDir, "settings.gradle"),
+                new File(root.projectDir, "settings.gradle.kts")
+            ].findAll { it.isFile() }
+            if (settingsFiles.size() != 1) {
+                throw new GradleException(
+                    "Expected exactly one settings.gradle or settings.gradle.kts"
+                )
+            }
+            def settingsFile = settingsFiles[0].canonicalFile
+            def normalizedRows = rows.values().collect { row ->
+                def copy = new LinkedHashMap(row)
+                copy.configurations = row.configurations.toList().sort()
+                copy.configurationOrder =
+                    new TreeMap(row.configurationOrder)
+                copy.remove("configuration")
+                copy.remove("classpathOrder")
+                copy
+            }.sort {
+                [it.project, it.component, it.artifact, it.sha256]
+            }
+            def platformIdentity = null
+            def platformAuxiliaries = []
+            if (phase == "source") {
+                def pluginId = "net.neoforged.moddev.legacyforge"
+                def pluginProject = consumerProjects[0]
+                def declarationText = pluginProject.buildFile.getText("UTF-8")
+                def declarationPattern = java.util.regex.Pattern.compile(
+                    /id\s*(?:\(\s*)?['"]net\.neoforged\.moddev\.legacyforge['"]\s*\)?\s*version\s*['"]([^'"]+)['"]/
+                )
+                def declarationMatcher = declarationPattern.matcher(declarationText)
+                if (!declarationMatcher.find()) {
+                    throw new GradleException(
+                        "Cannot find exact LegacyModDev plugin version declaration"
+                    )
+                }
+                def developmentPluginVersion = declarationMatcher.group(1)
+                if (declarationMatcher.find()) {
+                    throw new GradleException(
+                        "Multiple LegacyModDev plugin version declarations"
+                    )
+                }
+                def minecraftVersion =
+                    String.valueOf(pluginProject.findProperty("minecraft_version"))
+                def forgeVersion =
+                    String.valueOf(pluginProject.findProperty("forge_version"))
+                if (minecraftVersion == "null" || forgeVersion == "null") {
+                    throw new GradleException(
+                        "Source platform requires minecraft_version and forge_version"
+                    )
+                }
+                def resolvedLoaderCoordinate =
+                    "net.minecraftforge:forge:${minecraftVersion}-${forgeVersion}"
+                        .toString()
+                if (!edges.any { it.selected == resolvedLoaderCoordinate }) {
+                    throw new GradleException(
+                        "Source graph did not resolve " + resolvedLoaderCoordinate
+                    )
+                }
+                def plugin = pluginProject.plugins.findPlugin(pluginId)
+                def pluginLocation = new File(
+                    plugin.class.protectionDomain.codeSource.location.toURI()
+                ).canonicalFile
+                if (!pluginLocation.isFile()) {
+                    throw new GradleException(
+                        "LegacyModDev implementation is not a hashable file: " +
+                            pluginLocation
+                    )
+                }
+                def generatedArtifactDisplayName =
+                    "build/moddev/artifacts/forge-${minecraftVersion}-${forgeVersion}.jar"
+                        .toString()
+                def generated = normalizedRows.findAll {
+                    it.componentKind == "generated-platform" &&
+                        it.artifact == generatedArtifactDisplayName
+                }
+                if (generated.size() != 1) {
+                    throw new GradleException(
+                        "Expected exact named Forge platform artifact " +
+                            generatedArtifactDisplayName + ", found " + generated*.artifact
+                    )
+                }
+                [
+                    merged:
+                        "forge-${minecraftVersion}-${forgeVersion}-merged.jar".toString(),
+                    sources:
+                        "forge-${minecraftVersion}-${forgeVersion}-sources.jar".toString()
+                ].each { kind, fileName ->
+                    def file = new File(
+                        pluginProject.buildDir,
+                        "moddev/artifacts/${fileName}".toString()
+                    )
+                        .canonicalFile
+                    if (!file.isFile()) {
+                        throw new GradleException(
+                            "Missing exact source platform ${kind} artifact: " + file
+                        )
+                    }
+                    def relative = root.projectDir.toPath().relativize(file.toPath())
+                        .toString().replace(File.separatorChar, '/' as char)
+                    platformAuxiliaries << [
+                        kind: kind,
+                        displayName: relative,
+                        file: file.absolutePath,
+                        size: file.length(),
+                        sha256: sha256File(file)
+                    ]
+                }
+                def declarationFiles = [
+                    pluginProject.buildFile.canonicalFile,
+                    new File(root.projectDir, "gradle.properties").canonicalFile,
+                    settingsFile
+                ]
+                def declarationFileHashes = [:]
+                declarationFiles.each { file ->
+                    if (!file.isFile()) {
+                        throw new GradleException(
+                            "Missing source platform declaration file: " + file
+                        )
+                    }
+                    def relative = root.projectDir.toPath().relativize(file.toPath())
+                        .toString().replace(File.separatorChar, '/' as char)
+                    declarationFileHashes[relative] = sha256File(file)
+                }
+                platformIdentity = [
+                    family: "legacy-forge",
+                    minecraftVersion: minecraftVersion,
+                    loaderVersion: forgeVersion,
+                    resolvedLoaderCoordinate: resolvedLoaderCoordinate,
+                    developmentPluginId: pluginId,
+                    developmentPluginVersion: developmentPluginVersion,
+                    developmentPluginClass: plugin.class.name,
+                    developmentPluginSha256: sha256File(pluginLocation),
+                    generatedArtifactDisplayName: generatedArtifactDisplayName,
+                    generatedArtifactSha256: generated[0].sha256,
+                    declarationFileHashes: declarationFileHashes
+                ]
+            } else {
+                def pluginId = "net.neoforged.moddev"
+                def pluginProject = consumerProjects[0]
+                def declarationText = pluginProject.buildFile.getText("UTF-8")
+                def declarationPattern = java.util.regex.Pattern.compile(
+                    /id\s*(?:\(\s*)?['"]net\.neoforged\.moddev['"]\s*\)?\s*version\s*['"]([^'"]+)['"]/
+                )
+                def declarationMatcher = declarationPattern.matcher(declarationText)
+                if (!declarationMatcher.find()) {
+                    throw new GradleException(
+                        "Cannot find exact ModDevGradle plugin version declaration"
+                    )
+                }
+                def developmentPluginVersion = declarationMatcher.group(1)
+                if (declarationMatcher.find()) {
+                    throw new GradleException(
+                        "Multiple ModDevGradle plugin version declarations"
+                    )
+                }
+                def runtimeDeclarationMatcher = declarationPattern.matcher(
+                    runtimeProject.buildFile.getText("UTF-8")
+                )
+                if (!runtimeDeclarationMatcher.find() ||
+                    runtimeDeclarationMatcher.group(1) != developmentPluginVersion ||
+                    runtimeDeclarationMatcher.find()
+                ) {
+                    throw new GradleException(
+                        "Canonical runtime ModDevGradle version differs from the target consumer"
+                    )
+                }
+                def minecraftVersion =
+                    String.valueOf(pluginProject.findProperty("minecraft_version"))
+                def neoForgeVersion =
+                    String.valueOf(pluginProject.findProperty("neo_forge_version"))
+                if (minecraftVersion == "null" || neoForgeVersion == "null") {
+                    throw new GradleException(
+                        "Target platform requires minecraft_version and neo_forge_version"
+                    )
+                }
+                def resolvedLoaderCoordinate =
+                    "net.neoforged:neoforge:${neoForgeVersion}".toString()
+                if (!edges.any { it.selected == resolvedLoaderCoordinate }) {
+                    throw new GradleException(
+                        "Target graph did not resolve " + resolvedLoaderCoordinate
+                    )
+                }
+                def plugin = pluginProject.plugins.findPlugin(pluginId)
+                def pluginLocation = new File(
+                    plugin.class.protectionDomain.codeSource.location.toURI()
+                ).canonicalFile
+                if (!pluginLocation.isFile()) {
+                    throw new GradleException(
+                        "ModDevGradle implementation is not a hashable file: " +
+                            pluginLocation
+                    )
+                }
+                def generatedArtifactDisplayName =
+                    "build/moddev/artifacts/neoforge-${neoForgeVersion}.jar".toString()
+                def runtimeArtifacts = normalizedRows.findAll {
+                    it.componentKind == "project"
+                }
+                if (runtimeArtifacts.size() != 1 ||
+                    runtimeArtifacts[0].sha256 != expectedRuntimeHash ||
+                    !new File(runtimeArtifacts[0].file).canonicalFile.toPath().startsWith(
+                        new File(runtimeProject.buildDir, "libs").canonicalFile.toPath()
+                    )
+                ) {
+                    throw new GradleException(
+                        "Expected one exact canonical runtime JAR in the target consumer closure"
+                    )
+                }
+                def generated = normalizedRows.findAll {
+                    it.componentKind == "generated-platform" &&
+                        it.artifact == generatedArtifactDisplayName
+                }
+                if (generated.size() != 1) {
+                    throw new GradleException(
+                        "Expected exact named NeoForge platform artifact " +
+                            generatedArtifactDisplayName + ", found " + generated*.artifact
+                    )
+                }
+                [
+                    merged: "neoforge-${neoForgeVersion}-merged.jar".toString(),
+                    sources: "neoforge-${neoForgeVersion}-sources.jar".toString()
+                ].each { kind, fileName ->
+                    def file = new File(
+                        pluginProject.buildDir,
+                        "moddev/artifacts/${fileName}".toString()
+                    )
+                        .canonicalFile
+                    if (!file.isFile()) {
+                        throw new GradleException(
+                            "Missing exact target platform ${kind} artifact: " + file
+                        )
+                    }
+                    def relative = root.projectDir.toPath().relativize(file.toPath())
+                        .toString().replace(File.separatorChar, '/' as char)
+                    platformAuxiliaries << [
+                        kind: kind,
+                        displayName: relative,
+                        file: file.absolutePath,
+                        size: file.length(),
+                        sha256: sha256File(file)
+                    ]
+                }
+                def declarationFiles = [
+                    pluginProject.buildFile.canonicalFile,
+                    new File(root.projectDir, "gradle.properties").canonicalFile,
+                    settingsFile
+                ]
+                def declarationFileHashes = [:]
+                declarationFiles.each { file ->
+                    if (!file.isFile()) {
+                        throw new GradleException(
+                            "Missing target platform declaration file: " + file
+                        )
+                    }
+                    def relative = root.projectDir.toPath().relativize(file.toPath())
+                        .toString().replace(File.separatorChar, '/' as char)
+                    declarationFileHashes[relative] = sha256File(file)
+                }
+                platformIdentity = [
+                    family: "neoforge",
+                    minecraftVersion: minecraftVersion,
+                    loaderVersion: neoForgeVersion,
+                    resolvedLoaderCoordinate: resolvedLoaderCoordinate,
+                    developmentPluginId: pluginId,
+                    developmentPluginVersion: developmentPluginVersion,
+                    developmentPluginClass: plugin.class.name,
+                    developmentPluginSha256: sha256File(pluginLocation),
+                    generatedArtifactDisplayName: generatedArtifactDisplayName,
+                    generatedArtifactSha256: generated[0].sha256,
+                    declarationFileHashes: declarationFileHashes
+                ]
+            }
+            def payload = JsonOutput.toJson([
+                schema: "modporter-legacy-plant-resolved-graph-v1",
+                phase: phase,
+                gradleVersion: gradle.gradleVersion,
+                classRuntimeFeature: classRuntimeFeature,
+                buildFiles: buildFiles,
+                platformIdentity: platformIdentity,
+                platformAuxiliaries: platformAuxiliaries.sort { it.kind },
+                configurations: configurations.sort {
+                    [it.project, it.configuration]
+                },
+                artifacts: normalizedRows,
+                edges: edges.sort {
+                    [it.project, it.configuration, it.from, it.requested, it.selected]
+                },
+                unresolved: unresolved
+            ])
+            def temporary = new File(
+                output.parentFile,
+                output.name + ".tmp-" + UUID.randomUUID().toString()
+            )
+            temporary.setText(payload, "UTF-8")
+            Files.move(
+                temporary.toPath(),
+                output.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING
+            )
+        }
+    }
+    def configuredPhase =
+        System.getenv("MODPORTER_PLANT_INVENTORY_PHASE") ?:
+            System.getProperty("modporterLegacyPlantInventoryPhase")
+    def dependencyConsumerProjects = []
+    if (configuredPhase == "source") {
+        dependencyConsumerProjects = root.allprojects.findAll {
+            it.plugins.hasPlugin("net.neoforged.moddev.legacyforge")
+        }
+    } else if (configuredPhase == "target") {
+        dependencyConsumerProjects = root.allprojects.findAll {
+            it.plugins.hasPlugin("net.neoforged.moddev") &&
+                it.path != allowedRuntimeProject
+        }
+    }
+    dependencyConsumerProjects.sort { it.path }.each { project ->
+        ["compileClasspath", "runtimeClasspath"].each { configurationName ->
+            def configuration = project.configurations.findByName(configurationName)
+            if (configuration == null || !configuration.canBeResolved) return
+            resolverTask.configure { task ->
+                def producerTasks =
+                    configuration.buildDependencies.getDependencies(task)
+                if (producerTasks.contains(task)) {
+                    throw new GradleException(
+                        "Legacy plant inventory configuration depends on its own resolver task: " +
+                            "${project.path}|${configurationName}"
+                    )
+                }
+                dependsOn(producerTasks)
+            }
+        }
+    }
+    if (root.tasks.names.contains("createMinecraftArtifacts")) {
+        resolverTask.configure {
+            dependsOn(root.tasks.named("createMinecraftArtifacts"))
+        }
+    }
+    def runtimeProjects = root.allprojects.findAll {
+        it.path == allowedRuntimeProject
+    }
+    if (runtimeProjects.size() > 1) {
+        throw new GradleException(
+            "Multiple canonical runtime projects have path " + allowedRuntimeProject
+        )
+    }
+    if (runtimeProjects.size() == 1) {
+        def runtimeProject = runtimeProjects[0]
+        if (!runtimeProject.tasks.names.contains("jar")) {
+            throw new GradleException(
+                "Canonical runtime project has no exact jar task: " + allowedRuntimeProject
+            )
+        }
+        resolverTask.configure {
+            dependsOn(runtimeProject.tasks.named("jar"))
+        }
+    }
+}

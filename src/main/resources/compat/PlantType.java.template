@@ -1,0 +1,50 @@
+/*
+ * Copyright (c) Forge Development LLC and contributors
+ * SPDX-License-Identifier: LGPL-2.1-only
+ */
+
+package @PACKAGE@;
+
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
+
+/**
+ * Canonical shared Forge 1.20.1 interned, extensible plant type value.
+ *
+ * Object identity remains meaningful across converted mods because one Jar-in-Jar coordinate is
+ * selected and get(String) interns every accepted name in that shared runtime.
+ */
+public final class PlantType {
+    private static final Pattern INVALID_CHARACTERS = Pattern.compile("[^a-z_]");
+    private static final Map<String, PlantType> VALUES = new ConcurrentHashMap<>();
+
+    public static final PlantType PLAINS = get("plains");
+    public static final PlantType DESERT = get("desert");
+    public static final PlantType BEACH = get("beach");
+    public static final PlantType CAVE = get("cave");
+    public static final PlantType WATER = get("water");
+    public static final PlantType NETHER = get("nether");
+    public static final PlantType CROP = get("crop");
+
+    public static PlantType get(String name) {
+        return VALUES.computeIfAbsent(name, value -> {
+            if (INVALID_CHARACTERS.matcher(value).find()) {
+                throw new IllegalArgumentException(
+                    "PlantType.get() called with invalid name: " + name
+                );
+            }
+            return new PlantType(value);
+        });
+    }
+
+    private final String name;
+
+    private PlantType(String name) {
+        this.name = name;
+    }
+
+    public String getName() {
+        return this.name;
+    }
+}

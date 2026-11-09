@@ -21,6 +21,11 @@ import kotlin.io.path.writeText
 import kotlin.streams.toList
 
 internal class LegacyParticleSerializationMigration {
+    data class MigrationOutcome(
+        val changes: List<Change>,
+        val ownedFiles: Set<Path>
+    )
+
     private data class SourceUnit(
         val file: Path,
         val source: String,
@@ -32,7 +37,7 @@ internal class LegacyParticleSerializationMigration {
         val qualifiedName: String
     )
 
-    fun migrate(projectDir: Path, dryRun: Boolean): List<Change> {
+    fun migrate(projectDir: Path, dryRun: Boolean): MigrationOutcome {
         val parser = JavaParser(ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE))
         val sourceFiles = Files.walk(projectDir)
             .filter { it.extension == "java" }
@@ -61,11 +66,16 @@ internal class LegacyParticleSerializationMigration {
 
         val parsedByFile = linkedMapOf<Path, SourceUnit>()
         sourceFiles.filterValues { source ->
-            source.contains("interface") && source.contains("ParticleOptions.Deserializer")
+            source.contains("interface") &&
+                (source.contains("ParticleOptions.Deserializer") ||
+                    source.contains("interface Deserializer") && source.contains("getStreamCodec"))
         }.keys.forEach { file -> parsedByFile[file] = parseUnit(file) }
         val roots = parsedByFile.values.flatMap { unit ->
             unit.compilationUnit.findAll(ClassOrInterfaceDeclaration::class.java)
-                .filter { declaration -> isLegacyParticleFactoryRoot(unit.compilationUnit, declaration) }
+                .filter { declaration ->
+                    isLegacyParticleFactoryRoot(unit.compilationUnit, declaration) ||
+                        isClosedParticleFactoryRoot(declaration)
+                }
                 .map { declaration ->
                     val packageName = unit.compilationUnit.packageDeclaration
                         .map { it.nameAsString }
@@ -76,7 +86,7 @@ internal class LegacyParticleSerializationMigration {
                     )
                 }
         }
-        if (roots.isEmpty()) return emptyList()
+        if (roots.isEmpty()) return MigrationOutcome(emptyList(), emptySet())
         if (roots.map { it.declarationName }.toSet().size != roots.size) {
             throw IllegalStateException("Legacy particle factory roots have ambiguous simple names")
         }
@@ -113,16 +123,20 @@ internal class LegacyParticleSerializationMigration {
         val units = parsedByFile.values.toList()
         val interfaceRootByName = collectParticleInterfaceRoots(units, roots)
         val changes = mutableListOf<Change>()
+        val ownedFiles = linkedSetOf<Path>()
         units.forEach { unit ->
             val before = unit.compilationUnit.toString()
             var changed = false
+            var owned = false
             unit.compilationUnit.findAll(ClassOrInterfaceDeclaration::class.java).forEach { declaration ->
                 val root = interfaceRootByName[declaration.nameAsString]
                 if (declaration.isInterface && root != null) {
+                    owned = true
                     changed = migrateFactoryInterface(unit.compilationUnit, declaration, root) || changed
                 } else if (!declaration.isInterface) {
                     val implementationRoot = resolveImplementationRoot(declaration, interfaceRootByName)
                     if (implementationRoot != null) {
+                        owned = true
                         changed = migrateParticleImplementation(
                             unit.compilationUnit,
                             declaration,
@@ -133,6 +147,7 @@ internal class LegacyParticleSerializationMigration {
                 }
             }
 
+            if (owned) ownedFiles.add(unit.file.toAbsolutePath().normalize())
             if (changed) {
                 val migrated = unit.compilationUnit.toString()
                 if (migrated != before) {
@@ -160,7 +175,20 @@ internal class LegacyParticleSerializationMigration {
                     remaining.joinToString { projectDir.relativize(it).toString() }
             )
         }
-        return changes
+        return MigrationOutcome(changes, ownedFiles)
+    }
+
+    private fun isClosedParticleFactoryRoot(declaration: ClassOrInterfaceDeclaration): Boolean {
+        if (!declaration.isInterface) return false
+        val hasNestedDeserializer = declaration.members.any { member ->
+            member.isClassOrInterfaceDeclaration &&
+                member.asClassOrInterfaceDeclaration().isInterface &&
+                member.asClassOrInterfaceDeclaration().nameAsString == "Deserializer"
+        }
+        return hasNestedDeserializer &&
+            declaration.methods.any { it.nameAsString == "getStreamCodec" } &&
+            declaration.methods.any { it.nameAsString == "writeToNetwork" } &&
+            declaration.methods.any { it.nameAsString == "createType" && it.toString().contains("streamCodec()") }
     }
 
     private fun isLegacyParticleFactoryRoot(

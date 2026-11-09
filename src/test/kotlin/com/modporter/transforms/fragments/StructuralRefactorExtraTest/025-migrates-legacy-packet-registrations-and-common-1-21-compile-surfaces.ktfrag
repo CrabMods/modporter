@@ -1,0 +1,1186 @@
+
+    @Test
+    fun `migrates legacy packet registrations and common 1_21 compile surfaces`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val networkDir = srcDir.resolve("network")
+        val dataDir = srcDir.resolve("data")
+        networkDir.createDirectories()
+        dataDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.ID)
+            public class ExampleMod {
+                public static final String ID = "example";
+
+                public ExampleMod(IEventBus bus) {
+                    NetworkHandler.init();
+                }
+            }
+        """.trimIndent())
+        networkDir.resolve("NetworkHandler.java").writeText("""
+            package com.example.network;
+
+            import com.example.ExampleMod;
+            import net.minecraftforge.network.NetworkRegistry;
+            import net.minecraftforge.network.simple.SimpleChannel;
+
+            public class NetworkHandler {
+                private static final String PROTOCOL = "1";
+                public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(ExampleMod.ID, () -> PROTOCOL, PROTOCOL::equals, PROTOCOL::equals);
+
+                public static void init() {
+                    int id = 0;
+                    CHANNEL.registerMessage(id++, DemoPacket.class, DemoPacket::encode, DemoPacket::new, DemoPacket.Handler::onMessage,
+                            java.util.Optional.of(net.minecraftforge.network.NetworkDirection.PLAY_TO_CLIENT));
+                    CHANNEL.registerMessage(id++, RegistryPacket.class, RegistryPacket::encode, RegistryPacket::new, RegistryPacket.Handler::onMessage,
+                            java.util.Optional.of(net.minecraftforge.network.NetworkDirection.PLAY_TO_CLIENT));
+                }
+            }
+        """.trimIndent())
+        networkDir.resolve("DemoPacket.java").writeText("""
+            package com.example.network;
+
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.neoforged.neoforge.network.handling.IPayloadContext;
+
+            public class DemoPacket {
+                private final int value;
+
+                public DemoPacket(int value) {
+                    this.value = value;
+                }
+
+                public DemoPacket(FriendlyByteBuf buf) {
+                    this.value = buf.readInt();
+                }
+
+                public void encode(FriendlyByteBuf buf) {
+                    buf.writeInt(this.value);
+                }
+
+                public static class Handler {
+                    public static boolean onMessage(DemoPacket packet, IPayloadContext context) {
+                        return true;
+                    }
+                }
+            }
+        """.trimIndent())
+        networkDir.resolve("RegistryPacket.java").writeText("""
+            package com.example.network;
+
+            import net.minecraft.network.RegistryFriendlyByteBuf;
+            import net.neoforged.neoforge.network.handling.IPayloadContext;
+
+            public class RegistryPacket {
+                private final int value;
+
+                public RegistryPacket(int value) {
+                    this.value = value;
+                }
+
+                public RegistryPacket(RegistryFriendlyByteBuf buf) {
+                    this.value = buf.readVarInt();
+                }
+
+                public void encode(RegistryFriendlyByteBuf buf) {
+                    buf.writeVarInt(this.value);
+                }
+
+                public static class Handler {
+                    public static boolean onMessage(RegistryPacket packet, IPayloadContext context) {
+                        return true;
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Common121.java").writeText("""
+            package com.example;
+
+            import net.minecraft.advancements.critereon.ItemPredicate;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.world.Container;
+            import net.minecraft.world.level.ClipContext;
+            import net.minecraft.world.level.gameevent.GameEvent;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.entity.MobSpawnType;
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.ServerLevelAccessor;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.phys.AABB;
+            import net.minecraft.world.phys.Vec3;
+            import net.neoforged.neoforge.common.NeoForgeMod;
+            import net.neoforged.neoforge.common.Tags;
+            import net.neoforged.neoforge.event.EventHooks;
+            import net.neoforged.neoforge.network.PacketDistributor;
+            import com.example.network.NetworkHandler;
+            import com.example.network.DemoPacket;
+
+            public class Common121 {
+                void send(ServerLevel level, BlockPos pos, Entity entity, ItemStack stack, ItemPredicate predicate, TagKey<Block> tag, Mob mob, ServerLevelAccessor accessor, Container container) {
+                    NetworkHandler.CHANNEL.send(PacketDistributor.TRACKING_ENTITY.with(() -> entity), new DemoPacket(1));
+                    NetworkHandler.CHANNEL.send(PacketDistributor.TRACKING_CHUNK.with(() -> level.getChunkAt(pos)), new DemoPacket(2));
+                    Runnable callback = () -> NetworkHandler.CHANNEL.send(PacketDistributor.ALL.noArg(), new DemoPacket(3));
+                    boolean matches = predicate.matches(stack);
+                    boolean named = stack.hasCustomHoverName();
+                    boolean skull = stack.is(Tags.Items.HEADS);
+                    AttributeInstance reach = entity instanceof net.minecraft.world.entity.player.Player player ? player.getAttribute(NeoForgeMod.BLOCK_REACH.get()) : null;
+                    AttributeInstance gravity = entity.getAttribute(net.neoforged.neoforge.common.NeoForgeMod.ENTITY_GRAVITY.get());
+                    AttributeInstance step = entity.getAttribute(NeoForgeMod.STEP_HEIGHT_ADDITION.get());
+                    boolean grief = EventHooks.getMobGriefingEvent(level, entity);
+                    EventHooks.onFinalizeSpawn(mob, accessor, accessor.getCurrentDifficultyAt(pos), MobSpawnType.SPAWNER, null, null);
+                    AABB box = new AABB(pos.above(16), pos.above(16).offset(1, 1, 1));
+                    Vec3 min = new Vec3(0.0D, 1.0D, 2.0D);
+                    Vec3 max = Vec3.ZERO;
+                    AABB vecBox = AABB.encapsulatingFullBlocks(min, max);
+                    AABB alreadyVecBox = new AABB(min, max);
+                    BuiltInRegistries.BLOCK.tags().getTag(tag).getRandomElement(level.getRandom()).get().defaultBlockState();
+                    int size = container.size();
+                    entity.gameEvent(GameEvent.ENTITY_ROAR);
+                    level.clip(new ClipContext(Vec3.ZERO, Vec3.ZERO, ClipContext.Block.COLLIDER, ClipContext.Fluid.WATER, null));
+                }
+            }
+        """.trimIndent())
+        dataDir.resolve("LootProvider.java").writeText("""
+            package com.example.data;
+
+            import com.example.ExampleLoot;
+            import net.minecraft.data.loot.LootTableSubProvider;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.storage.loot.LootTable;
+            import net.minecraft.world.level.storage.loot.entries.NestedLootTable;
+            import java.util.function.BiConsumer;
+
+            public class LootProvider implements LootTableSubProvider {
+                @Override
+                public void generate(BiConsumer<ResourceLocation, LootTable.Builder> register) {
+                    ResourceLocation id = ResourceLocation.fromNamespaceAndPath("example", "demo");
+                    register.accept(id, LootTable.lootTable());
+                    register.accept(ExampleLoot.ADVANCEMENT_REWARD, LootTable.lootTable());
+                    NestedLootTable.lootTableReference(id);
+                }
+            }
+        """.trimIndent())
+        dataDir.resolve("KeyOnlyLootProvider.java").writeText("""
+            package com.example.data;
+
+            import com.example.ExampleLoot;
+            import net.minecraft.data.loot.LootTableSubProvider;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.storage.loot.LootTable;
+            import java.util.function.BiConsumer;
+
+            public class KeyOnlyLootProvider implements LootTableSubProvider {
+                @Override
+                public void generate(BiConsumer<ResourceLocation, LootTable.Builder> register) {
+                    register.accept(ExampleLoot.ADVANCEMENT_REWARD, LootTable.lootTable());
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LootIds.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.Sets;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.storage.loot.LootTable;
+            import java.util.Set;
+
+            public class LootIds {
+                private static final Set<ResourceLocation> MOD_LOOT_TABLES = Sets.newHashSet();
+                public static final ResourceLocation ENTITY_DROP = register("entities/demo");
+                public final ResourceLocation lootTable;
+
+                public LootIds(String path) {
+                    this.lootTable = ExampleMod.prefix(path);
+                }
+
+                private static ResourceLocation register(String id) {
+                    return register(ExampleMod.prefix(id));
+                }
+
+                private static ResourceLocation register(ResourceLocation id) {
+                    if (MOD_LOOT_TABLES.add(id)) {
+                        return id;
+                    }
+                    throw new IllegalArgumentException(id + " duplicate");
+                }
+
+                public static Set<ResourceLocation> allBuiltin() {
+                    return MOD_LOOT_TABLES;
+                }
+            }
+        """.trimIndent())
+        dataDir.resolve("LootIdsProviderFactory.java").writeText("""
+            package com.example.data;
+
+            import com.example.LootIds;
+            import java.util.List;
+            import net.minecraft.data.PackOutput;
+            import net.minecraft.data.loot.LootTableProvider;
+
+            public class LootIdsProviderFactory {
+                public static LootTableProvider create(PackOutput output) {
+                    return new LootTableProvider(output, LootIds.allBuiltin(), List.of());
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleLoot.java").writeText("""
+            package com.example;
+
+            import java.util.Collections;
+            import java.util.HashSet;
+            import java.util.Set;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleLoot {
+                private static final Set<ResourceLocation> LOOT_TABLES = new HashSet<>();
+                public static final Set<ResourceLocation> IMMUTABLE_LOOT_TABLES = Collections.unmodifiableSet(LOOT_TABLES);
+                public static final ResourceLocation ENTITY_DROP = register("entities/demo");
+                public static final ResourceLocation ADVANCEMENT_REWARD = register("advancements/demo");
+
+                private static ResourceLocation register(String id) {
+                    return register(ExampleMod.prefix(id));
+                }
+
+                private static ResourceLocation register(ResourceLocation id) {
+                    if (LOOT_TABLES.add(id)) {
+                        return id;
+                    }
+                    throw new IllegalArgumentException(id + " duplicate");
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("RuntimeLootUser.java").writeText("""
+            package com.example;
+
+            import net.minecraft.advancements.AdvancementRewards;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.level.storage.loot.LootTable;
+            import net.neoforged.neoforge.common.loot.LootTableIdCondition;
+            import java.util.Optional;
+
+            public class RuntimeLootUser {
+                public ResourceLocation getLootLocation() {
+                    return ExampleLoot.ENTITY_DROP;
+                }
+
+                public void spawn(ServerLevel level) {
+                    LootTable table = level.getServer().getLootData().getLootTable(this.getLootLocation());
+                }
+
+                public AdvancementRewards rewards() {
+                    return new AdvancementRewards(0, new ResourceLocation[]{ExampleLoot.ADVANCEMENT_REWARD}, new ResourceLocation[0], Optional.empty());
+                }
+
+                public Object condition() {
+                    return LootTableIdCondition.builder(ExampleLoot.ENTITY_DROP);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LootLocationOnly.java").writeText("""
+            package com.example;
+
+            import net.minecraft.resources.ResourceLocation;
+
+            public class LootLocationOnly {
+                public ResourceLocation getLootLocation() {
+                    return ExampleLoot.ENTITY_DROP;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("FluidInterfaces.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.LevelAccessor;
+            import net.minecraft.world.level.block.BucketPickup;
+            import net.minecraft.world.level.block.LiquidBlockContainer;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.level.material.Fluid;
+            import net.minecraft.world.level.material.FluidState;
+
+            public interface FluidInterfaces extends BucketPickup, LiquidBlockContainer {
+                @Override
+                default ItemStack pickupBlock(LevelAccessor level, BlockPos pos, BlockState state) {
+                    return ItemStack.EMPTY;
+                }
+
+                @Override
+                default boolean canPlaceLiquid(BlockGetter level, BlockPos pos, BlockState state, Fluid fluid) {
+                    return true;
+                }
+
+                @Override
+                default boolean placeLiquid(LevelAccessor level, BlockPos pos, BlockState state, FluidState fluidState) {
+                    return true;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("VariantSpawnerBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.block.BaseEntityBlock;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class VariantSpawnerBlock extends BaseEntityBlock {
+                private final DemoVariant variant;
+
+                public VariantSpawnerBlock(BlockBehaviour.Properties properties, DemoVariant variant) {
+                    super(properties);
+                    this.variant = variant;
+                }
+
+                @Override
+                public BlockEntity newBlockEntity(BlockPos pos, BlockState state) {
+                    return null;
+                }
+
+                enum DemoVariant {
+                    ONE;
+                    public static final com.mojang.serialization.Codec<DemoVariant> CODEC = null;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("NamedVariant.java").writeText("""
+            package com.example;
+
+            import net.minecraft.util.StringRepresentable;
+
+            public enum NamedVariant implements StringRepresentable {
+                FIRST,
+                SECOND;
+
+                @Override
+                public String getSerializedName() {
+                    return name().toLowerCase(java.util.Locale.ROOT);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TriggerPredicate.java").writeText("""
+            package com.example;
+
+            import net.minecraft.advancements.critereon.ItemPredicate;
+            import net.minecraft.world.item.ItemStack;
+            import java.util.Optional;
+
+            public class TriggerPredicate {
+                public void trigger(ItemStack stack) {
+                    this.trigger(instance -> instance.matches(stack));
+                }
+
+                void trigger(java.util.function.Predicate<TriggerInstance> predicate) {
+                }
+
+                public record TriggerInstance(Optional<ItemPredicate> item) {
+                    public boolean matches(ItemStack stack) {
+                        return this.item.isEmpty() || this.item.get().matches(stack);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleWallSignBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.block.WallSignBlock;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.level.block.state.properties.WoodType;
+
+            public class ExampleWallSignBlock extends WallSignBlock {
+                public ExampleWallSignBlock(Properties properties, WoodType type) {
+                    super(properties, type);
+                }
+
+                @Override
+                public BlockEntity newBlockEntity(BlockPos pos, BlockState state) {
+                    return null;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ThrowGoal.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.ai.goal.MeleeAttackGoal;
+            import net.minecraft.world.entity.PathfinderMob;
+            import org.jetbrains.annotations.NotNull;
+
+            public class ThrowGoal extends MeleeAttackGoal {
+                public ThrowGoal(PathfinderMob mob) {
+                    super(mob, 1.0D, true);
+                }
+
+                @Override
+                protected void checkAndPerformAttack(@NotNull LivingEntity victim, double distance) {
+                    double reach = this.getAttackReachSqr(victim);
+                    if (distance <= reach && this.getTicksUntilNextAttack() <= 0) {
+                        this.resetAttackCooldown();
+                        this.mob.doHurtTarget(victim);
+                    }
+                }
+
+                public static class LoudThrowGoal extends ThrowGoal {
+                    public LoudThrowGoal(PathfinderMob mob) {
+                        super(mob);
+                    }
+
+                    @Override
+                    protected void checkAndPerformAttack(LivingEntity victim, double distance) {
+                        super.checkAndPerformAttack(victim, distance);
+                        if (distance > 4.0D) {
+                            this.mob.swing(net.minecraft.world.InteractionHand.MAIN_HAND);
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LegacyRiderBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.phys.HitResult;
+            import net.minecraft.world.phys.Vec3;
+            import net.minecraft.world.entity.player.Player;
+
+            public class LegacyRiderBlock extends Block {
+                public LegacyRiderBlock(BlockBehaviour.Properties properties) {
+                    super(properties);
+                }
+
+                @Override
+                public ItemStack getCloneItemStack(BlockState state, HitResult result, BlockGetter getter, BlockPos pos, Player player) {
+                    return getter.getBlockEntity(pos) == null ? ItemStack.EMPTY : new ItemStack(this.asItem());
+                }
+
+                public static class LegacyMount extends Entity {
+                    public LegacyMount(EntityType<?> type, Level level) {
+                        super(type, level);
+                    }
+
+                    @Override
+                    public void positionRider(Entity passenger, Entity.MoveFunction callback) {
+                        Vec3 riderPos = this.getRiderPosition(passenger);
+                        callback.accept(passenger, riderPos.x(), riderPos.y(), riderPos.z());
+                    }
+
+                    @Override
+                    public double getPassengersRidingOffset() {
+                        return 2.25D;
+                    }
+
+                    private Vec3 getRiderPosition(Entity passenger) {
+                        float distance = 0.4F;
+                        double dx = Math.cos((this.getYRot() + 90) * Math.PI / 180.0D) * distance;
+                        double dz = Math.sin((this.getYRot() + 90) * Math.PI / 180.0D) * distance;
+                        return new Vec3(this.getX() + dx, this.getY() + this.getPassengersRidingOffset() + passenger.getMyRidingOffset(), this.getZ() + dz);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("EntityOverrideShapes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.BlockUtil;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EntityDimensions;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.Pose;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.phys.Vec3;
+
+            public class EntityOverrideShapes extends Entity {
+                enum Status {
+                    IN_WATER
+                }
+
+                public EntityOverrideShapes(EntityType<?> type, Level level) {
+                    super(type, level);
+                }
+
+                @Override
+                protected float getEyeHeight(Pose pose, EntityDimensions size) {
+                    return this.isShiftKeyDown() ? 0.5F : super.getEyeHeight(pose);
+                }
+
+                @Override
+                public double getMyRidingOffset() {
+                    return -0.25D;
+                }
+
+                @Override
+                public boolean canChangeDimensions() {
+                    return false;
+                }
+
+                @Override
+                public boolean canBeLeashed(Player player) {
+                    return false;
+                }
+
+                @Override
+                protected Vec3 getRelativePortalPosition(Direction.Axis axis, BlockUtil.FoundRectangle rectangle) {
+                    return Vec3.ZERO;
+                }
+
+                public Status getStatus() {
+                    return Status.IN_WATER;
+                }
+
+                public boolean persisted() {
+                    return this.getPersistedStatus() == Status.IN_WATER;
+                }
+
+                @Override
+                public void remove(Entity.RemovalReason reason) {
+                    this.setRemoved(reason);
+                    this.invalidateCaps();
+                }
+
+                public void invalidate(BlockEntity blockEntity) {
+                    blockEntity.invalidateCaps();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LivingOverrideShapes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityDimensions;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.entity.Pose;
+
+            public abstract class LivingOverrideShapes extends Mob {
+                @Override
+                protected EntityDimensions getDefaultDimensions(Pose pose) {
+                    return EntityDimensions.fixed(1.0F, 2.0F);
+                }
+
+                @Override
+                protected float getStandingEyeHeight(Pose pose, EntityDimensions size) {
+                    return size.height() * 0.9F;
+                }
+
+                @Override
+                public boolean canBreatheUnderwater() {
+                    return true;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("AttackGoals.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.InteractionHand;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.entity.PathfinderMob;
+            import net.minecraft.world.entity.ai.goal.Goal;
+            import net.minecraft.world.entity.ai.goal.MeleeAttackGoal;
+
+            public class AttackGoals {
+                static class SimpleGoal extends Goal {
+                    private final Mob mob;
+                    private int attackTick;
+
+                    SimpleGoal(Mob mob) {
+                        this.mob = mob;
+                    }
+
+                    @Override
+                    public boolean canUse() {
+                        LivingEntity target = mob.getTarget();
+                        return target != null && this.getAttackReachSqr(target) >= this.mob.distanceToSqr(target.getX(), target.getY(), target.getZ());
+                    }
+
+                    public void tick() {
+                        LivingEntity livingentity = this.mob.getTarget();
+                        double d0 = this.mob.getPerceivedTargetDistanceSquareForMeleeAttack(livingentity);
+                        this.checkAndPerformAttack(livingentity, d0);
+                    }
+
+                    protected void checkAndPerformAttack(LivingEntity entity, double distance) {
+                        double reach = this.getAttackReachSqr(entity);
+                        if (distance <= reach) {
+                            this.attackTick = this.adjustedTickDelay(20);
+                            this.mob.swing(InteractionHand.MAIN_HAND);
+                        }
+                    }
+
+                    protected double getAttackReachSqr(LivingEntity entity) {
+                        return this.mob.getBbWidth() * 2.0F * this.mob.getBbWidth() * 2.0F + entity.getBbWidth();
+                    }
+                }
+
+                static class ReachGoal extends MeleeAttackGoal {
+                    ReachGoal(PathfinderMob mob) {
+                        super(mob, 1.0D, false);
+                    }
+
+                    @Override
+                    protected double getAttackReachSqr(LivingEntity target) {
+                        return this.mob.getBbWidth() * this.mob.getBbHeight();
+                    }
+
+                    @Override
+                    public void tick() {
+                        LivingEntity livingentity = this.mob.getTarget();
+                        double d0 = this.mob.getPerceivedTargetDistanceSquareForMeleeAttack(livingentity);
+                        this.checkAndPerformAttack(livingentity, d0);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val packet = networkDir.resolve("DemoPacket.java").readText()
+        val registryPacket = networkDir.resolve("RegistryPacket.java").readText()
+        val network = networkDir.resolve("ModNetwork.java").readText()
+        val handler = networkDir.resolve("NetworkHandler.java").readText()
+        val common = srcDir.resolve("Common121.java").readText()
+        val loot = dataDir.resolve("LootProvider.java").readText()
+        val keyOnlyLoot = dataDir.resolve("KeyOnlyLootProvider.java").readText()
+        val lootIds = srcDir.resolve("LootIds.java").readText()
+        val exampleLoot = srcDir.resolve("ExampleLoot.java").readText()
+        val runtimeLoot = srcDir.resolve("RuntimeLootUser.java").readText()
+        val lootLocationOnly = srcDir.resolve("LootLocationOnly.java").readText()
+        val fluidInterfaces = srcDir.resolve("FluidInterfaces.java").readText()
+        val variantSpawner = srcDir.resolve("VariantSpawnerBlock.java").readText()
+        val namedVariant = srcDir.resolve("NamedVariant.java").readText()
+        val triggerPredicate = srcDir.resolve("TriggerPredicate.java").readText()
+        val signBlock = srcDir.resolve("ExampleWallSignBlock.java").readText()
+        val throwGoal = srcDir.resolve("ThrowGoal.java").readText()
+        val legacyRiderBlock = srcDir.resolve("LegacyRiderBlock.java").readText()
+        val entityOverrideShapes = srcDir.resolve("EntityOverrideShapes.java").readText()
+        val livingOverrideShapes = srcDir.resolve("LivingOverrideShapes.java").readText()
+        val attackGoals = srcDir.resolve("AttackGoals.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-packet-payload" }, "changes=${result.changes} errors=${result.errors}")
+        assertTrue(packet.contains("implements CustomPacketPayload"))
+        assertTrue(packet.contains("StreamCodec.of((buf, packet) -> packet.encode(buf), DemoPacket::new)"))
+        assertTrue(registryPacket.contains("StreamCodec<RegistryFriendlyByteBuf, RegistryPacket>"))
+        assertTrue(network.contains("registrar.playToClient("))
+        assertTrue(handler.contains("public static void init()"))
+        assertTrue(!handler.contains("SimpleChannel"))
+        assertTrue(common.contains("PacketDistributor.sendToPlayersTrackingEntity(entity, new DemoPacket(1))"))
+        assertTrue(common.contains("PacketDistributor.sendToPlayersTrackingChunk(level, new ChunkPos(pos), new DemoPacket(2))"))
+        assertTrue(common.contains("Runnable callback = () -> PacketDistributor.sendToAllPlayers(new DemoPacket(3));"))
+        assertTrue(common.contains("predicate.test(stack)"))
+        assertTrue(common.contains("stack.has(DataComponents.CUSTOM_NAME)"))
+        assertTrue(common.contains("stack.is(ItemTags.SKULLS)"))
+        assertTrue(common.contains("Attributes.BLOCK_INTERACTION_RANGE"))
+        assertTrue(common.contains("entity.getAttribute(Attributes.GRAVITY)"))
+        assertTrue(common.contains("entity.getAttribute(Attributes.STEP_HEIGHT)"))
+        assertFalse(common.contains("STEP_HEIGHT_ADDITION"))
+        assertFalse(common.contains("NeoForgeMod"))
+        assertTrue(common.contains("EventHooks.canEntityGrief(level, entity)"))
+        assertTrue(common.contains("EventHooks.finalizeMobSpawn(mob, accessor, accessor.getCurrentDifficultyAt(pos), MobSpawnType.SPAWNER, null)"))
+        assertTrue(common.contains("new AABB(Vec3.atLowerCornerOf(pos.above(16)), Vec3.atLowerCornerOf(pos.above(16).offset(1, 1, 1)))"), common)
+        assertTrue(common.contains("AABB vecBox = new AABB(min, max);"))
+        assertTrue(common.contains("AABB alreadyVecBox = new AABB(min, max);"))
+        assertFalse(common.contains("AABB.encapsulatingFullBlocks(min, max)"))
+        assertTrue(common.contains("BuiltInRegistries.BLOCK.getRandomElementOf(tag, level.getRandom()).map(holder -> holder.value().defaultBlockState()).orElseGet(Blocks.AIR::defaultBlockState)"))
+        assertTrue(common.contains("container.getContainerSize()"))
+        assertTrue(common.contains("GameEvent.ENTITY_ACTION"))
+        assertTrue(common.contains("CollisionContext.empty()"))
+        assertTrue(loot.contains("BiConsumer<ResourceKey<LootTable>, LootTable.Builder>"))
+        assertTrue(loot.contains("register.accept(ResourceKey.create(Registries.LOOT_TABLE, id), LootTable.lootTable())"))
+        assertTrue(loot.contains("register.accept(ExampleLoot.ADVANCEMENT_REWARD, LootTable.lootTable())"))
+        assertFalse(loot.contains("ResourceKey.create(Registries.LOOT_TABLE, ExampleLoot.ADVANCEMENT_REWARD)"))
+        assertTrue(loot.contains("NestedLootTable.lootTableReference(ResourceKey.create(Registries.LOOT_TABLE, id))"))
+        assertTrue(keyOnlyLoot.contains("import net.minecraft.resources.ResourceKey;"))
+        assertTrue(keyOnlyLoot.contains("BiConsumer<ResourceKey<LootTable>, LootTable.Builder>"))
+        assertTrue(keyOnlyLoot.contains("register.accept(ExampleLoot.ADVANCEMENT_REWARD, LootTable.lootTable())"))
+        assertTrue(lootIds.contains("Set<ResourceKey<LootTable>> MOD_LOOT_TABLES"))
+        assertTrue(lootIds.contains("public static final ResourceKey<LootTable> ENTITY_DROP = register(\"entities/demo\")"))
+        assertTrue(lootIds.contains("this.lootTable = ResourceKey.create(Registries.LOOT_TABLE, ExampleMod.prefix(path))"))
+        assertTrue(lootIds.contains("private static ResourceKey<LootTable> register(String id)"))
+        assertTrue(lootIds.contains("private static ResourceKey<LootTable> register(ResourceKey<LootTable> id)"))
+        assertTrue(exampleLoot.contains("Set<ResourceKey<LootTable>> LOOT_TABLES"))
+        assertTrue(exampleLoot.contains("public static final ResourceKey<LootTable> ENTITY_DROP = register(\"entities/demo\")"))
+        assertTrue(exampleLoot.contains("public static final Set<ResourceKey<LootTable>> IMMUTABLE_LOOT_TABLES"))
+        assertTrue(runtimeLoot.contains("public ResourceKey<LootTable> getLootLocation()"))
+        assertTrue(runtimeLoot.contains("level.getServer().reloadableRegistries().getLootTable(this.getLootLocation())"))
+        assertTrue(runtimeLoot.contains("new AdvancementRewards(0, java.util.List.of(ExampleLoot.ADVANCEMENT_REWARD), java.util.List.of(), Optional.empty())"))
+        assertTrue(runtimeLoot.contains("LootTableIdCondition.builder(ExampleLoot.ENTITY_DROP.location())"))
+        assertFalse(runtimeLoot.contains("new ResourceLocation[]{ExampleLoot.ADVANCEMENT_REWARD}"))
+        assertTrue(lootLocationOnly.contains("public ResourceKey<LootTable> getLootLocation()"))
+        assertFalse(lootLocationOnly.contains("import net.minecraft.resources.ResourceLocation;"))
+        assertTrue(fluidInterfaces.contains("pickupBlock(Player player, LevelAccessor level, BlockPos pos, BlockState state)"))
+        assertTrue(fluidInterfaces.contains("canPlaceLiquid(Player player, BlockGetter level, BlockPos pos, BlockState state, Fluid fluid)"))
+        assertTrue(variantSpawner.contains("com.mojang.serialization.codecs.RecordCodecBuilder.mapCodec"))
+        assertTrue(variantSpawner.contains("DemoVariant.CODEC.fieldOf(\"variant\").forGetter(o -> o.variant)"))
+        assertTrue(variantSpawner.contains(".apply(instance, (variant, properties) -> new VariantSpawnerBlock(properties, variant))"))
+        assertTrue(namedVariant.contains("StringRepresentable.EnumCodec<NamedVariant> CODEC = StringRepresentable.fromEnum(NamedVariant::values)"))
+        assertTrue(triggerPredicate.contains("instance -> instance.matches(stack)"))
+        assertTrue(triggerPredicate.contains("this.item.get().test(stack)"))
+        assertTrue(signBlock.contains("super(type, properties);"))
+        assertTrue(signBlock.contains("public static final com.mojang.serialization.MapCodec<net.minecraft.world.level.block.WallSignBlock> CODEC"))
+        assertTrue(signBlock.contains("public com.mojang.serialization.MapCodec<net.minecraft.world.level.block.WallSignBlock> codec()"))
+        assertTrue(throwGoal.contains("protected void checkAndPerformAttack(@NotNull LivingEntity victim)"))
+        assertTrue(throwGoal.contains("this.canPerformAttack(victim) && this.getTicksUntilNextAttack() <= 0"))
+        assertTrue(throwGoal.contains("super.checkAndPerformAttack(victim);"))
+        assertTrue(throwGoal.contains("this.mob.distanceToSqr(victim) > 4.0D"))
+        assertTrue(!throwGoal.contains("getAttackReachSqr"))
+        assertTrue(!throwGoal.contains("double distance"))
+        assertTrue(legacyRiderBlock.contains("getCloneItemStack(BlockState state, HitResult result, LevelReader getter, BlockPos pos, Player player)"))
+        assertTrue(legacyRiderBlock.contains("protected Vec3 getPassengerAttachmentPoint(Entity entity, EntityDimensions dimensions, float yRot)"))
+        assertTrue(legacyRiderBlock.contains("return new Vec3(0.0F, 2.25D, 0.4F);"))
+        assertTrue(!legacyRiderBlock.contains("positionRider("))
+        assertTrue(!legacyRiderBlock.contains("getPassengersRidingOffset"))
+        assertTrue(entityOverrideShapes.contains("public EntityDimensions getDimensions(Pose pose)"))
+        assertTrue(entityOverrideShapes.contains("super.getDimensions(pose).withEyeHeight(this.isShiftKeyDown() ? 0.5F : super.getDimensions(pose).eyeHeight())"))
+        assertFalse(entityOverrideShapes.contains("getDefaultDimensions(Pose pose)"))
+        assertTrue(livingOverrideShapes.contains("protected EntityDimensions getDefaultDimensions(Pose pose)"))
+        assertTrue(livingOverrideShapes.contains("EntityDimensions dimensions = EntityDimensions.fixed(1.0F, 2.0F);"))
+        assertTrue(livingOverrideShapes.contains("return dimensions.withEyeHeight(dimensions.height() * 0.9F);"))
+        assertTrue(livingOverrideShapes.contains("public boolean canDrownInFluidType(FluidType type)"))
+        assertTrue(livingOverrideShapes.contains("if (type == net.neoforged.neoforge.common.NeoForgeMod.WATER_TYPE.value())"))
+        assertTrue(livingOverrideShapes.contains("return false;"))
+        assertTrue(livingOverrideShapes.contains("return super.canDrownInFluidType(type);"))
+        assertTrue(livingOverrideShapes.contains("import net.neoforged.neoforge.fluids.FluidType;"))
+        assertFalse(livingOverrideShapes.contains("getStandingEyeHeight("))
+        assertFalse(livingOverrideShapes.contains("canBreatheUnderwater("))
+        assertTrue(entityOverrideShapes.contains("public Vec3 getVehicleAttachmentPoint(Entity vehicle)"))
+        assertTrue(entityOverrideShapes.contains("return new Vec3(0.0D, -0.25D, 0.0D);"))
+        assertTrue(entityOverrideShapes.contains("public boolean canChangeDimensions(Level from, Level to)"))
+        assertTrue(entityOverrideShapes.contains("public boolean canBeLeashed()"))
+        assertFalse(entityOverrideShapes.contains("canBeLeashed(Player"))
+        assertTrue(entityOverrideShapes.contains("public Vec3 getRelativePortalPosition(Direction.Axis axis, BlockUtil.FoundRectangle rectangle)"))
+        assertFalse(entityOverrideShapes.contains("protected Vec3 getRelativePortalPosition"))
+        assertTrue(entityOverrideShapes.contains("return this.getStatus() == Status.IN_WATER;"))
+        assertFalse(entityOverrideShapes.contains("getPersistedStatus()"))
+        assertTrue(entityOverrideShapes.contains("this.setRemoved(reason);"))
+        assertFalse(entityOverrideShapes.contains("this.invalidateCapabilities();"), entityOverrideShapes)
+        assertTrue(entityOverrideShapes.contains("blockEntity.invalidateCapabilities();"))
+        assertTrue(attackGoals.contains("return target != null && this.mob.isWithinMeleeAttackRange(target);"))
+        assertTrue(attackGoals.contains("this.checkAndPerformAttack(livingentity);"))
+        assertTrue(attackGoals.contains("double d0 = this.mob.distanceToSqr(livingentity);"))
+        assertFalse(attackGoals.contains("getPerceivedTargetDistanceSquareForMeleeAttack"))
+        assertFalse(attackGoals.contains("checkAndPerformAttack(livingentity, d0)"))
+        assertTrue(attackGoals.contains("this.attackTick <= 0 && this.mob.isWithinMeleeAttackRange(entity) && this.mob.hasLineOfSight(entity)"))
+        assertTrue(attackGoals.contains("protected boolean canPerformAttack(LivingEntity target)"))
+        assertTrue(attackGoals.contains("(this.mob.getBbWidth() * this.mob.getBbHeight()) >= this.mob.distanceToSqr(target.getX(), target.getY(), target.getZ())"))
+        assertTrue(!attackGoals.contains("getAttackReachSqr"))
+    }
+
+    @Test
+    fun `migrates top level melee attack reach overrides without dropping custom reach logic`() {
+        val projectDir = createFile("ContinuousMeleeAttackGoal.java", """
+            package com.example;
+
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.PathfinderMob;
+            import net.minecraft.world.entity.ai.goal.MeleeAttackGoal;
+
+            public class ContinuousMeleeAttackGoal extends MeleeAttackGoal {
+                private final double speedModifier;
+
+                public ContinuousMeleeAttackGoal(PathfinderMob mob, double speedModifier, boolean followingTargetEvenIfNotSeen) {
+                    super(mob, speedModifier, followingTargetEvenIfNotSeen);
+                    this.speedModifier = speedModifier;
+                }
+
+                /**
+                 * Method override to make the mob walk toward its enemy if there is no path.
+                 */
+                @Override
+                public boolean canUse() {
+                    if (!super.canUse()) {
+                        LivingEntity target = this.mob.getTarget();
+                        if (target != null) {
+                            this.mob.getMoveControl().setWantedPosition(target.getX(), target.getY(), target.getZ(), this.speedModifier);
+                        }
+                        return false;
+                    }
+                    return true;
+                }
+
+                @Override
+                protected double getAttackReachSqr(LivingEntity attackTarget) {
+                    return 2.0F + attackTarget.getBbWidth();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/ContinuousMeleeAttackGoal.java").readText()
+
+        assertTrue(migrated.contains("public boolean canUse()"), migrated)
+        assertTrue(migrated.contains("this.mob.getMoveControl().setWantedPosition"), migrated)
+        assertTrue(migrated.contains("protected boolean canPerformAttack(LivingEntity attackTarget)"), migrated)
+        assertTrue(migrated.contains("(2.0F + attackTarget.getBbWidth()) >= this.mob.distanceToSqr(attackTarget.getX(), attackTarget.getY(), attackTarget.getZ())"), migrated)
+        assertTrue(migrated.contains("this.isTimeToAttack()"), migrated)
+        assertTrue(migrated.contains("this.mob.getSensing().hasLineOfSight(attackTarget)"), migrated)
+        assertFalse(migrated.contains("getAttackReachSqr"), migrated)
+    }
+
+    @Test
+    fun `migrates built in registry delegate maps by declared map key type`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val mixinDir = srcDir.resolve("mixin")
+        srcDir.createDirectories()
+        mixinDir.createDirectories()
+        mixinDir.resolve("BlockColorsAccessor.java").writeText("""
+            package com.example.mixin;
+
+            import net.minecraft.client.color.block.BlockColor;
+            import net.minecraft.client.color.block.BlockColors;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.level.block.Block;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.gen.Accessor;
+
+            import java.util.Map;
+
+            @Mixin(BlockColors.class)
+            public interface BlockColorsAccessor {
+                @Accessor("blockColors")
+                Map<Holder.Reference<Block>, BlockColor> demo${'$'}getBlockColors();
+            }
+        """.trimIndent())
+        srcDir.resolve("ColorResolver.java").writeText("""
+            package com.example;
+
+            import com.example.mixin.BlockColorsAccessor;
+            import net.minecraft.client.color.block.BlockColor;
+            import net.minecraft.client.color.block.BlockColors;
+            import net.minecraft.core.Holder;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.Blocks;
+
+            import java.util.HashMap;
+            import java.util.Map;
+
+            public class ColorResolver {
+                public void copy(BlockColors colors) {
+                    Map<Block, BlockColor> map = new HashMap<>();
+                    Map<Holder.Reference<Block>, BlockColor> blockColors = ((BlockColorsAccessor) colors).demo${'$'}getBlockColors();
+                    map.put(Blocks.SHORT_GRASS, blockColors.get(BuiltInRegistries.BLOCK.getDelegateOrThrow(Blocks.SHORT_GRASS)));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val accessor = mixinDir.resolve("BlockColorsAccessor.java").readText()
+        val resolver = srcDir.resolve("ColorResolver.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(accessor.contains("Map<Block, BlockColor> demo${'$'}getBlockColors()"), accessor)
+        assertTrue(resolver.contains("Map<Block, BlockColor> blockColors = ((BlockColorsAccessor) colors).demo${'$'}getBlockColors();"), resolver)
+        assertTrue(resolver.contains("blockColors.get(Blocks.SHORT_GRASS)"), resolver)
+        assertFalse(accessor.contains("Holder.Reference<Block>"))
+        assertFalse(resolver.contains("Holder.Reference<Block>"))
+        assertFalse(resolver.contains("getDelegateOrThrow"))
+    }
+
+    @Test
+    fun `migrates MissingMappingsEvent remappers to deferred register aliases`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val initDir = srcDir.resolve("init")
+        val utilDir = srcDir.resolve("util")
+        initDir.createDirectories()
+        utilDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+            import com.example.init.ModBlocks;
+            import com.example.init.ModEntities;
+            import com.example.init.ModItems;
+
+            @Mod(ExampleMod.ID)
+            public class ExampleMod {
+                public static final String ID = "example";
+
+                public ExampleMod(IEventBus bus) {
+                    ModBlocks.BLOCKS.register(bus);
+                    ModItems.ITEMS.register(bus);
+                    ModEntities.ENTITIES.register(bus);
+                }
+            }
+        """.trimIndent())
+        initDir.resolve("ModBlocks.java").writeText("""
+            package com.example.init;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.block.Block;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+            import com.example.ExampleMod;
+
+            public class ModBlocks {
+                public static final DeferredRegister<Block> BLOCKS = DeferredRegister.create(Registries.BLOCK, ExampleMod.ID);
+                public static final Object NEW_STONE = BLOCKS.register("new_stone", () -> null);
+                public static final Object DARK_FENCE_GATE = BLOCKS.register("dark_fence_gate", () -> null);
+            }
+        """.trimIndent())
+        initDir.resolve("ModItems.java").writeText("""
+            package com.example.init;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.Item;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+            import com.example.ExampleMod;
+
+            public class ModItems {
+                public static final DeferredRegister<Item> ITEMS = DeferredRegister.create(Registries.ITEM, ExampleMod.ID);
+                public static final Object NEW_STONE = ITEMS.register("new_stone", () -> null);
+                public static final Object DARK_FENCE_GATE = ITEMS.register("dark_fence_gate", () -> null);
+            }
+        """.trimIndent())
+        initDir.resolve("ModEntities.java").writeText("""
+            package com.example.init;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.entity.EntityType;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+            import com.example.ExampleMod;
+
+            public class ModEntities {
+                public static final DeferredRegister<EntityType<?>> ENTITIES = DeferredRegister.create(Registries.ENTITY_TYPE, ExampleMod.ID);
+            }
+        """.trimIndent())
+        utilDir.resolve("LegacyRemapper.java").writeText("""
+            package com.example.util;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.level.block.Block;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.event.MissingMappingsEvent;
+            import com.example.ExampleMod;
+
+            public class LegacyRemapper {
+                @SubscribeEvent
+                public static void remap(MissingMappingsEvent event) {
+                    for (MissingMappingsEvent.Mapping<Block> mapping : event.getAllMappings(Registries.BLOCK)) {
+                        remapBlock(mapping, "old_stone", "new_stone");
+                        remapBlock(mapping, "_gate", "_fence_gate");
+                    }
+                    for (MissingMappingsEvent.Mapping<Item> mapping : event.getAllMappings(Registries.ITEM)) {
+                        remapItem(mapping, "old_stone", "new_stone");
+                        remapItem(mapping, "_gate", "_fence_gate");
+                    }
+                    for (MissingMappingsEvent.Mapping<EntityType<?>> mapping : event.getAllMappings(Registries.ENTITY_TYPE)) {
+                        remapEntity(mapping, "old_mob", "new_mob");
+                    }
+                }
+
+                private static void remapBlock(MissingMappingsEvent.Mapping<Block> mapping, String oldId, String newId) {
+                    if (mapping.getKey().getPath().contains(oldId)) {
+                        ResourceLocation replacement = ResourceLocation.fromNamespaceAndPath(ExampleMod.ID, newId);
+                        mapping.remap(null);
+                    }
+                }
+
+                private static void remapItem(MissingMappingsEvent.Mapping<Item> mapping, String oldId, String newId) {
+                    if (mapping.getKey().getPath().contains(oldId)) {
+                        ResourceLocation replacement = ResourceLocation.fromNamespaceAndPath(ExampleMod.ID, newId);
+                        mapping.remap(null);
+                    }
+                }
+
+                private static void remapEntity(MissingMappingsEvent.Mapping<EntityType<?>> mapping, String oldId, String newId) {
+                    if (mapping.getKey().getPath().contains(oldId)) {
+                        ResourceLocation replacement = ResourceLocation.fromNamespaceAndPath(ExampleMod.ID, newId);
+                        mapping.remap(null);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val remapper = utilDir.resolve("LegacyRemapper.java").readText()
+        val main = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-missing-mappings-add-alias" }, "changes=${result.changes} errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-missing-mappings-alias-call" }, "changes=${result.changes} errors=${result.errors}")
+        assertTrue(remapper.contains("public static void addRegistryAliases()"))
+        assertTrue(remapper.contains("remapEntryFromRegistries(\"old_stone\", \"new_stone\", ModBlocks.BLOCKS, ModItems.ITEMS);"))
+        assertTrue(remapper.contains("remapEntryFromRegistries(\"dark_gate\", \"dark_fence_gate\", ModBlocks.BLOCKS, ModItems.ITEMS);"))
+        assertTrue(remapper.contains("remapEntry(ModEntities.ENTITIES, \"old_mob\", \"new_mob\");"))
+        assertTrue(remapper.contains("registry.addAlias(prefix(oldId), prefix(newId));"))
+        assertTrue(!remapper.contains("MissingMappingsEvent"))
+        assertTrue(!remapper.contains("mapping.remap"))
+        assertTrue(main.contains("import com.example.util.LegacyRemapper;"))
+        assertTrue(main.contains("LegacyRemapper.addRegistryAliases();"))
+    }
+
+    @Test
+    fun `missing mapping aliases use declared Java owners instead of file names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.ID)
+            public class ExampleMod {
+                public static final String ID = "example";
+
+                public ExampleMod(IEventBus bus) {
+                    ActualBlocks.BLOCKS.register(bus);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("WrongBlockRegistryFile.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.block.Block;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            class ActualBlocks {
+                static final DeferredRegister<Block> BLOCKS = DeferredRegister.create(Registries.BLOCK, ExampleMod.ID);
+                static final Object NEW_GRANITE = BLOCKS.register("new_granite", () -> null);
+            }
+        """.trimIndent())
+        srcDir.resolve("WrongRemapperFile.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.block.Block;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.event.MissingMappingsEvent;
+
+            class ActualRemapper {
+                @SubscribeEvent
+                public static void remap(MissingMappingsEvent event) {
+                    for (MissingMappingsEvent.Mapping<Block> mapping : event.getAllMappings(Registries.BLOCK)) {
+                        remapBlock(mapping, "old_granite", "new_granite");
+                    }
+                }
+
+                static void remapBlock(MissingMappingsEvent.Mapping<Block> mapping, String oldId, String newId) {
+                    if (mapping.getKey().getPath().contains(oldId)) {
+                        ResourceLocation replacement = ResourceLocation.fromNamespaceAndPath(ExampleMod.ID, newId);
+                        mapping.remap(null);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val remapper = srcDir.resolve("WrongRemapperFile.java").readText()
+        val main = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-missing-mappings-add-alias" }, "changes=${result.changes} errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-missing-mappings-alias-call" }, "changes=${result.changes} errors=${result.errors}")
+        assertTrue(remapper.contains("class ActualRemapper"), remapper)
+        assertFalse(remapper.contains("public class ActualRemapper"), remapper)
+        assertTrue(remapper.contains("remapEntry(ActualBlocks.BLOCKS, \"old_granite\", \"new_granite\");"), remapper)
+        assertFalse(remapper.contains("WrongBlockRegistryFile"), remapper)
+        assertFalse(remapper.contains("WrongRemapperFile"), remapper)
+        assertTrue(main.contains("ActualRemapper.addRegistryAliases();"), main)
+        assertFalse(main.contains("WrongRemapperFile.addRegistryAliases();"), main)
+    }
+
+    @Test
+    fun `migrates inventory screen entity preview signatures without losing angle semantics`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PreviewScreen.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.screens.inventory.InventoryScreen;
+            import net.minecraft.world.entity.LivingEntity;
+            import org.joml.Quaternionf;
+            import org.joml.Vector3f;
+
+            public class PreviewScreen {
+                void direct(GuiGraphics guiGraphics, int posX, int posY, int scale, Quaternionf xQuaternion, Quaternionf zQuaternion, LivingEntity livingEntity) {
+                    InventoryScreen.renderEntityInInventory(guiGraphics, posX, posY, scale, xQuaternion, zQuaternion, livingEntity);
+                }
+
+                void followsAngle(GuiGraphics guiGraphics, int x, int y, int mouseX, int mouseY, LivingEntity player) {
+                    InventoryScreen.renderEntityInInventoryFollowsMouse(guiGraphics, x + 33, y + 75, 30, (float) (x + 31) - mouseX, (float) (y + 25) - mouseY, player);
+                }
+
+                void alreadyNew(GuiGraphics guiGraphics, Vector3f offset, Quaternionf pose, LivingEntity entity) {
+                    InventoryScreen.renderEntityInInventory(guiGraphics, 10.0F, 20.0F, 30.0F, offset, pose, null, entity);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val preview = srcDir.resolve("PreviewScreen.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(preview.contains("new org.joml.Vector3f(0.0F, livingEntity.getBbHeight() / 2.0F, 0.0F), xQuaternion, zQuaternion, livingEntity)"), preview)
+        assertTrue(preview.contains("InventoryScreen.renderEntityInInventoryFollowsAngle("), preview)
+        assertTrue(preview.contains("(float) Math.atan((double) (((float) (x + 31) - mouseX) / 40.0F))"), preview)
+        assertTrue(preview.contains("(float) Math.atan((double) (((float) (y + 25) - mouseY) / 40.0F))"), preview)
+        assertTrue(preview.contains("InventoryScreen.renderEntityInInventory(guiGraphics, 10.0F, 20.0F, 30.0F, offset, pose, null, entity);"), preview)
+        assertFalse(preview.contains("renderEntityInInventoryFollowsMouse(guiGraphics, x + 33"), preview)
+    }
+
+    @Test
+    fun `inventory screen entity preview migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PreviewScreenDocs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.screens.inventory.InventoryScreen;
+            import net.minecraft.world.entity.LivingEntity;
+            import org.joml.Quaternionf;
+
+            public class PreviewScreenDocs {
+                // InventoryScreen.renderEntityInInventory(guiGraphics, posX, posY, scale, xQuaternion, zQuaternion, livingEntity);
+                private static final String DOC_DIRECT = "InventoryScreen.renderEntityInInventory(guiGraphics, posX, posY, scale, xQuaternion, zQuaternion, livingEntity);";
+                // InventoryScreen.renderEntityInInventoryFollowsMouse(guiGraphics, x, y, 30, angleX, angleY, livingEntity);
+                private static final String DOC_MOUSE = "InventoryScreen.renderEntityInInventoryFollowsMouse(guiGraphics, x, y, 30, angleX, angleY, livingEntity);";
+
+                void direct(GuiGraphics guiGraphics, int posX, int posY, int scale, Quaternionf xQuaternion, Quaternionf zQuaternion, LivingEntity livingEntity) {
+                    InventoryScreen.renderEntityInInventory(guiGraphics, posX, posY, scale, xQuaternion, zQuaternion, livingEntity);
+                }
+
+                void followsAngle(GuiGraphics guiGraphics, int x, int y, float angleX, float angleY, LivingEntity livingEntity) {
+                    InventoryScreen.renderEntityInInventoryFollowsMouse(guiGraphics, x, y, 30, angleX, angleY, livingEntity);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val preview = srcDir.resolve("PreviewScreenDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(preview.contains("new org.joml.Vector3f(0.0F, livingEntity.getBbHeight() / 2.0F, 0.0F), xQuaternion, zQuaternion, livingEntity)"), preview)
+        assertTrue(preview.contains("InventoryScreen.renderEntityInInventoryFollowsAngle("), preview)
+        assertTrue(preview.contains("// InventoryScreen.renderEntityInInventory(guiGraphics, posX, posY, scale, xQuaternion, zQuaternion, livingEntity);"), preview)
+        assertTrue(preview.contains("""private static final String DOC_DIRECT = "InventoryScreen.renderEntityInInventory(guiGraphics, posX, posY, scale, xQuaternion, zQuaternion, livingEntity);";"""), preview)
+        assertTrue(preview.contains("// InventoryScreen.renderEntityInInventoryFollowsMouse(guiGraphics, x, y, 30, angleX, angleY, livingEntity);"), preview)
+        assertTrue(preview.contains("""private static final String DOC_MOUSE = "InventoryScreen.renderEntityInInventoryFollowsMouse(guiGraphics, x, y, 30, angleX, angleY, livingEntity);";"""), preview)
+    }

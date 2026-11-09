@@ -31,7 +31,8 @@ object PipelineRegistry {
      * Auto-detect which pipeline to use based on project contents.
      * Scans Java files for framework-specific patterns.
      */
-    fun detect(projectDir: Path): PipelineDefinition? {
+    fun detect(buildDir: Path): PipelineDefinition? {
+        val projectDir = com.modporter.core.pipeline.GradleModLayout.modModule(buildDir)
         val javaFiles = if (Files.exists(projectDir.resolve("src/main/java"))) {
             Files.walk(projectDir.resolve("src/main/java"))
                 .filter { it.toString().endsWith(".java") }

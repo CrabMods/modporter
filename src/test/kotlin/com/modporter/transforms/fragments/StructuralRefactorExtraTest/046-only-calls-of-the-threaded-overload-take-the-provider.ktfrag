@@ -1,0 +1,1198 @@
+
+    @Test
+    fun `only calls of the threaded overload take the provider`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("Stub.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+
+            public class Stub {
+                public String name;
+                public CompoundTag tag;
+            }
+        """.trimIndent())
+        srcDir.resolve("Adapter.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+
+            public class Adapter {
+                public static Item adapt(String name) {
+                    return Items.AIR;
+                }
+
+                public static Item adapt(Integer id) {
+                    return Items.AIR;
+                }
+
+                public static ItemStack adapt(Stub stub) {
+                    CompoundTag tag = stub.tag;
+                    ItemStack stack = ItemStack.of(tag);
+                    adapt(stub.name);
+                    return stack;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("User.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+
+            public class User {
+                public void load(Stub stub, HolderLookup.Provider registries) {
+                    ItemStack stack = Adapter.adapt(stub);
+                    Item item = Adapter.adapt(stub.name);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val adapter = srcDir.resolve("Adapter.java").readText()
+        val user = srcDir.resolve("User.java").readText()
+
+        assertTrue(adapter.contains("public static ItemStack adapt(Stub stub, HolderLookup.Provider registries) {"), adapter)
+        assertTrue(adapter.contains("        adapt(stub.name);"), adapter)
+        assertTrue(user.contains("ItemStack stack = Adapter.adapt(stub, registries);"), user)
+        assertTrue(user.contains("Item item = Adapter.adapt(stub.name);"), user)
+    }
+
+
+    @Test
+    fun `migrates write only NbtUtils block position calls and method references`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("WriteOnly.java").writeText("""
+            package com.example;
+
+            import java.util.function.Function;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.nbt.NbtUtils;
+
+            public class WriteOnly {
+                CompoundTag write(BlockPos pos) {
+                    return NbtUtils.writeBlockPos(pos);
+                }
+
+                Function<BlockPos, CompoundTag> writer() {
+                    return NbtUtils::writeBlockPos;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("WriteOnly.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(transformed.contains("return modporterWriteLegacyBlockPos(pos);"), transformed)
+        assertTrue(transformed.contains("WriteOnly::modporterWriteLegacyBlockPos"), transformed)
+        assertTrue(transformed.contains("private static CompoundTag modporterWriteLegacyBlockPos(BlockPos pos)"), transformed)
+        assertFalse(transformed.contains("modporterReadLegacyBlockPos"), transformed)
+        assertFalse(transformed.contains("NbtUtils.writeBlockPos"), transformed)
+        assertFalse(transformed.contains("NbtUtils::writeBlockPos"), transformed)
+    }
+
+
+    @Test
+    fun `legacy NbtUtils block position migration ignores literals comments and project owners`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val sourceFile = srcDir.resolve("Unrelated.java")
+        sourceFile.writeText("""
+            package com.example;
+
+            class NbtUtils {
+                static Object writeBlockPos(Object value) { return value; }
+            }
+
+            public class Unrelated {
+                // NbtUtils.writeBlockPos(value)
+                String example = "NbtUtils::writeBlockPos";
+                Object write(Object value) { return NbtUtils.writeBlockPos(value); }
+            }
+        """.trimIndent())
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertEquals(original, sourceFile.readText())
+    }
+
+
+    @Test
+    fun `item stack serialization without a provider source becomes an explicit provider boundary`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("UnprovenItemStackNbtSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.ContainerHelper;
+            import net.minecraft.world.item.ItemStack;
+
+            public class UnprovenItemStackNbtSurface {
+                private final NonNullList<ItemStack> items = NonNullList.withSize(1, ItemStack.EMPTY);
+
+                public void migrate(CompoundTag tag, ItemStack stack) {
+                    ItemStack restored = ItemStack.of(tag.getCompound("Stack"));
+                    ContainerHelper.saveAllItems(tag, this.items);
+                    tag.put("Stack", stack.save(new CompoundTag()));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("UnprovenItemStackNbtSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("migrate(CompoundTag tag, ItemStack stack, HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("ItemStack restored = ItemStack.parseOptional(registries, tag.getCompound(\"Stack\"));"), migrated)
+        assertTrue(migrated.contains("ContainerHelper.saveAllItems(tag, this.items, registries);"), migrated)
+        assertTrue(migrated.contains("tag.put(\"Stack\", stack.saveOptional(registries));"), migrated)
+        assertFalse(migrated.contains("RegistryAccess.EMPTY"), migrated)
+        assertFalse(migrated.contains("player.registryAccess()"), migrated)
+    }
+
+
+    @Test
+    fun `earlier client level access does not replace explicit provider propagation`() {
+        val dataDir = tempDir.resolve("src/main/java/com/example/data")
+        val clientDir = tempDir.resolve("src/main/java/com/example/client")
+        dataDir.createDirectories()
+        clientDir.createDirectories()
+        dataDir.resolve("StackData.java").writeText("""
+            package com.example.data;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.saveddata.SavedData;
+
+            public class StackData extends SavedData {
+                private ItemStack heldStack = ItemStack.EMPTY;
+
+                public static StackData load(CompoundTag tag) {
+                    StackData data = new StackData();
+                    data.heldStack = ItemStack.of(tag.getCompound("held"));
+                    return data;
+                }
+            }
+        """.trimIndent())
+        clientDir.resolve("ClientData.java").writeText("""
+            package com.example.client;
+
+            import com.example.data.StackData;
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.nbt.CompoundTag;
+
+            public class ClientData {
+                private StackData data;
+
+                public void sync(CompoundTag tag) {
+                    Minecraft.getInstance().level.getGameTime();
+                    data = StackData.load(tag);
+                }
+
+                public void tick() {
+                    Minecraft.getInstance().getSoundManager();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val data = dataDir.resolve("StackData.java").readText()
+        val client = clientDir.resolve("ClientData.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(data.contains("public static StackData load(CompoundTag tag, HolderLookup.Provider registries)"), data)
+        assertTrue(client.contains("public void sync(CompoundTag tag, HolderLookup.Provider registries)"), client)
+        assertTrue(client.contains("StackData.load(tag, registries)"), client)
+        assertFalse(client.contains("Minecraft.getInstance().level.registryAccess()"), client)
+        assertFalse(client.contains("RegistryAccess.EMPTY"), client)
+    }
+
+
+    @Test
+    fun `mixin generated capability provider superclass removes private delegate constructor and import`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("EntityMixin.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.CapabilityProvider;
+            import net.minecraft.world.entity.Entity;
+            import org.spongepowered.asm.mixin.Mixin;
+
+            @Mixin(Entity.class)
+            public abstract class EntityMixin extends CapabilityProvider<Entity> {
+                private EntityMixin(Class<Entity> baseClass) {
+                    super(baseClass);
+                }
+
+                public void touch() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("EntityMixin.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("public abstract class EntityMixin {"), migrated)
+        assertFalse(migrated.contains("CapabilityProvider"), migrated)
+        assertFalse(migrated.contains("EntityMixin(Class<Entity> baseClass)"), migrated)
+    }
+
+
+    @Test
+    fun `source backed external block entity bases receive holder lookup serialization migration`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val dependencySrc = tempDir.resolve("src/main/java/cn/mcmod_mmf/mmlib/block/entity")
+        dependencySrc.createDirectories()
+        dependencySrc.resolve("SyncedBlockEntity.java").writeText("""
+            package cn.mcmod_mmf.mmlib.block.entity;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public abstract class SyncedBlockEntity extends BlockEntity {
+                protected SyncedBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("SyncedMachineBlockEntity.java").writeText("""
+            package com.example;
+
+            import cn.mcmod_mmf.mmlib.block.entity.SyncedBlockEntity;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.fluids.capability.templates.FluidTank;
+            import net.neoforged.neoforge.items.ItemStackHandler;
+
+            public class SyncedMachineBlockEntity extends SyncedBlockEntity {
+                private final ItemStackHandler inventory = new ItemStackHandler(4);
+                private final FluidTank tank = new FluidTank(1000);
+
+                public SyncedMachineBlockEntity(BlockPos pos, BlockState state) {
+                    super(BlockEntityRegistry.MACHINE.get(), pos, state);
+                }
+
+                @Override
+                public void load(CompoundTag tag) {
+                    super.load(tag);
+                    inventory.deserializeNBT(tag.getCompound("Inventory"));
+                    tank.readFromNBT(tag.getCompound("Tank"));
+                }
+
+                @Override
+                public void saveAdditional(CompoundTag tag) {
+                    super.saveAdditional(tag);
+                    tag.put("Inventory", inventory.serializeNBT());
+                    tag.put("Tank", tank.writeToNBT(new CompoundTag()));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("SyncedMachineBlockEntity.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.minecraft.core.HolderLookup;"), migrated)
+        assertTrue(migrated.contains("protected void loadAdditional(CompoundTag tag, HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("super.loadAdditional(tag, registries);"), migrated)
+        assertTrue(migrated.contains("inventory.deserializeNBT(registries, tag.getCompound(\"Inventory\"));"), migrated)
+        assertTrue(migrated.contains("tank.readFromNBT(registries, tag.getCompound(\"Tank\"));"), migrated)
+        assertTrue(migrated.contains("public void saveAdditional(CompoundTag tag, HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("super.saveAdditional(tag, registries);"), migrated)
+        assertTrue(migrated.contains("tag.put(\"Inventory\", inventory.serializeNBT(registries));"), migrated)
+        assertTrue(migrated.contains("tag.put(\"Tank\", tank.writeToNBT(registries, new CompoundTag()));"), migrated)
+        assertFalse(migrated.contains("RegistryAccess.EMPTY"), migrated)
+    }
+
+
+    @Test
+    fun `remaining typed DistExecutor expressions use a generated FMLLoader adapter`() {
+        val projectDir = createFile("DeferredDistCalls.java", """
+            package com.example;
+
+            import java.util.function.Supplier;
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.fml.DistExecutor;
+
+            public class DeferredDistCalls {
+                Object clientValue() {
+                    return DistExecutor.unsafeCallWhenOn(Dist.CLIENT, () -> () -> ClientHooks.value());
+                }
+
+                void configure(Supplier<Runnable> supplied) {
+                    callback(value -> DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> () -> ClientHooks.accept(value)));
+                    DistExecutor.unsafeRunWhenOn(Dist.CLIENT, supplied);
+                }
+
+                String documentation = "DistExecutor.unsafeRunWhenOn remains documentation";
+            }
+        """.trimIndent())
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+            import net.neoforged.fml.common.Mod;
+            @Mod("example")
+            public class ExampleMod {}
+        """.trimIndent())
+        srcDir.resolve("OrphanDistImport.java").writeText("""
+            package com.example;
+            import net.neoforged.fml.DistExecutor;
+            public class OrphanDistImport {}
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = srcDir.resolve("DeferredDistCalls.java").readText()
+        val orphan = srcDir.resolve("OrphanDistImport.java").readText()
+        val helper = projectDir.resolve(
+            "src/main/java/com/modporter/generated/example/compat/DistExecution.java"
+        )
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(migrated.contains("import net.neoforged.fml.DistExecutor;"), migrated)
+        assertEquals(1, Regex("""DistExecutor\.""").findAll(migrated).count(), migrated)
+        assertTrue(
+            migrated.contains("return (FMLLoader.getDist() == Dist.CLIENT ? ClientHooks.value() : null);"),
+            migrated
+        )
+        assertFalse(migrated.contains("DistExecution.callWhenOn"), migrated)
+        assertTrue(migrated.contains("com.modporter.generated.example.compat.DistExecution.runWhenOn"), migrated)
+        assertTrue(migrated.contains("\"DistExecutor.unsafeRunWhenOn remains documentation\""), migrated)
+        assertFalse(orphan.contains("import net.neoforged.fml.DistExecutor;"), orphan)
+        assertTrue(helper.exists(), helper.toString())
+        assertTrue(helper.readText().contains("if (FMLLoader.getDist() == dist)"), helper.readText())
+        assertTrue(helper.readText().contains("target.get().run();"), helper.readText())
+        assertTrue(result.changes.any { it.ruleId == "struct-dist-executor-typed-adapter" })
+        assertTrue(result.changes.any { it.ruleId == "struct-dist-executor-typed-adapter-source" })
+    }
+
+
+    @Test
+    fun `unknown DistExecutor members hard fail instead of using an adapter guess`() {
+        val projectDir = createFile("UnknownDistCall.java", """
+            package com.example;
+
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.fml.DistExecutor;
+
+            public class UnknownDistCall {
+                void run() {
+                    DistExecutor.futureRunWhenOn(Dist.CLIENT, () -> () -> ClientHooks.run());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+
+        assertTrue(result.errors.any { it.contains("unsupported DistExecutor members") }, result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "struct-dist-executor-typed-adapter" })
+    }
+
+    @Test
+    fun `project owned DistExecutor lookalikes remain untouched`() {
+        val projectDir = createFile("ProjectDistCall.java", """
+            package com.example;
+
+            // [NeoForge migration] import net.minecraftforge.fml.DistExecutor;
+            import net.neoforged.api.distmarker.Dist;
+
+            public class ProjectDistCall {
+                void run() {
+                    DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> ClientHooks::run);
+                }
+            }
+        """.trimIndent())
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.resolve("DistExecutor.java").writeText("""
+            package com.example;
+
+            import java.util.function.Supplier;
+            import net.neoforged.api.distmarker.Dist;
+
+            public final class DistExecutor {
+                public static void unsafeRunWhenOn(Dist side, Supplier<Runnable> action) {
+                    action.get().run();
+                }
+
+                public static void futureRunWhenOn(Dist side, Supplier<Runnable> action) {
+                    action.get().run();
+                }
+            }
+        """.trimIndent())
+        val callerDir = srcDir.resolve("caller")
+        callerDir.createDirectories()
+        callerDir.resolve("ImportedProjectDistCall.java").writeText("""
+            package com.example.caller;
+
+            import com.example.DistExecutor;
+            import net.neoforged.api.distmarker.Dist;
+
+            public class ImportedProjectDistCall {
+                void run() {
+                    DistExecutor.futureRunWhenOn(Dist.CLIENT, () -> ClientHooks::run);
+                }
+            }
+        """.trimIndent())
+        val mixedFile = srcDir.resolve("MixedDistCall.java")
+        mixedFile.writeText("""
+            package com.example;
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.fml.common.Mod;
+            @Mod("example")
+            public class MixedDistCall { void run() {
+                DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> ClientHooks::run);
+                String value = net.minecraftforge.fml.DistExecutor.unsafeCallWhenOn(Dist.CLIENT, () -> () -> "native");
+            } }
+        """.trimIndent())
+        val file = srcDir.resolve("ProjectDistCall.java")
+        val importedFile = callerDir.resolve("ImportedProjectDistCall.java")
+        val before = file.readText()
+        val importedBefore = importedFile.readText()
+
+        val result = StructuralRefactorPass().apply(projectDir)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertEquals(before, file.readText())
+        assertEquals(importedBefore, importedFile.readText())
+        val mixed = mixedFile.readText()
+        assertTrue(mixed.contains("DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> ClientHooks::run);"), mixed)
+        assertFalse(mixed.contains("net.minecraftforge.fml.DistExecutor.unsafeCallWhenOn"), mixed)
+        assertTrue(mixed.contains("DistExecution.callWhenOn"), mixed)
+        assertTrue(result.changes.any { it.ruleId == "struct-dist-executor-typed-adapter" })
+        assertFalse(result.changes.any { it.ruleId == "struct-dist-executor-dist-guard" })
+    }
+
+
+    @Test
+    fun `living tick migration follows event semantics and exact imported owner rather than handler names`() {
+        val projectDir = createFile("ImportedLivingTick.java", """
+            package com.example;
+
+            import net.minecraft.world.entity.LivingEntity;
+            import net.neoforged.neoforge.event.entity.living.LivingEvent.LivingTickEvent;
+
+            public class ImportedLivingTick {
+                public static void playerTickByNameOnly(LivingTickEvent tick) {
+                    consume(tick.getEntity());
+                }
+
+                private static void consume(LivingEntity entity) {}
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/ImportedLivingTick.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.neoforged.neoforge.event.tick.EntityTickEvent;"), migrated)
+        assertFalse(migrated.contains("LivingEvent.LivingTickEvent"), migrated)
+        assertFalse(migrated.contains("import net.neoforged.neoforge.event.entity.living.LivingEvent.LivingTickEvent;"), migrated)
+        assertTrue(migrated.contains("playerTickByNameOnly(EntityTickEvent.Pre tick)"), migrated)
+        assertTrue(migrated.contains("if (!(tick.getEntity() instanceof LivingEntity modporterLivingEntity)) return;"), migrated)
+        assertTrue(migrated.contains("consume(modporterLivingEntity);"), migrated)
+    }
+
+
+    @Test
+    fun `legacy split tick subscribers preserve both phases through typed wrappers`() {
+        val projectDir = createFile("LegacySplitTicks.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.EventPriority;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.LogicalSide;
+            import net.neoforged.neoforge.event.TickEvent.ClientTickEvent;
+            import net.neoforged.neoforge.event.TickEvent.LevelTickEvent;
+            import net.neoforged.neoforge.event.TickEvent.Phase;
+
+            public class LegacySplitTicks {
+                private static final String DOC = "event.phase == Phase.START event.level event.side";
+
+                @SubscribeEvent(priority = EventPriority.HIGH)
+                public static void client(ClientTickEvent event) {
+                    if (event.phase == Phase.START) {
+                        pre();
+                    }
+                    if (Phase.END != event.phase) {
+                        return;
+                    }
+                    post();
+                }
+
+                public static void level(LevelTickEvent event) {
+                    consume(event.level);
+                    if (event.side == LogicalSide.SERVER) {
+                        post();
+                    }
+                }
+
+                private static void pre() {}
+                private static void post() {}
+                private static void consume(Object value) {}
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/LegacySplitTicks.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.neoforged.neoforge.client.event.ClientTickEvent;"), migrated)
+        assertTrue(migrated.contains("import net.neoforged.neoforge.event.tick.LevelTickEvent;"), migrated)
+        assertTrue(migrated.contains("void client\$modporterPre(ClientTickEvent.Pre event)"), migrated)
+        assertTrue(migrated.contains("void client\$modporterPost(ClientTickEvent.Post event)"), migrated)
+        assertTrue(migrated.contains("client(event);"), migrated)
+        assertTrue(migrated.contains("public static void client(ClientTickEvent event)"), migrated)
+        assertTrue(migrated.contains("event instanceof ClientTickEvent.Pre"), migrated)
+        assertTrue(migrated.contains("!(event instanceof ClientTickEvent.Post)"), migrated)
+        assertTrue(migrated.contains("consume(event.getLevel());"), migrated)
+        assertTrue(migrated.contains("event.getLevel().isClientSide() ? LogicalSide.CLIENT : LogicalSide.SERVER"), migrated)
+        assertFalse(migrated.contains("net.neoforged.neoforge.event.TickEvent"), migrated)
+        assertFalse(
+            migrated.replace("\"event.phase == Phase.START event.level event.side\"", "").contains("event.phase"),
+            migrated
+        )
+        assertTrue(migrated.contains("\"event.phase == Phase.START event.level event.side\""), migrated)
+    }
+
+
+    @Test
+    fun `legacy render tick type migrates by exact nested owner and preserves both phases`() {
+        val projectDir = createFile("LegacyRenderTick.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.event.TickEvent.RenderTickEvent;
+
+            public class LegacyRenderTick {
+                @SubscribeEvent
+                public static void render(RenderTickEvent event) {
+                    consume(event.renderTickTime);
+                }
+
+                private static void consume(float value) {}
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/LegacyRenderTick.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.neoforged.neoforge.client.event.RenderFrameEvent;"), migrated)
+        assertTrue(migrated.contains("render\$modporterPre(RenderFrameEvent.Pre event)"), migrated)
+        assertTrue(migrated.contains("render\$modporterPost(RenderFrameEvent.Post event)"), migrated)
+        assertTrue(migrated.contains("public static void render(RenderFrameEvent event)"), migrated)
+        assertTrue(migrated.contains("consume(event.getPartialTick().getGameTimeDeltaPartialTick(false));"), migrated)
+        assertFalse(migrated.contains("RenderTickEvent"), migrated)
+    }
+
+
+    @Test
+    fun `legacy split tick phase value use hard fails instead of guessing`() {
+        val projectDir = createFile("UnsupportedTickPhase.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.event.TickEvent.ServerTickEvent;
+
+            public class UnsupportedTickPhase {
+                @SubscribeEvent
+                public static void tick(ServerTickEvent event) {
+                    consume(event.phase);
+                }
+
+                private static void consume(Object value) {}
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+
+        assertTrue(result.errors.any { it.contains("phase is used as a value") }, "errors=${result.errors}")
+    }
+
+
+    @Test
+    fun `legacy event result migration is owner aware static import safe and preserves text`() {
+        val projectDir = createFile("LegacyEventResults.java", """
+            package com.example;
+
+            import static net.neoforged.bus.api.Event.Result.DENY;
+
+            import net.createmod.catnip.data.TriState;
+            import net.neoforged.bus.api.Event;
+            import net.neoforged.bus.api.Event.Result;
+
+            public class LegacyEventResults {
+                private static final String DOC = "Event.Result.DENY Result.ALLOW DENY";
+
+                public void migrate() {
+                    Result denied = Result.DENY;
+                    Result allowed = Result.ALLOW;
+                    Event.Result fallback = Event.Result.DEFAULT;
+                    Object staticDenied = DENY;
+                    // Event.Result.ALLOW and Result.DEFAULT stay documentation.
+                }
+
+                public TriState unrelated(TriState value) {
+                    return value;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/LegacyEventResults.java").readText()
+        val target = "net.neoforged.neoforge.common.util.TriState"
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import static $target.FALSE;"), migrated)
+        assertTrue(migrated.contains("$target denied = $target.FALSE;"), migrated)
+        assertTrue(migrated.contains("$target allowed = $target.TRUE;"), migrated)
+        assertTrue(migrated.contains("$target fallback = $target.DEFAULT;"), migrated)
+        assertTrue(migrated.contains("Object staticDenied = FALSE;"), migrated)
+        assertFalse(migrated.contains("net.neoforged.bus.api.Event.Result"), migrated)
+        assertFalse(migrated.contains("net.neoforged.bus.api.TriState"), migrated)
+        assertTrue(migrated.contains("\"Event.Result.DENY Result.ALLOW DENY\""), migrated)
+        assertTrue(migrated.contains("// Event.Result.ALLOW and Result.DEFAULT stay documentation."), migrated)
+        assertTrue(migrated.contains("public TriState unrelated(TriState value)"), migrated)
+    }
+
+
+    @Test
+    fun `legacy particle factory graph bridges real network serialization to stream codecs`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/particle")
+        srcDir.createDirectories()
+        srcDir.resolve("LegacyParticleData.java").writeText("""
+            package com.example.particle;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.client.particle.ParticleProvider;
+            import net.minecraft.core.particles.ParticleOptions;
+            import net.minecraft.core.particles.ParticleOptions.Deserializer;
+            import net.minecraft.core.particles.ParticleType;
+
+            public interface LegacyParticleData<T extends ParticleOptions> {
+                Deserializer<T> getDeserializer();
+                Codec<T> getCodec(ParticleType<T> type);
+
+                default ParticleType<T> createType() {
+                    return new ParticleType<>(false, getDeserializer()) {
+                        @Override
+                        public Codec<T> codec() {
+                            return LegacyParticleData.this.getCodec(this);
+                        }
+                    };
+                }
+
+                ParticleProvider<T> getFactory();
+            }
+        """.trimIndent())
+        srcDir.resolve("SpriteParticleData.java").writeText("""
+            package com.example.particle;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.core.particles.ParticleOptions;
+            import net.minecraft.core.particles.ParticleType;
+
+            public interface SpriteParticleData<T extends ParticleOptions> extends LegacyParticleData<T> {
+                Deserializer<T> getDeserializer();
+
+                default ParticleType<T> createType() {
+                    return new ParticleType<>(false, getDeserializer()) {
+                        @Override
+                        public Codec<T> codec() {
+                            return SpriteParticleData.this.getCodec(this);
+                        }
+                    };
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("SampleParticleData.java").writeText("""
+            package com.example.particle;
+
+            import com.mojang.brigadier.StringReader;
+            import com.mojang.serialization.Codec;
+            import net.minecraft.client.particle.ParticleProvider;
+            import net.minecraft.core.particles.ParticleOptions;
+            import net.minecraft.core.particles.ParticleType;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.neoforged.neoforge.fluids.FluidStack;
+
+            public class SampleParticleData implements ParticleOptions, SpriteParticleData<SampleParticleData> {
+                public static final Codec<SampleParticleData> CODEC = Codec.unit(new SampleParticleData());
+
+                @Override
+                public Deserializer<SampleParticleData> getDeserializer() {
+                    return new ParticleOptions.Deserializer<>() {
+                        @Override
+                        public SampleParticleData fromCommand(ParticleType<SampleParticleData> type, StringReader reader) {
+                            return new SampleParticleData();
+                        }
+
+                        @Override
+                        public SampleParticleData fromNetwork(ParticleType<SampleParticleData> type, FriendlyByteBuf buffer) {
+                            SampleParticleData data = new SampleParticleData();
+                            data.value = buffer.readVarInt();
+                            data.fluid = buffer.readFluidStack();
+                            return data;
+                        }
+                    };
+                }
+
+                private int value;
+                private FluidStack fluid;
+
+                @Override
+                public Codec<SampleParticleData> getCodec(ParticleType<SampleParticleData> type) {
+                    return CODEC;
+                }
+
+                @Override
+                public void writeToNetwork(FriendlyByteBuf buffer) {
+                    buffer.writeVarInt(value);
+                    buffer.writeFluidStack(fluid);
+                }
+
+                @Override
+                public String writeToString() {
+                    return Integer.toString(value);
+                }
+
+                @Override
+                public ParticleType<?> getType() {
+                    return null;
+                }
+
+                @Override
+                public ParticleProvider<SampleParticleData> getFactory() {
+                    return null;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val rootFile = srcDir.resolve("LegacyParticleData.java")
+        val childFile = srcDir.resolve("SpriteParticleData.java")
+        val dataFile = srcDir.resolve("SampleParticleData.java")
+        val root = rootFile.readText()
+        val child = childFile.readText()
+        val data = dataFile.readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-particle-serialization" })
+        assertTrue(root.contains("interface Deserializer<P extends ParticleOptions>"), root)
+        assertTrue(root.contains("StreamCodec.ofMember"), root)
+        assertTrue(root.contains("getDeserializer().fromNetwork(type, buffer)"), root)
+        assertTrue(root.contains("public StreamCodec<? super RegistryFriendlyByteBuf, T> streamCodec()"), root)
+        assertTrue(child.contains("public MapCodec<T> codec()"), child)
+        assertTrue(child.contains("SpriteParticleData.this.getStreamCodec(this)"), child)
+        assertTrue(data.contains("public static final MapCodec<SampleParticleData> CODEC = MapCodec.unit"), data)
+        assertTrue(data.contains("public MapCodec<SampleParticleData> getCodec"), data)
+        assertTrue(data.contains("new Deserializer<>()"), data)
+        assertTrue(data.contains("buffer.writeVarInt(value);"), data)
+        assertTrue(data.contains("FluidStack.STREAM_CODEC.decode(buffer)"), data)
+        assertTrue(data.contains("FluidStack.STREAM_CODEC.encode(buffer, fluid)"), data)
+        assertTrue(data.contains("writeToNetwork(RegistryFriendlyByteBuf buffer)"), data)
+        assertFalse(root.contains("ParticleOptions.Deserializer"), root)
+        assertFalse(data.contains("ParticleOptions.Deserializer"), data)
+
+        val firstPass = mapOf(rootFile to root, childFile to child, dataFile to data)
+        val secondResult = StructuralRefactorPass().apply(tempDir)
+        assertTrue(secondResult.errors.isEmpty(), "errors=${secondResult.errors}")
+        firstPass.forEach { (file, expected) ->
+            assertEquals(expected, file.readText(), "second pass changed ${file.fileName}")
+        }
+    }
+
+
+    @Test
+    fun `legacy particle factory with external data type hard fails instead of casting blindly`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/particle")
+        srcDir.createDirectories()
+        srcDir.resolve("LegacyParticleData.java").writeText("""
+            package com.example.particle;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.core.particles.ParticleOptions;
+            import net.minecraft.core.particles.ParticleOptions.Deserializer;
+            import net.minecraft.core.particles.ParticleType;
+
+            public interface LegacyParticleData<T extends ParticleOptions> {
+                Deserializer<T> getDeserializer();
+                Codec<T> getCodec(ParticleType<T> type);
+                default ParticleType<T> createType() {
+                    return new ParticleType<>(false, getDeserializer()) {
+                        public Codec<T> codec() { return LegacyParticleData.this.getCodec(this); }
+                    };
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExternalData.java").writeText("""
+            package com.example.particle;
+            public class ExternalData implements net.minecraft.core.particles.ParticleOptions {
+                public net.minecraft.core.particles.ParticleType<?> getType() { return null; }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExternalFactory.java").writeText("""
+            package com.example.particle;
+
+            import net.minecraft.network.FriendlyByteBuf;
+
+            public class ExternalFactory implements LegacyParticleData<ExternalData> {
+                public Deserializer<ExternalData> getDeserializer() { return null; }
+                public com.mojang.serialization.Codec<ExternalData> getCodec(net.minecraft.core.particles.ParticleType<ExternalData> type) { return null; }
+                public void writeToNetwork(FriendlyByteBuf buffer) {}
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+
+        assertTrue(result.errors.any { it.contains("uses external data type ExternalData") }, "errors=${result.errors}")
+    }
+
+
+    @Test
+    fun `unresolved executable registry access empty fallback hard gates`() {
+        val projectDir = createFile("UnresolvedRegistryAccess.java", """
+            package com.example;
+
+            import net.minecraft.core.RegistryAccess;
+
+            public class UnresolvedRegistryAccess {
+                public Object registries() {
+                    return RegistryAccess.EMPTY;
+                }
+            }
+        """.trimIndent())
+        val file = projectDir.resolve("src/main/java/com/example/UnresolvedRegistryAccess.java")
+
+        val result = StructuralRefactorPass().apply(projectDir)
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot resolve exact HolderLookup.Provider for executable RegistryAccess.EMPTY") },
+            "errors=${result.errors}"
+        )
+        assertTrue(file.readText().contains("return RegistryAccess.EMPTY;"), file.readText())
+    }
+
+
+    @Test
+    fun `does not infer an instance registry provider inside a static field initializer`() {
+        val projectDir = createFile("StaticBlockEntityText.java", """
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class StaticBlockEntityText extends BlockEntity {
+                private static final String EMPTY_JSON =
+                    Component.Serializer.toJson(Component.literal(""));
+
+                public StaticBlockEntityText(BlockPos pos, BlockState state) {
+                    super(null, pos, state);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/StaticBlockEntityText.java").readText()
+
+        assertFalse(migrated.contains("this.getLevel().registryAccess()"), migrated)
+        assertFalse(migrated.contains("Component.Serializer.toJson("), migrated)
+        assertTrue(migrated.contains("ComponentSerialization.CODEC.encodeStart"), migrated)
+    }
+
+
+    @Test
+    fun `block entity capability migration hard gates unsupported provider shapes`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    BlockEntityRegistry.BLOCK_ENTITIES.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/UnsupportedBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.items.IItemHandler;
+            import javax.annotation.Nullable;
+
+            public class UnsupportedBlockEntity extends BlockEntity {
+                public UnsupportedBlockEntity(BlockPos pos, BlockState state) {
+                    super(BlockEntityRegistry.UNSUPPORTED.get(), pos, state);
+                }
+
+                @Override
+                public <T> LazyOptional<T> getCapability(Capability<T> capability, @Nullable Direction side) {
+                    if (capability == Capabilities.ItemHandler.BLOCK) {
+                        return makeHandler(capability, side);
+                    }
+                    return super.getCapability(capability, side);
+                }
+
+                private <T> LazyOptional<T> makeHandler(Capability<T> capability, Direction side) {
+                    return LazyOptional.empty();
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/BlockEntityRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockEntityRegistry {
+                public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES = null;
+                public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<UnsupportedBlockEntity>> UNSUPPORTED = null;
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val blockEntity = tempDir.resolve("src/main/java/com/example/UnsupportedBlockEntity.java").readText()
+
+        assertTrue(result.errors.any {
+            it.contains("Cannot migrate BlockEntity getCapability") &&
+                it.contains("Capabilities.ItemHandler.BLOCK")
+        }, result.errors.joinToString("\n"))
+        assertTrue(result.changes.none { it.ruleId == "struct-blockentity-capability-provider" })
+        assertTrue(blockEntity.contains("getCapability("), blockEntity)
+        assertTrue(blockEntity.contains("makeHandler(capability, side)"), blockEntity)
+    }
+
+
+    @Test
+    fun `threads registry providers through inherited contracts without selecting unproven fields`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("WorkerEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.Entity;
+
+            public abstract class WorkerEntity extends Entity {
+            }
+        """.trimIndent())
+        srcDir.resolve("BaseStep.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+
+            public abstract class BaseStep {
+                @Deprecated protected final WorkerEntity worker;
+
+                protected BaseStep(WorkerEntity worker) {
+                    this.worker = worker;
+                }
+
+                public abstract CompoundTag saveToNBT();
+
+                public abstract void loadFromNBT(CompoundTag tag);
+            }
+        """.trimIndent())
+        srcDir.resolve("ItemFluidStep.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.fluids.capability.templates.FluidTank;
+
+            public class ItemFluidStep extends BaseStep {
+                private ItemStack stack = ItemStack.EMPTY;
+                private final FluidTank tank = new FluidTank(1000);
+
+                public ItemFluidStep(WorkerEntity worker) {
+                    super(worker);
+                }
+
+                @Override
+                public CompoundTag saveToNBT() {
+                    CompoundTag tag = new CompoundTag();
+                    tag.put("stack", stack.save(new CompoundTag()));
+                    tag.put("tank", tank.writeToNBT(new CompoundTag()));
+                    return tag;
+                }
+
+                @Override
+                public void loadFromNBT(CompoundTag tag) {
+                    stack = ItemStack.of(tag.getCompound("stack"));
+                    tank.readFromNBT(tag.getCompound("tank"));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val base = srcDir.resolve("BaseStep.java").readText()
+        val step = srcDir.resolve("ItemFluidStep.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(step.contains("stack.saveOptional(registries)"), step)
+        assertTrue(step.contains("tank.writeToNBT(registries, new CompoundTag())"), step)
+        assertTrue(step.contains("ItemStack.parseOptional(registries, tag.getCompound(\"stack\"))"), step)
+        assertTrue(step.contains("tank.readFromNBT(registries, tag.getCompound(\"tank\"))"), step)
+        assertTrue(base.contains("public abstract CompoundTag saveToNBT(HolderLookup.Provider registries);"), base)
+        assertTrue(base.contains("public abstract void loadFromNBT(CompoundTag tag, HolderLookup.Provider registries);"), base)
+        assertFalse(step.contains("worker.registryAccess()"), step)
+    }
+
+
+    @Test
+    fun `legacy block state use calls refuse without a derivable mod id`() {
+        val projectDir = createFile("Harvester.java", """
+            package com.example;
+
+            import net.minecraft.world.InteractionHand;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.phys.BlockHitResult;
+            import net.minecraft.world.entity.player.Player;
+
+            public class Harvester {
+                public void run(BlockState state, Level level, Player player, InteractionHand hand, BlockHitResult hit, Item item) {
+                    state.use(level, player, hand, hit);
+                    item.use(level, player, hand);
+                }
+            }
+        """.trimIndent())
+
+        val sourceFile = tempDir.resolve("src/main/java/com/example/Harvester.java")
+        val original = sourceFile.readText()
+        val result = StructuralRefactorPass().apply(projectDir)
+        val source = sourceFile.readText()
+        val generatedHelper = tempDir.resolve("src/main/java/com/modporter/generated/example/compat/LegacyBlockStateUse.java")
+
+        assertEquals(original, source, source)
+        assertFalse(generatedHelper.exists(), generatedHelper.toString())
+        assertTrue(
+            result.errors.any {
+                it.contains("Cannot derive generated compat package for legacy BlockState use dispatch: missing @Mod annotation and mod metadata mod id")
+            },
+            result.errors.joinToString("\n")
+        )
+    }
+
+
+    @Test
+    fun `mutable item stack lambda captures migrate in one idempotent structural pass`() {
+        val suppliers = (0 until 40).joinToString("\n") { index ->
+            "        java.util.function.IntSupplier supplier$index = () -> stack.getCount();"
+        }
+        val projectDir = createFile("ManyLambdaCaptures.java", """
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+
+            public class ManyLambdaCaptures {
+                public int count(ItemStack input) {
+                    ItemStack stack = ItemStack.EMPTY;
+                    stack = input;
+$suppliers
+                    return supplier0.getAsInt() + supplier39.getAsInt();
+                }
+            }
+        """.trimIndent())
+
+        val firstResult = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/ManyLambdaCaptures.java").readText()
+        val aliases = Regex("""ItemStack finalStack\d* = stack;""").findAll(migrated).toList()
+
+        assertTrue(firstResult.errors.isEmpty(), "errors=${firstResult.errors}")
+        assertEquals(40, aliases.size, migrated)
+        assertTrue(migrated.contains("ItemStack finalStack = stack;"), migrated)
+        assertTrue(migrated.contains("ItemStack finalStack39 = stack;"), migrated)
+        assertTrue(migrated.contains("supplier0 = () -> finalStack.getCount();"), migrated)
+        assertTrue(migrated.contains("supplier39 = () -> finalStack39.getCount();"), migrated)
+
+        val secondResult = StructuralRefactorPass().apply(projectDir)
+        assertTrue(secondResult.errors.isEmpty(), "errors=${secondResult.errors}")
+        assertEquals(migrated, tempDir.resolve("src/main/java/com/example/ManyLambdaCaptures.java").readText())
+    }
+
+    @Test
+    fun `holder comparisons consume complete registry get calls and recipe factories stay call scoped`() {
+        val projectDir = tempDir.resolve("holder-and-recipe-call-boundaries")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("HolderComparison.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.Enchantment;
+
+            public class HolderComparison {
+                public boolean supportsEnchantment(ItemStack stack, Holder<Enchantment> enchantment) {
+                    return enchantment == ModEnchantments.RECOVERY.get();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Cooking.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public class Cooking {
+                private final RecipeSerializer<? extends AbstractCookingRecipe> FURNACE = RecipeSerializer.SMELTING_RECIPE,
+                    SMOKER = RecipeSerializer.SMOKING_RECIPE;
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val holder = srcDir.resolve("HolderComparison.java").readText()
+        val cooking = srcDir.resolve("Cooking.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${result.errors}")
+        assertTrue(holder.contains("return enchantment.is(ModEnchantments.RECOVERY);"), holder)
+        assertFalse(holder.contains(".get)()"), holder)
+        assertTrue(cooking.contains("FURNACE = RecipeSerializer.SMELTING_RECIPE,"), cooking)
+        assertTrue(cooking.contains("SMOKER = RecipeSerializer.SMOKING_RECIPE;"), cooking)
+        assertFalse(cooking.contains("SmeltingRecipe::new"), cooking)
+        assertFalse(cooking.contains("SmokingRecipe::new"), cooking)
+    }

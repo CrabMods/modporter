@@ -10,6 +10,7 @@ import com.github.javaparser.ast.body.ConstructorDeclaration
 import com.github.javaparser.ast.body.MethodDeclaration
 import com.github.javaparser.ast.expr.*
 import com.github.javaparser.ast.stmt.ExplicitConstructorInvocationStmt
+import com.github.javaparser.ast.type.ClassOrInterfaceType
 import com.github.javaparser.ast.visitor.ModifierVisitor
 import com.github.javaparser.ast.visitor.Visitable
 import mu.KotlinLogging
@@ -135,12 +136,21 @@ class AstTransformPass(
     }
 
     private fun removeStaleImports(cu: CompilationUnit): Boolean {
+        val fmlLoadingContext = "net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext"
+        val loadingContextStillUsed =
+            cu.findAll(NameExpr::class.java).any { it.nameAsString == "FMLJavaModLoadingContext" } ||
+                cu.findAll(ClassOrInterfaceType::class.java).any {
+                    it.nameAsString == "FMLJavaModLoadingContext"
+                }
         val staleImports = listOf(
-            "net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext",
+            fmlLoadingContext,
             "net.minecraftforge.eventbus.api.Cancelable",
             "net.neoforged.bus.api.Cancelable",
         )
-        return cu.imports.removeIf { it.nameAsString in staleImports }
+        return cu.imports.removeIf {
+            it.nameAsString in staleImports &&
+                (it.nameAsString != fmlLoadingContext || !loadingContextStillUsed)
+        }
     }
 }
 

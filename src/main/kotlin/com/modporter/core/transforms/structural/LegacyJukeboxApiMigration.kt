@@ -12,7 +12,7 @@ import com.github.javaparser.ast.expr.InstanceOfExpr
 import com.github.javaparser.ast.expr.MethodCallExpr
 import com.github.javaparser.ast.expr.NameExpr
 import com.github.javaparser.ast.expr.NullLiteralExpr
-import com.github.javaparser.ast.expr.PatternExpr
+import com.github.javaparser.ast.expr.TypePatternExpr
 import com.github.javaparser.ast.expr.UnaryExpr
 import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter
 import com.modporter.core.pipeline.Change
@@ -130,7 +130,7 @@ class LegacyJukeboxApiMigration {
                 callable.findAll(VariableDeclarator::class.java)
                     .filter { it.nameAsString == name && startsBefore(it, before) }
                     .forEach { add(simpleType(it.typeAsString)) }
-                callable.findAll(PatternExpr::class.java)
+                callable.findAll(TypePatternExpr::class.java)
                     .filter { it.nameAsString == name && startsBefore(it, before) }
                     .forEach { add(simpleType(it.type.toString())) }
             }.distinct()

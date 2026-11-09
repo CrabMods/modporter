@@ -1,0 +1,35 @@
+{
+  "description": "Dependency types whose NeoForge 1.21.1 build exposes a HolderLookup.Provider accessor (javap of the 1.21.1 jars). accessor is appended to a parameter of that type, or used on `this` by a class extending or implementing it.",
+  "carriers": [
+    {
+      "owner": "net.createmod.ponder.api.scene.SceneBuilder",
+      "accessor": ".world().getHolderLookupProvider()",
+      "notes": "ponder-neoforge-1.0.87+mc1.21.1: SceneBuilder#world() returns WorldInstructions, which gained getHolderLookupProvider() (absent in Ponder-Forge-1.20.1-1.0.91)"
+    },
+    {
+      "owner": "net.createmod.ponder.api.scene.WorldInstructions",
+      "accessor": ".getHolderLookupProvider()",
+      "notes": "ponder-neoforge-1.0.87+mc1.21.1: WorldInstructions#getHolderLookupProvider()"
+    },
+    {
+      "owner": "net.createmod.ponder.foundation.PonderSceneBuilder",
+      "accessor": ".world().getHolderLookupProvider()",
+      "notes": "ponder-neoforge-1.0.87+mc1.21.1: PonderSceneBuilder implements SceneBuilder"
+    },
+    {
+      "owner": "net.createmod.ponder.foundation.PonderSceneBuilder.PonderWorldInstructions",
+      "accessor": ".getHolderLookupProvider()",
+      "notes": "ponder-neoforge-1.0.87+mc1.21.1: PonderSceneBuilder.PonderWorldInstructions implements WorldInstructions"
+    },
+    {
+      "owner": "net.neoforged.neoforge.network.handling.IPayloadContext",
+      "accessor": ".player().registryAccess()",
+      "notes": "neoforge-21.1.133: IPayloadContext#player() is the receiving player of a play-phase payload (the server player, or the client's local player), whose Entity#registryAccess() is that side's registries"
+    },
+    {
+      "owner": "net.createmod.catnip.gui.AbstractSimiScreen",
+      "accessor": ".getMinecraft().level.registryAccess()",
+      "notes": "ponder-neoforge-1.0.87+mc1.21.1 (bundles Catnip): AbstractSimiScreen extends net.minecraft.client.gui.screens.Screen, whose public getMinecraft() is the client; its level holds the client registries while a screen is open in a world"
+    }
+  ]
+}

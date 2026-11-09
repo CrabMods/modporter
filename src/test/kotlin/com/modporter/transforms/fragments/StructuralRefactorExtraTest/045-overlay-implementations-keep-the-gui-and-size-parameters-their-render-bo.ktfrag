@@ -1,0 +1,1200 @@
+
+    @Test
+    fun `overlay implementations keep the gui and size parameters their render body reads`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("TrackOverlay.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.Gui;
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.LayeredDraw;
+
+            public class TrackOverlay implements LayeredDraw.Layer {
+                public void render(Gui gui, GuiGraphics graphics, float partialTicks, int width, int height) {
+                    graphics.drawString(gui.getFont(), "x", width / 2, height / 2, 0, false);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val overlay = srcDir.resolve("TrackOverlay.java").readText()
+
+        assertTrue(overlay.contains("public void render(GuiGraphics graphics, DeltaTracker deltaTracker) {"), overlay)
+        assertTrue(overlay.contains("net.minecraft.client.gui.Gui gui = net.minecraft.client.Minecraft.getInstance().gui;"), overlay)
+        assertTrue(overlay.contains("int width = graphics.guiWidth();"), overlay)
+        assertFalse(overlay.contains("partialTicks ="), overlay)
+        assertTrue(overlay.contains("import net.minecraft.client.DeltaTracker;"), overlay)
+    }
+
+    @Test
+    fun `chunk status accessors are renamed on chunk receivers and chunk overrides only`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("VirtualChunk.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.chunk.ChunkAccess;
+            import net.minecraft.world.level.chunk.status.ChunkStatus;
+
+            public abstract class VirtualChunk extends ChunkAccess {
+                public VirtualChunk() {
+                    super(null, null, null, null, 0, null, null);
+                }
+
+                @Override
+                public ChunkStatus getStatus() {
+                    return ChunkStatus.FULL;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Probe.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.chunk.LevelChunk;
+
+            public class Probe {
+                private final Job job = new Job();
+
+                public boolean ready(Level level, LevelChunk chunk) {
+                    return chunk.getStatus() != null && level.getChunk(0, 0).getStatus() != null && job.getStatus() != null;
+                }
+
+                static class Job {
+                    String getStatus() {
+                        return "ok";
+                    }
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val chunk = srcDir.resolve("VirtualChunk.java").readText()
+        val probe = srcDir.resolve("Probe.java").readText()
+
+        assertTrue(chunk.contains("public ChunkStatus getPersistedStatus() {"), chunk)
+        assertTrue(probe.contains("chunk.getPersistedStatus() != null"), probe)
+        assertTrue(probe.contains("level.getChunk(0, 0).getPersistedStatus() != null"), probe)
+        assertTrue(probe.contains("job.getStatus() != null"), probe)
+        assertTrue(probe.contains("String getStatus() {"), probe)
+    }
+    @Test
+    fun `saved data loaders thread their provider into static readers that need one`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("Train.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.chat.Component;
+
+            public class Train {
+                public Component name;
+
+                public static Train read(CompoundTag tag) {
+                    Train train = new Train();
+                    train.name = Component.Serializer.fromJson(tag.getString("Name"));
+                    return train;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("RailwaySavedData.java").writeText("""
+            package com.example;
+
+            import java.util.ArrayList;
+            import java.util.List;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.nbt.ListTag;
+            import net.minecraft.nbt.Tag;
+            import net.minecraft.world.level.saveddata.SavedData;
+
+            public class RailwaySavedData extends SavedData {
+                private final List<Train> trains = new ArrayList<>();
+
+                @Override
+                public CompoundTag save(CompoundTag nbt) {
+                    return nbt;
+                }
+
+                private static RailwaySavedData load(CompoundTag nbt) {
+                    RailwaySavedData data = new RailwaySavedData();
+                    ListTag list = nbt.getList("Trains", Tag.TAG_COMPOUND);
+                    for (int i = 0; i < list.size(); i++)
+                        data.trains.add(Train.read(list.getCompound(i)));
+                    return data;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val train = srcDir.resolve("Train.java").readText()
+        val data = srcDir.resolve("RailwaySavedData.java").readText()
+
+        val trainProvider = Regex(
+            """public static Train read\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider ([A-Za-z_$][\w$]*)\) \{"""
+        ).find(train)?.groupValues?.get(1)
+        assertTrue(trainProvider != null, train)
+        assertTrue(train.contains("Component.Serializer.fromJson(tag.getString(\"Name\"), ${trainProvider!!})"), train)
+        val loaderProvider = Regex(
+            """private static RailwaySavedData load\(CompoundTag nbt, (?:net\.minecraft\.core\.)?HolderLookup\.Provider ([A-Za-z_$][\w$]*)\) \{"""
+        ).find(data)?.groupValues?.get(1)
+        assertTrue(loaderProvider != null, data)
+        assertTrue(data.contains("Train.read(list.getCompound(i), ${loaderProvider!!})"), data)
+    }
+
+    @Test
+    fun `block pos aabb constructors keep their corners through vec3 lower corners`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("EdgePoint.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+
+            public class EdgePoint {
+                public BlockPos getGlobalPosition() {
+                    return BlockPos.ZERO;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("SignalBlockEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.phys.AABB;
+            import net.minecraft.world.phys.Vec3;
+
+            public class SignalBlockEntity extends BlockEntity {
+                private EdgePoint edgePoint;
+
+                public SignalBlockEntity(BlockPos pos, BlockState state) {
+                    super(null, pos, state);
+                }
+
+                public AABB bounds(BlockPos other, Vec3 from, Vec3 to) {
+                    AABB vectors = new AABB(from, to);
+                    AABB area = new AABB(other, other.above(2));
+                    return new AABB(worldPosition, edgePoint.getGlobalPosition()).inflate(2);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val signal = srcDir.resolve("SignalBlockEntity.java").readText()
+
+        assertTrue(signal.contains("return new AABB(Vec3.atLowerCornerOf(worldPosition), Vec3.atLowerCornerOf(edgePoint.getGlobalPosition())).inflate(2);"), signal)
+        assertTrue(signal.contains("AABB area = new AABB(Vec3.atLowerCornerOf(other), Vec3.atLowerCornerOf(other.above(2)));"), signal)
+        assertTrue(signal.contains("AABB vectors = new AABB(from, to);"), signal)
+    }
+    @Test
+    fun `static readers calling a threaded hook through a subclass receiver take the provider too`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("DataEntry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            public abstract class DataEntry {
+                protected ItemStack icon = ItemStack.EMPTY;
+
+                protected void readAdditional(CompoundTag tag) {
+                    icon = ItemStack.of(tag.getCompound("Icon"));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Instruction.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+
+            public class Instruction extends DataEntry {
+                public static Instruction fromTag(CompoundTag tag) {
+                    Instruction instruction = new Instruction();
+                    instruction.readAdditional(tag.getCompound("Data"));
+                    return instruction;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Holder.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.nbt.CompoundTag;
+
+            public class Holder {
+                public Instruction load(CompoundTag tag, HolderLookup.Provider registries) {
+                    return Instruction.fromTag(tag);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val instruction = srcDir.resolve("Instruction.java").readText()
+        val holder = srcDir.resolve("Holder.java").readText()
+
+        assertTrue(
+            Regex("""public static Instruction fromTag\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider registries\) \{""")
+                .containsMatchIn(instruction),
+            instruction
+        )
+        assertTrue(instruction.contains("instruction.readAdditional(tag.getCompound(\"Data\"), registries);"), instruction)
+        assertTrue(holder.contains("return Instruction.fromTag(tag, registries);"), holder)
+    }
+
+    @Test
+    fun `static readers calling a threaded static reader through its class take the provider`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("Instruction.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            public class Instruction {
+                ItemStack icon;
+
+                public static Instruction fromTag(CompoundTag tag) {
+                    Instruction instruction = new Instruction();
+                    instruction.icon = ItemStack.of(tag.getCompound("Icon"));
+                    return instruction;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Entry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+
+            public class Entry {
+                Instruction instruction;
+
+                public static Entry fromTag(CompoundTag tag) {
+                    Entry entry = new Entry();
+                    entry.instruction = Instruction.fromTag(tag.getCompound("Instruction"));
+                    return entry;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Holder.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.nbt.CompoundTag;
+
+            public class Holder {
+                public Entry load(CompoundTag tag, HolderLookup.Provider registries) {
+                    return Entry.fromTag(tag);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val entry = srcDir.resolve("Entry.java").readText()
+        val holder = srcDir.resolve("Holder.java").readText()
+
+        assertTrue(
+            Regex("""public static Entry fromTag\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider registries\) \{""")
+                .containsMatchIn(entry),
+            entry
+        )
+        assertTrue(entry.contains("Instruction.fromTag(tag.getCompound(\"Instruction\"), registries)"), entry)
+        assertTrue(holder.contains("return Entry.fromTag(tag, registries);"), holder)
+    }
+
+    @Test
+    fun `lazy optional variables assigned an item capability lookup wrap the nullable handler`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("FluidItems.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.fluids.capability.IFluidHandlerItem;
+
+            public class FluidItems {
+                public static boolean canEmpty(ItemStack stack) {
+                    LazyOptional<IFluidHandlerItem> capability = stack.getCapability(Capabilities.FluidHandler.ITEM);
+                    ItemStack copy = stack.copy();
+                    capability = copy.getCapability(Capabilities.FluidHandler.ITEM);
+                    return capability.isPresent();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val items = srcDir.resolve("FluidItems.java").readText()
+
+        assertTrue(items.contains("LazyOptional<IFluidHandlerItem> capability = com.modporter.generated.example.compat.LazyOptional.ofNullable(stack.getCapability(Capabilities.FluidHandler.ITEM));"), items)
+        assertTrue(items.contains("capability = com.modporter.generated.example.compat.LazyOptional.ofNullable(copy.getCapability(Capabilities.FluidHandler.ITEM));"), items)
+    }
+
+    @Test
+    fun `set hover name chains keep the stack they returned`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("Carts.java").writeText("""
+            package com.example;
+
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.item.ItemStack;
+
+            public class Carts {
+                static ItemStack create(int type) {
+                    return ItemStack.EMPTY;
+                }
+
+                public static ItemStack named(int type, Component name) {
+                    ItemStack generatedStack = create(type).setHoverName(name);
+                    return create(type).setHoverName(name);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val carts = srcDir.resolve("Carts.java").readText()
+
+        assertTrue(carts.contains("ItemStack generatedStack = create(type);\n        generatedStack.set(DataComponents.CUSTOM_NAME, name);"), carts)
+        assertTrue(carts.contains("return net.minecraft.Util.make(create(type), modporterStack -> modporterStack.set(DataComponents.CUSTOM_NAME, name));"), carts)
+    }
+
+    @Test
+    fun `constant is cancelable overrides become the cancellable event marker`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("SearchEvent.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.Event;
+
+            public class SearchEvent extends Event {
+                private int priority;
+
+                @Override
+                public boolean isCancelable() {
+                    return true;
+                }
+
+                public int getPriority() {
+                    return priority;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("QuietEvent.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.Event;
+
+            public class QuietEvent extends Event {
+                @Override
+                public boolean isCancelable() {
+                    return false;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ToggleEvent.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.Event;
+
+            public class ToggleEvent extends Event {
+                boolean cancelable;
+
+                @Override
+                public boolean isCancelable() {
+                    return cancelable;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val search = srcDir.resolve("SearchEvent.java").readText()
+        val quiet = srcDir.resolve("QuietEvent.java").readText()
+        val toggle = srcDir.resolve("ToggleEvent.java").readText()
+
+        assertTrue(search.contains("public class SearchEvent extends Event implements ICancellableEvent {"), search)
+        assertTrue(search.contains("import net.neoforged.bus.api.ICancellableEvent;"), search)
+        assertFalse(search.contains("isCancelable"), search)
+        assertFalse(quiet.contains("isCancelable") || quiet.contains("ICancellableEvent"), quiet)
+        assertTrue(toggle.contains("return cancelable;"), toggle)
+        assertFalse(toggle.contains("ICancellableEvent"), toggle)
+    }
+
+    @Test
+    fun `potion utils calls migrate only arguments that may be stacks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("PotionFluids.java").writeText("""
+            package com.example;
+
+            import java.util.function.ToIntFunction;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.alchemy.Potion;
+            import net.minecraft.world.item.alchemy.PotionUtils;
+            import net.minecraft.world.item.alchemy.Potions;
+
+            public class PotionFluids {
+                public static ToIntFunction<ItemStack> COLOR = stack -> PotionUtils.getColor(stack);
+
+                public static int tagColor(CompoundTag tag) {
+                    return PotionUtils.getColor(PotionUtils.getAllEffects(tag)) | 0xff000000;
+                }
+
+                public static Potion tagPotion(CompoundTag tag) {
+                    return PotionUtils.getPotion(tag);
+                }
+
+                public static ItemStack filled(ItemStack stack) {
+                    PotionUtils.setPotion(stack, Potions.WATER);
+                    return PotionUtils.setPotion(stack.copy(), Potions.WATER);
+                }
+
+                public static void bottle(ItemStack stack, Potion potion) {
+                    PotionUtils.setPotion(stack, potion);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val fluids = srcDir.resolve("PotionFluids.java").readText()
+
+        assertTrue(fluids.contains("stack -> (stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"), fluids)
+        assertTrue(fluids.contains("return LegacyPotionUtils.getColor(LegacyPotionUtils.getAllEffects(tag)) | 0xff000000;"), fluids)
+        assertTrue(fluids.contains("return LegacyPotionUtils.getPotion(tag);"), fluids)
+        assertTrue(
+            fluids.contains(
+                "(stack).update(DataComponents.POTION_CONTENTS, PotionContents.EMPTY, " +
+                    "Potions.WATER, PotionContents::withPotion);"
+            ),
+            fluids
+        )
+        assertTrue(
+            Regex(
+                """return net\.minecraft\.Util\.make\(stack\.copy\(\),\s*""" +
+                    """modPorterPotionStack\d*\s*->\s*modPorterPotionStack\d*\.update\(""" +
+                    """DataComponents\.POTION_CONTENTS,\s*PotionContents\.EMPTY,\s*""" +
+                    """Potions\.WATER,\s*PotionContents::withPotion\)\);"""
+            ).containsMatchIn(fluids),
+            fluids
+        )
+        assertTrue(fluids.contains("import com.modporter.generated.example.compat.LegacyPotionUtils;"), fluids)
+        assertTrue(fluids.contains("LegacyPotionUtils.setPotion(stack, potion);"), fluids)
+    }
+
+    @Test
+    fun `fake player dimension overrides take the default dimensions hook`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("MachinePlayer.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityDimensions;
+            import net.minecraft.world.entity.Pose;
+            import net.neoforged.neoforge.common.util.FakePlayer;
+
+            public class MachinePlayer extends FakePlayer {
+                public MachinePlayer() {
+                    super(null, null);
+                }
+
+                @Override
+                public EntityDimensions getDimensions(Pose poseIn) {
+                    return super.getDimensions(poseIn).withEyeHeight(0);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val player = srcDir.resolve("MachinePlayer.java").readText()
+
+        assertTrue(player.contains("public EntityDimensions getDefaultDimensions(Pose poseIn) {"), player)
+        assertTrue(player.contains("return super.getDefaultDimensions(poseIn).withEyeHeight(0);"), player)
+    }
+
+    @Test
+    fun `block spawn overrides with an imported placement type become the properties predicate`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("CasingBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.SpawnPlacements.Type;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class CasingBlock extends Block {
+                public CasingBlock(Properties properties) {
+                    super(properties);
+                }
+
+                @Override
+                public boolean isValidSpawn(BlockState state, BlockGetter level, BlockPos pos, Type type,
+                                            EntityType<?> entityType) {
+                    return false;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TypedBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.SpawnPlacements.Type;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class TypedBlock extends Block {
+                public TypedBlock(Properties properties) {
+                    super(properties);
+                }
+
+                @Override
+                public boolean isValidSpawn(BlockState state, BlockGetter level, BlockPos pos, Type type, EntityType<?> entityType) {
+                    return type == Type.ON_GROUND;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val casing = srcDir.resolve("CasingBlock.java").readText()
+        val typed = srcDir.resolve("TypedBlock.java").readText()
+
+        assertTrue(casing.contains("super(properties.isValidSpawn((state, level, pos, entityType) -> false));"), casing)
+        assertFalse(casing.contains("SpawnPlacements.Type"), casing)
+        assertTrue(typed.contains("Type type, EntityType<?> entityType"), typed)
+    }
+
+    @Test
+    fun `living entity death loot overrides take the server level`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("CrateEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.damagesource.DamageSource;
+            import net.minecraft.world.entity.LivingEntity;
+
+            public abstract class CrateEntity extends LivingEntity {
+                protected CrateEntity() {
+                    super(null, null);
+                }
+
+                @Override
+                protected void dropAllDeathLoot(DamageSource pDamageSource) {
+                    super.dropAllDeathLoot(pDamageSource);
+                    spawnAtLocation(null);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Ledger.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.damagesource.DamageSource;
+
+            public class Ledger {
+                protected void dropAllDeathLoot(DamageSource source) {
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val crate = srcDir.resolve("CrateEntity.java").readText()
+        val ledger = srcDir.resolve("Ledger.java").readText()
+
+        assertTrue(crate.contains("protected void dropAllDeathLoot(ServerLevel serverLevel, DamageSource pDamageSource) {"), crate)
+        assertTrue(crate.contains("super.dropAllDeathLoot(serverLevel, pDamageSource);"), crate)
+        assertTrue(crate.contains("import net.minecraft.server.level.ServerLevel;"), crate)
+        assertTrue(ledger.contains("protected void dropAllDeathLoot(DamageSource source) {"), ledger)
+    }
+
+    @Test
+    fun `level subclass map data and game event overrides take their 1_21 keys`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("PreviewLevel.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.gameevent.GameEvent;
+            import net.minecraft.world.level.gameevent.GameEvent.Context;
+            import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
+            import net.minecraft.world.phys.Vec3;
+
+            public abstract class PreviewLevel extends Level {
+                protected final Level level;
+
+                protected PreviewLevel(Level level) {
+                    super(null, null, null, null, null, false, false, 0, 0);
+                    this.level = level;
+                }
+
+                @Override
+                public MapItemSavedData getMapData(String mapName) {
+                    return level.getMapData(mapName);
+                }
+
+                @Override
+                public void setMapData(String mapId, MapItemSavedData data) {
+                }
+
+                @Override
+                public int getFreeMapId() {
+                    return 0;
+                }
+
+                @Override
+                public void gameEvent(GameEvent event, Vec3 position, Context context) {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("NamedLevel.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
+
+            public abstract class NamedLevel extends Level {
+                protected NamedLevel() {
+                    super(null, null, null, null, null, false, false, 0, 0);
+                }
+
+                @Override
+                public MapItemSavedData getMapData(String mapName) {
+                    return mapName.isEmpty() ? null : null;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val preview = srcDir.resolve("PreviewLevel.java").readText()
+        val named = srcDir.resolve("NamedLevel.java").readText()
+
+        assertTrue(preview.contains("public MapItemSavedData getMapData(MapId mapName) {"), preview)
+        assertTrue(preview.contains("public void setMapData(MapId mapId, MapItemSavedData data) {"), preview)
+        assertTrue(preview.contains("public MapId getFreeMapId() {"), preview)
+        assertTrue(preview.contains("return new MapId(0);"), preview)
+        assertTrue(preview.contains("public void gameEvent(Holder<GameEvent> event, Vec3 position, Context context) {"), preview)
+        assertTrue(preview.contains("import net.minecraft.world.level.saveddata.maps.MapId;"), preview)
+        assertTrue(preview.contains("import net.minecraft.core.Holder;"), preview)
+        assertTrue(named.contains("public MapItemSavedData getMapData(String mapName) {"), named)
+    }
+
+    @Test
+    fun `forge fluid stack buffer calls use the optional fluid stream codec`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("SplashPacket.java").writeText("""
+            package com.example;
+
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.network.RegistryFriendlyByteBuf;
+            import net.neoforged.neoforge.fluids.FluidStack;
+
+            public class SplashPacket {
+                private FluidStack fluid;
+
+                public SplashPacket(FriendlyByteBuf buffer) {
+                    fluid = buffer.readFluidStack();
+                }
+
+                public void write(RegistryFriendlyByteBuf buffer) {
+                    buffer.writeFluidStack(fluid);
+                }
+
+                static FluidStack copy(FluidStack stack) {
+                    FriendlyByteBuf scratch = null;
+                    scratch.writeFluidStack(stack);
+                    return stack;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val packet = srcDir.resolve("SplashPacket.java").readText()
+
+        assertTrue(packet.contains("public SplashPacket(RegistryFriendlyByteBuf buffer) {"), packet)
+        assertTrue(packet.contains("fluid = FluidStack.OPTIONAL_STREAM_CODEC.decode(buffer);"), packet)
+        assertTrue(packet.contains("FluidStack.OPTIONAL_STREAM_CODEC.encode(buffer, fluid);"), packet)
+        assertTrue(packet.contains("scratch.writeFluidStack(stack);"), packet)
+    }
+    @Test
+    fun `threaded nbt methods called through a cast receiver take the provider`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("ListFilterItem.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+
+            public class ListFilterItem extends Item {
+                public ListFilterItem(Properties properties) {
+                    super(properties);
+                }
+
+                public ItemStack firstFilter(CompoundTag tag) {
+                    return ItemStack.of(tag.getCompound("First"));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("FilterStack.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            public class FilterStack {
+                public ItemStack first(ItemStack filter, CompoundTag tag, HolderLookup.Provider registries) {
+                    return ((ListFilterItem) filter.getItem()).firstFilter(tag);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val item = srcDir.resolve("ListFilterItem.java").readText()
+        val stack = srcDir.resolve("FilterStack.java").readText()
+
+        assertTrue(
+            Regex("""public ItemStack firstFilter\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider registries\) \{""")
+                .containsMatchIn(item),
+            item
+        )
+        assertTrue(stack.contains("return ((ListFilterItem) filter.getItem()).firstFilter(tag, registries);"), stack)
+    }
+
+    @Test
+    fun `methods handing a threaded nbt method on as a reference take the provider`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("Lists.java").writeText("""
+            package com.example;
+
+            import java.util.List;
+            import java.util.function.Function;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.nbt.ListTag;
+
+            public class Lists {
+                public static <T> ListTag writeCompoundList(List<T> list, Function<T, CompoundTag> serializer) {
+                    ListTag tag = new ListTag();
+                    list.forEach(value -> tag.add(serializer.apply(value)));
+                    return tag;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Stop.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            public class Stop {
+                ItemStack icon = ItemStack.EMPTY;
+
+                public CompoundTag write() {
+                    CompoundTag tag = new CompoundTag();
+                    tag.put("Icon", icon.save(new CompoundTag()));
+                    return tag;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Route.java").writeText("""
+            package com.example;
+
+            import java.util.ArrayList;
+            import java.util.List;
+            import net.minecraft.nbt.CompoundTag;
+
+            public class Route {
+                List<Stop> stops = new ArrayList<>();
+
+                public CompoundTag write() {
+                    CompoundTag tag = new CompoundTag();
+                    tag.put("Stops", Lists.writeCompoundList(stops, Stop::write));
+                    return tag;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Depot.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.nbt.CompoundTag;
+
+            public class Depot {
+                Route route = new Route();
+
+                public void save(CompoundTag tag, HolderLookup.Provider registries) {
+                    tag.put("Route", route.write());
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val route = srcDir.resolve("Route.java").readText()
+        val depot = srcDir.resolve("Depot.java").readText()
+
+        assertTrue(route.contains("public CompoundTag write(HolderLookup.Provider registries) {"), route)
+        assertTrue(route.contains("Lists.writeCompoundList(stops, value -> value.write(registries))"), route)
+        assertTrue(depot.contains("tag.put(\"Route\", route.write(registries));"), depot)
+    }
+
+    @Test
+    fun `calls with a guarded entity in scope use its registries instead of widening the caller`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("Blocks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            public class Blocks {
+                public static CompoundTag prepare(ItemStack stack) {
+                    CompoundTag tag = new CompoundTag();
+                    tag.put("Item", stack.save(new CompoundTag()));
+                    return tag;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("PlacePacket.java").writeText("""
+            package com.example;
+
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.network.handling.IPayloadContext;
+
+            public class PlacePacket {
+                ItemStack stack = ItemStack.EMPTY;
+
+                public boolean handle(IPayloadContext context) {
+                    context.enqueueWork(() -> {
+                        if (!(context.player() instanceof ServerPlayer player))
+                            return;
+                        Blocks.prepare(stack);
+                    });
+                    return true;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val packet = srcDir.resolve("PlacePacket.java").readText()
+
+        assertTrue(packet.contains("public boolean handle(IPayloadContext context) {"), packet)
+        assertTrue(packet.contains("Blocks.prepare(stack, player.registryAccess());"), packet)
+    }
+
+    @Test
+    fun `packet handlers and writers use the registries in scope instead of widening their family`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("PacketBase.java").writeText("""
+            package com.example;
+
+            import net.minecraft.network.RegistryFriendlyByteBuf;
+            import net.neoforged.neoforge.network.handling.IPayloadContext;
+
+            public abstract class PacketBase {
+                public abstract void write(RegistryFriendlyByteBuf buffer);
+
+                public abstract boolean handle(IPayloadContext context);
+            }
+        """.trimIndent())
+        srcDir.resolve("Route.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            public class Route {
+                ItemStack icon = ItemStack.EMPTY;
+
+                public CompoundTag write() {
+                    CompoundTag tag = new CompoundTag();
+                    tag.put("Icon", icon.save(new CompoundTag()));
+                    return tag;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("RoutePacket.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.RegistryFriendlyByteBuf;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.network.handling.IPayloadContext;
+
+            public class RoutePacket extends PacketBase {
+                Route route = new Route();
+                CompoundTag data = new CompoundTag();
+                ItemStack received = ItemStack.EMPTY;
+
+                @Override
+                public void write(RegistryFriendlyByteBuf buffer) {
+                    buffer.writeNbt(route.write());
+                }
+
+                @Override
+                public boolean handle(IPayloadContext context) {
+                    context.enqueueWork(() -> {
+                        if (!(context.player() instanceof ServerPlayer player))
+                            return;
+                        received = ItemStack.of(data.getCompound("Item"));
+                    });
+                    return true;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val base = srcDir.resolve("PacketBase.java").readText()
+        val packet = srcDir.resolve("RoutePacket.java").readText()
+
+        assertTrue(base.contains("public abstract void write(RegistryFriendlyByteBuf buffer);"), base)
+        assertTrue(base.contains("public abstract boolean handle(IPayloadContext context);"), base)
+        assertTrue(packet.contains("buffer.writeNbt(route.write(buffer.registryAccess()));"), packet)
+        assertTrue(packet.contains("ItemStack.parseOptional(player.registryAccess(), data.getCompound(\"Item\"))"), packet)
+    }
+
+    @Test
+    fun `stacks returned by project getters declared as ItemStack save with the registries`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("LinkNetwork.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+
+            public class LinkNetwork {
+                public static class Frequency {
+                    private final ItemStack stack;
+
+                    public Frequency(ItemStack stack) {
+                        this.stack = stack;
+                    }
+
+                    public ItemStack getStack() {
+                        return stack;
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LinkData.java").writeText("""
+            package com.example;
+
+            import com.example.LinkNetwork.Frequency;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.nbt.CompoundTag;
+
+            public class LinkData {
+                Frequency first;
+
+                public void write(CompoundTag nbt, HolderLookup.Provider registries) {
+                    nbt.put("First", first.getStack()
+                        .save(new CompoundTag()));
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val data = srcDir.resolve("LinkData.java").readText()
+
+        assertTrue(data.contains(".saveOptional(registries)"), data)
+        assertFalse(data.contains(".save(new CompoundTag())"), data)
+    }

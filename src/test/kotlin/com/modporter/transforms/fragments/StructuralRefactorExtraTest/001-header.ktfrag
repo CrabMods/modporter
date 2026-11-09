@@ -1,7 +1,6 @@
 package com.modporter.transforms
 
 import com.modporter.core.pipeline.Confidence
-import com.modporter.core.transforms.build.BuildSystemPass
 import com.modporter.core.transforms.structural.StructuralRefactorPass
 import com.modporter.core.transforms.text.TextReplacementPass
 import com.modporter.mapping.MappingDatabase
@@ -13,6 +12,7 @@ import kotlin.io.path.*
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import com.modporter.core.transforms.build.BuildSystemPass
 
 /**
  * Additional tests for StructuralRefactorPass edge cases and error handling.
@@ -992,67 +992,6 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
-    fun `migrates write only NbtUtils block position calls and method references`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("WriteOnly.java").writeText("""
-            package com.example;
-
-            import java.util.function.Function;
-            import net.minecraft.core.BlockPos;
-            import net.minecraft.nbt.CompoundTag;
-            import net.minecraft.nbt.NbtUtils;
-
-            public class WriteOnly {
-                CompoundTag write(BlockPos pos) {
-                    return NbtUtils.writeBlockPos(pos);
-                }
-
-                Function<BlockPos, CompoundTag> writer() {
-                    return NbtUtils::writeBlockPos;
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(tempDir)
-        val transformed = srcDir.resolve("WriteOnly.java").readText()
-
-        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
-        assertTrue(transformed.contains("return modporterWriteLegacyBlockPos(pos);"), transformed)
-        assertTrue(transformed.contains("modporterPos -> modporterWriteLegacyBlockPos(modporterPos)"), transformed)
-        assertTrue(transformed.contains("private static CompoundTag modporterWriteLegacyBlockPos(BlockPos pos)"), transformed)
-        assertFalse(transformed.contains("modporterReadLegacyBlockPos"), transformed)
-        assertFalse(transformed.contains("NbtUtils.writeBlockPos"), transformed)
-        assertFalse(transformed.contains("NbtUtils::writeBlockPos"), transformed)
-    }
-
-    @Test
-    fun `legacy NbtUtils block position migration ignores literals comments and project owners`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        val sourceFile = srcDir.resolve("Unrelated.java")
-        sourceFile.writeText("""
-            package com.example;
-
-            class NbtUtils {
-                static Object writeBlockPos(Object value) { return value; }
-            }
-
-            public class Unrelated {
-                // NbtUtils.writeBlockPos(value)
-                String example = "NbtUtils::writeBlockPos";
-                Object write(Object value) { return NbtUtils.writeBlockPos(value); }
-            }
-        """.trimIndent())
-        val original = sourceFile.readText()
-
-        val result = StructuralRefactorPass().apply(tempDir)
-
-        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
-        assertEquals(original, sourceFile.readText())
-    }
-
-    @Test
     fun `migrates legacy pack resource APIs to resources supplier adapters`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -1177,5 +1116,50 @@ class StructuralRefactorExtraTest {
         assertFalse(setup.contains("com.modporter.generated.mod"))
         assertFalse(tempDir.resolve("src/main/java/com/modporter/generated/shared/compat/PathPackResources.java").exists())
         assertFalse(tempDir.resolve("src/main/java/com/modporter/generated/mod/compat/PathPackResources.java").exists())
+        assertFalse(result.changes.any { it.ruleId == "struct-generate-path-pack-resources" })
+    }
+
+    @Test
+    fun `legacy pack resource compat generation ignores text block mod id documentation`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText(listOf(
+            "package com.example;",
+            "",
+            "public final class ExampleMod {",
+            "    String docs() {",
+            "        return \"\"\"",
+            "            @Mod(\"examplemod\")",
+            "            public static final String MODID = \"examplemod\";",
+            "            \"\"\";",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+        srcDir.resolve("PackSetup.java").writeText("""
+            package com.example;
+
+            import java.nio.file.Path;
+            import net.neoforged.neoforge.resource.PathPackResources;
+
+            public class PackSetup {
+                public PathPackResources open(Path sourcePath) {
+                    return new PathPackResources("example:" + sourcePath, true, sourcePath);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val setup = srcDir.resolve("PackSetup.java").readText()
+
+        assertTrue(
+            result.errors.any {
+                it.contains("Legacy pack resource API migration error") &&
+                    it.contains("Cannot derive generated compat package")
+            },
+            "Expected text block mod id documentation to be ignored; got: ${result.errors}"
+        )
+        assertFalse(setup.contains("com.modporter.generated.examplemod"), setup)
+        assertFalse(tempDir.resolve("src/main/java/com/modporter/generated/examplemod/compat/PathPackResources.java").exists())
         assertFalse(result.changes.any { it.ruleId == "struct-generate-path-pack-resources" })
     }

@@ -1,0 +1,1026 @@
+
+    @Test
+    fun `runtime log audit keeps texture mip warning when input dimensions differ`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeTextureMipEvidence(projectDir, width = 17, height = 17)
+        writeTextureMipEvidence(sourceDir, width = 16, height = 16)
+        val logFile = tempDir.resolve("texture-mip-regression.log")
+        logFile.writeText("""
+            [06:14:12] [Worker-Main-1/WARN] [minecraft/SpriteLoader]: Texture example:block/fluids/odd_mip_overlay with size 17x17 limits mip level from 4 to 0
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("Texture example:block/fluids/odd_mip_overlay") },
+            "Porter-changed texture dimensions must remain fatal"
+        )
+    }
+
+    @Test
+    fun `process scope matcher recognizes benchmark java command lines`(@TempDir tempDir: Path) {
+        val sakuraDir = tempDir.resolve("work/sakura").toAbsolutePath().normalize()
+        val hotbathDir = tempDir.resolve("work/hotbath").toAbsolutePath().normalize()
+        val commandLine = """
+            "C:\Program Files\Java\jdk-21\bin\java.exe"
+            -Dfml.modFolders=sakura%%$sakuraDir\build\classes\java\main;sakura%%$sakuraDir\build\resources\main
+            -cp $sakuraDir\build\moddev\artifacts\neoforge-21.1.219.jar
+            net.neoforged.devlaunch.Main
+        """.trimIndent()
+
+        assertTrue(processCommandMatchesScope(commandLine, sakuraDir))
+        assertTrue(!processCommandMatchesScope(commandLine, hotbathDir))
+    }
+
+    @Test
+    fun `benchmark gametest smoke harness is staged only when project has no gametests`(@TempDir tempDir: Path) {
+        val projectWithoutTests = tempDir.resolve("without-tests")
+        projectWithoutTests.createDirectories()
+        projectWithoutTests.resolve("gradle.properties").writeText("mod_id=resmod\n")
+
+        val issues = stageBenchmarkGameTestSmoke(projectWithoutTests)
+
+        assertTrue(issues.isEmpty(), "Expected smoke harness staging to succeed: $issues")
+        val stagedSmokeHarness = projectWithoutTests.resolve(
+            "src/main/java/com/modporter/generated/resmod/benchmark/ModPorterBenchmarkGameTests.java"
+        )
+        assertTrue(stagedSmokeHarness.exists())
+        assertTrue(!projectWithoutTests.resolve("src/main/java/com/modporter/benchmark/ModPorterBenchmarkGameTests.java").exists())
+        // dev runs read SNBT test structures from gameteststructures/ in their working directory
+        assertTrue(projectWithoutTests.resolve("run/gameteststructures/modporter_benchmark_empty.snbt").exists())
+        assertTrue(
+            stagedSmokeHarness.readText().contains("package com.modporter.generated.resmod.benchmark;")
+        )
+        assertTrue(
+            stagedSmokeHarness.readText().contains("""@GameTestHolder("resmod")""")
+        )
+
+        val projectWithTests = tempDir.resolve("with-tests")
+        val existingTestDir = projectWithTests.resolve("src/main/java/com/example")
+        existingTestDir.createDirectories()
+        existingTestDir.resolve("ExistingGameTests.java").writeText("""
+            package com.example;
+
+            final class ExistingGameTests {
+                @GameTest(template = "empty")
+                static void existing(Object helper) {
+                }
+            }
+        """.trimIndent())
+
+        val existingIssues = stageBenchmarkGameTestSmoke(projectWithTests)
+
+        assertTrue(existingIssues.isEmpty(), "Expected existing GameTest detection to succeed: $existingIssues")
+        assertTrue(!projectWithTests.resolve("src/main/java/com/modporter/benchmark/ModPorterBenchmarkGameTests.java").exists())
+        assertTrue(!projectWithTests.resolve("src/main/java/com/modporter/generated/with_tests/benchmark/ModPorterBenchmarkGameTests.java").exists())
+    }
+
+
+    @Test
+    fun `journeymap sepia evidence binds exact warnings pin and shader resources`(
+        @TempDir tempDir: Path
+    ) {
+        val jar = tempDir.resolve("journeymap-fixture.jar")
+        createJar(jar, journeyMapSepiaFixtureEntries())
+        val hash = sha256File(jar)
+        val size = Files.size(jar)
+        val loading =
+            "[main/INFO] [ne.ne.fm.lo.mo.ModDiscoverer/SCAN]: Loading mod file $jar with languages [javafml]"
+        val cache = RuntimeLogEvidenceCache(null, null)
+
+        journeyMapSepiaColorModulatorMessages.forEach { message ->
+            val lines = listOf(
+                loading,
+                "[18:10:25] [Render thread/WARN] [minecraft/ShaderInstance]: $message"
+            )
+            val evidence = journeyMapSepiaColorModulatorEvidence(
+                lines,
+                1,
+                cache,
+                hash,
+                size,
+                requirePinnedMapping = false
+            )
+            assertTrue(evidence?.contains("exact sepia descriptor/shader ownership") == true, "$message: $evidence")
+        }
+        val unknown = listOf(
+            loading,
+            "[18:10:25] [Render thread/WARN] [minecraft/ShaderInstance]: Shader journeymap:sepia_4 could not find uniform named ColorModulator in the specified shader program."
+        )
+        assertTrue(
+            journeyMapSepiaColorModulatorEvidence(
+                unknown,
+                1,
+                RuntimeLogEvidenceCache(null, null),
+                hash,
+                size,
+                requirePinnedMapping = false
+            ) == null,
+            "Unproved JourneyMap shader warning must remain fatal"
+        )
+        val fatalSeverity = listOf(
+            loading,
+            "[18:10:25] [Render thread/ERROR] [minecraft/ShaderInstance]: ${journeyMapSepiaColorModulatorMessages.last()}"
+        )
+        assertTrue(
+            journeyMapSepiaColorModulatorEvidence(
+                fatalSeverity,
+                1,
+                RuntimeLogEvidenceCache(null, null),
+                hash,
+                size,
+                requirePinnedMapping = false
+            ) == null,
+            "Fatal severity must not be admitted by the JourneyMap warning evidence"
+        )
+        assertTrue(
+            journeyMapSepiaColorModulatorEvidence(
+                listOf(loading, "[18:10:25] [Render thread/WARN] [minecraft/ShaderInstance]: ${journeyMapSepiaColorModulatorMessages.last()}"),
+                1,
+                RuntimeLogEvidenceCache(null, null),
+                "0".repeat(64),
+                size,
+                requirePinnedMapping = false
+            ) == null,
+            "JourneyMap artifact hash drift must remain fatal"
+        )
+        assertTrue(
+            journeyMapRuntimePinMatches(JOURNEYMAP_RUNTIME_SHA256),
+            "Production JourneyMap evidence constants must match neoforge-deps.json"
+        )
+    }
+
+    @Test
+    fun `journeymap sepia evidence rejects duplicate loads and resource drift`(
+        @TempDir tempDir: Path
+    ) {
+        val jar = tempDir.resolve("journeymap-fixture.jar")
+        createJar(jar, journeyMapSepiaFixtureEntries())
+        val duplicate = tempDir.resolve("journeymap-duplicate.jar")
+        Files.copy(jar, duplicate)
+        val message = journeyMapSepiaColorModulatorMessages.last()
+        val duplicateLines = listOf(
+            "[main/INFO] [ne.ne.fm.lo.mo.ModDiscoverer/SCAN]: Loading mod file $jar with languages [javafml]",
+            "[main/INFO] [ne.ne.fm.lo.mo.ModDiscoverer/SCAN]: Loading mod file $duplicate with languages [javafml]",
+            "[18:10:25] [Render thread/WARN] [minecraft/ShaderInstance]: $message"
+        )
+        assertTrue(
+            journeyMapSepiaColorModulatorEvidence(
+                duplicateLines,
+                2,
+                RuntimeLogEvidenceCache(null, null),
+                sha256File(jar),
+                Files.size(jar),
+                requirePinnedMapping = false
+            ) == null,
+            "Multiple loaded JourneyMap artifacts must remain fatal"
+        )
+
+        val drifted = tempDir.resolve("journeymap-drifted.jar")
+        createJar(drifted, journeyMapSepiaFixtureEntries(thirdFragmentDeclaresColor = true))
+        val driftedLines = listOf(
+            "[main/INFO] [ne.ne.fm.lo.mo.ModDiscoverer/SCAN]: Loading mod file $drifted with languages [javafml]",
+            "[18:10:25] [Render thread/WARN] [minecraft/ShaderInstance]: $message"
+        )
+        assertTrue(
+            journeyMapSepiaColorModulatorEvidence(
+                driftedLines,
+                1,
+                RuntimeLogEvidenceCache(null, null),
+                sha256File(drifted),
+                Files.size(drifted),
+                requirePinnedMapping = false
+            ) == null,
+            "JourneyMap shader resource drift must remain fatal"
+        )
+    }
+
+    private fun journeyMapSepiaFixtureEntries(
+        thirdFragmentDeclaresColor: Boolean = false
+    ): Map<String, String> {
+        val entries = linkedMapOf(
+            "META-INF/neoforge.mods.toml" to "[[mods]]\nmodId=\"journeymap\"\n",
+            "assets/journeymap/shaders/core/jm_position_tex_color.vsh" to
+                "#version 150\nuniform mat4 ModelViewMat;\nvoid main() {}\n"
+        )
+        for (shaderIndex in 1..3) {
+            entries["assets/journeymap/shaders/core/sepia_$shaderIndex.json"] =
+                """{"vertex":"journeymap:jm_position_tex_color","fragment":"journeymap:sepia_$shaderIndex","uniforms":[{"name":"ColorModulator","type":"float","count":4,"values":[1.0,1.0,1.0,1.0]}]}"""
+            entries["assets/journeymap/shaders/core/sepia_$shaderIndex.fsh"] =
+                if (shaderIndex < 3 || thirdFragmentDeclaresColor) {
+                    "#version 150\nuniform vec4 ColorModulator;\nvoid main() {}\n"
+                } else {
+                    "#version 150\nvoid main() {}\n"
+                }
+        }
+        return entries
+    }
+    @Test
+    fun `benchmark client world harness is staged in per-mod package`(@TempDir tempDir: Path) {
+        tempDir.resolve("gradle.properties").writeText("mod_id=resmod\n")
+        tempDir.resolve("build.gradle").writeText(
+            """
+            neoForge {
+                runs {
+                    clientWorld {
+                        client()
+                    }
+                }
+            }
+            """.trimIndent()
+        )
+
+        val issues = stageClientWorldHarness(tempDir)
+        val harness = tempDir.resolve("src/main/java/com/modporter/generated/resmod/benchmark/ModPorterClientWorldHarness.java")
+
+        assertTrue(issues.isEmpty(), "Expected client-world harness staging to succeed: $issues")
+        assertTrue(harness.exists())
+        assertTrue(!tempDir.resolve("src/main/java/com/modporter/benchmark/ModPorterClientWorldHarness.java").exists())
+        assertTrue(harness.readText().contains("package com.modporter.generated.resmod.benchmark;"))
+        assertTrue(harness.readText().contains("Creative tab browse complete"))
+        // only a mod with no registered items may finish without a tab of its own
+        assertTrue(harness.readText().contains(".anyMatch(key -> key.getNamespace().equals(modId));"))
+        assertTrue(harness.readText().contains("tabContainsNamespace(tab, modId)"))
+        assertTrue(harness.readText().contains("observeMenuItems(menu, browseRow);"))
+        assertTrue(harness.readText().contains("expectedItems = itemKeys(menu.items);"))
+        assertTrue(harness.readText().contains("stableMenuItems"))
+        assertTrue(
+            harness.readText().contains(
+                """System.setProperty("modporter.benchmark.clientBrowse.completed", "true");"""
+            )
+        )
+        assertTrue(!harness.readText().contains("expectedItems = itemKeys(tab.getDisplayItems());"))
+        assertTrue(tempDir.resolve("build.gradle").readText().contains("systemProperty 'modporter.benchmark.clientWorld'"))
+        assertTrue(tempDir.resolve("build.gradle").readText().contains("systemProperty 'modporter.benchmark.modId', 'resmod'"))
+        assertTrue(
+            tempDir.resolve("build.gradle").readText().contains(
+                "systemProperty 'modporter.benchmark.clientBrowse.completed', 'false'"
+            )
+        )
+    }
+
+    @Test
+    fun `station client world validation stages three harnesses and coordinator properties`(
+        @TempDir tempDir: Path
+    ) {
+        tempDir.resolve("gradle.properties").writeText("mod_id=resmod\n")
+        tempDir.resolve("build.gradle").writeText(
+            """
+            neoForge {
+                runs {
+                    clientWorld {
+                        client()
+                    }
+                }
+            }
+            """.trimIndent()
+        )
+        val packageEntity = tempDir.resolve(
+            "src/main/java/com/simibubi/create/content/logistics/box/PackageEntity.java"
+        )
+        val change = Change(
+            file = packageEntity,
+            line = 1,
+            description = "fixture",
+            before = "before",
+            after = "after",
+            confidence = Confidence.HIGH,
+            ruleId = StrictSpawnValidationContract.RULE_ID
+        )
+        val profile = StrictSpawnSourceProfile(
+            repositoryRoot = tempDir,
+            inputProjectDir = tempDir.resolve("input"),
+            convertedBuildRoot = tempDir,
+            convertedModDir = tempDir,
+            inputPackageEntity = tempDir.resolve("input/PackageEntity.java"),
+            generatedPackageEntity = packageEntity,
+            accessTransformer = tempDir.resolve("src/main/resources/META-INF/accesstransformer.cfg"),
+            buildFiles = listOf(tempDir.resolve("build.gradle")),
+            gradleProperties = tempDir.resolve("gradle.properties"),
+            ruleSource = tempDir.resolve("LegacyClientSpawnFactories.kt"),
+            ruleTests = tempDir.resolve("LegacyClientSpawnFactoriesTest.kt"),
+            sourceLabel = "fixture",
+            change = change,
+            productBindings = emptyMap()
+        )
+        val request = StrictReviewRuntimeRequest(
+            profileId = StrictSpawnValidationContract.PROFILE_ID,
+            validationSessionId = "11111111-1111-1111-1111-111111111111",
+            manifestPath = tempDir.resolve("strict-manifest.json"),
+            receiptPath = tempDir.resolve(StrictSpawnValidationContract.RECEIPT_FILE_NAME),
+            stationReceiptPath = tempDir.resolve(
+                StrictSpawnValidationContract.STATION_RECEIPT_FILE_NAME
+            ),
+            coordinatorReceiptPath = tempDir.resolve(
+                StrictSpawnValidationContract.COORDINATOR_RECEIPT_FILE_NAME
+            ),
+            wrapperReceiptPath = tempDir.resolve("wrapper-receipt.json"),
+            evidenceDir = tempDir.resolve("evidence"),
+            runtimeDirectory = tempDir.resolve("run"),
+            profile = profile,
+            productBindings = emptyMap(),
+            stationMapRequired = true
+        )
+
+        val issues = stageClientWorldHarness(tempDir, request)
+        val sourceDir = tempDir.resolve(
+            "src/main/java/com/modporter/generated/resmod/benchmark"
+        )
+        val build = tempDir.resolve("build.gradle").readText()
+
+        assertTrue(issues.isEmpty(), "Expected station harness staging to succeed: $issues")
+        assertTrue(sourceDir.resolve(StrictSpawnValidationContract.GENERIC_HARNESS_FILE).exists())
+        assertTrue(sourceDir.resolve(StrictSpawnValidationContract.GENERATED_HARNESS_FILE).exists())
+        assertTrue(sourceDir.resolve(StrictSpawnValidationContract.STATION_HARNESS_FILE).exists())
+        assertTrue(
+            sourceDir.resolve(StrictSpawnValidationContract.GENERIC_HARNESS_FILE)
+                .readText()
+                .contains("Waiting for client-world coordinator before client exit")
+        )
+        for (property in listOf(
+            "modporter.strictStation.enabled",
+            "modporter.strictStation.profileId",
+            "modporter.strictStation.sessionId",
+            "modporter.strictStation.expectedBindings",
+            "modporter.strictStation.receipt",
+            "modporter.strictStation.evidenceDir",
+            "modporter.clientWorldValidation.enabled",
+            "modporter.clientWorldValidation.completed",
+            "modporter.clientWorldValidation.receipt"
+        )) {
+            assertTrue(build.contains("systemProperty '$property'"), "Missing $property in:\n$build")
+        }
+        val replacement = request.copy(
+            validationSessionId = "second-validation-session",
+            manifestPath = tempDir.resolve("second-manifest.json"),
+            receiptPath = tempDir.resolve("second-spawn.json"),
+            stationReceiptPath = tempDir.resolve("second-station.json"),
+            coordinatorReceiptPath = tempDir.resolve("second-coordinator.json")
+        )
+        assertTrue(stageClientWorldHarness(tempDir, replacement).isEmpty())
+        val restaged = tempDir.resolve("build.gradle").readText()
+        assertTrue(restaged.contains("second-validation-session"), restaged)
+        assertTrue(!restaged.contains(request.validationSessionId), restaged)
+        assertTrue(!restaged.contains(request.manifestPath.fileName.toString()), restaged)
+        assertEquals(1, Regex("systemProperty 'modporter.strictSpawn.sessionId'").findAll(restaged).count())
+        assertTrue(stageClientWorldHarness(tempDir, replacement).isEmpty())
+        assertEquals(restaged, tempDir.resolve("build.gradle").readText(), "restaging must preserve exact bytes")
+    }
+
+    @Test
+    fun `benchmark client world harness reaches a kotlin dsl module build`(@TempDir tempDir: Path) {
+        tempDir.resolve("gradle.properties").writeText("mod_id=resmod\n")
+        tempDir.resolve("build.gradle.kts").writeText(
+            """
+            neoForge {
+                runs {
+                    register("clientWorld") {
+                        client()
+                        programArguments.addAll("--quickPlayPath", "quickplay/modporter_smoke_world.json")
+                    }
+                }
+            }
+            """.trimIndent()
+        )
+
+        val issues = stageClientWorldHarness(tempDir)
+        val build = tempDir.resolve("build.gradle.kts").readText()
+
+        assertTrue(issues.isEmpty(), "Expected client-world harness staging to succeed: $issues")
+        assertTrue(build.contains("systemProperty(\"modporter.benchmark.clientWorld\", \"$CLIENT_SMOKE_WORLD\")"), build)
+        assertTrue(build.contains("systemProperty(\"modporter.benchmark.modId\", \"resmod\")"), build)
+        assertTrue(
+            build.contains(
+                "systemProperty(\"modporter.benchmark.clientBrowse.completed\", \"false\")"
+            ),
+            build
+        )
+    }
+
+    @Test
+    fun `benchmark dependency artifact publish rejects staged runtime harnesses`(@TempDir tempDir: Path) {
+        val harness = tempDir.resolve(
+            "src/main/java/com/modporter/generated/resmod/benchmark/ModPorterClientWorldHarness.java"
+        )
+        harness.parent.createDirectories()
+        harness.writeText("package com.modporter.generated.resmod.benchmark;\n")
+
+        val result = publishBenchmarkArtifacts(
+            BenchmarkCase(
+                id = "resmod",
+                displayName = "Resource Mod",
+                provider = "local",
+                location = ".",
+                ref = "-",
+                subdir = ".",
+                required = true
+            ),
+            outputDir = tempDir,
+            artifactRoot = tempDir.resolve("artifacts"),
+            reportsDir = tempDir.resolve("reports"),
+            timeoutSeconds = 1L
+        )
+
+        assertTrue(result.status == CheckStatus.FAIL, "Expected harness source to block artifact publish")
+        assertTrue(result.note.contains("runtime harness source"), result.note)
+    }
+
+    @Test
+    fun `git source preparation records resolved commit evidence`(@TempDir tempDir: Path) {
+        val origin = tempDir.resolve("origin")
+        git(tempDir, "init", origin.toString())
+        git(origin, "config", "user.email", "modporter@example.test")
+        git(origin, "config", "user.name", "ModPorter Test")
+        origin.resolve("build.gradle").writeText("plugins {}\n")
+        git(origin, "add", ".")
+        git(origin, "commit", "-m", "initial")
+        git(origin, "branch", "-M", "main")
+        val commit = git(origin, "rev-parse", "HEAD")
+
+        val reportsDir = tempDir.resolve("reports")
+        val prepared = prepareGitSource(
+            BenchmarkCase(
+                id = "example",
+                displayName = "Example",
+                provider = "git",
+                location = origin.toString(),
+                ref = "main",
+                subdir = ".",
+                required = true
+            ),
+            url = origin.toString(),
+            ref = "main",
+            sourceRoot = tempDir.resolve("sources"),
+            reportsDir = reportsDir,
+            timeoutSeconds = 30
+        )
+
+        assertTrue(prepared.path?.exists() == true, "Expected cloned source path: $prepared")
+        assertTrue(prepared.sourceLabel.endsWith("@$commit"), prepared.sourceLabel)
+        assertTrue(
+            reportsDir.resolve("example-fetch.log").readText().contains("resolvedCommit=$commit"),
+            "fetch log should retain resolved git commit"
+        )
+    }
+
+    @Test
+    fun `git helper drains large output and retains nonzero exit evidence`(@TempDir tempDir: Path) {
+        git(tempDir, "init")
+        val bulkDir = tempDir.resolve("bulk")
+        bulkDir.createDirectories()
+        repeat(4_000) { index ->
+            bulkDir.resolve("file-${index.toString().padStart(4, '0')}.txt").writeText("untracked\n")
+        }
+
+        val lastLine = git(tempDir, "status", "--short", "--untracked-files=all")
+        assertTrue(lastLine.endsWith("bulk/file-3999.txt"), "Expected complete large-output drain, got: $lastLine")
+
+        val failure = runCatching {
+            git(tempDir, "rev-parse", "--verify", "refs/heads/does-not-exist")
+        }.exceptionOrNull()
+        assertTrue(failure != null, "Expected nonzero git command to fail")
+        val message = failure.message.orEmpty()
+        assertTrue(message.contains("finished=true"), message)
+        assertTrue(Regex("""exitCode=(?!0\b)\d+""").containsMatchIn(message), message)
+        assertTrue(message.contains("output="), message)
+    }
+
+    @Test
+    fun `git source preparation checks out an exact commit ref`(@TempDir tempDir: Path) {
+        val origin = tempDir.resolve("origin")
+        git(tempDir, "init", origin.toString())
+        git(origin, "config", "user.email", "modporter@example.test")
+        git(origin, "config", "user.name", "ModPorter Test")
+        origin.resolve("version.txt").writeText("first\n")
+        git(origin, "add", ".")
+        git(origin, "commit", "-m", "first")
+        val firstCommit = git(origin, "rev-parse", "HEAD")
+        origin.resolve("version.txt").writeText("second\n")
+        git(origin, "add", ".")
+        git(origin, "commit", "-m", "second")
+
+        val reportsDir = tempDir.resolve("reports")
+        val prepared = prepareGitSource(
+            BenchmarkCase(
+                id = "exact",
+                displayName = "Exact Commit",
+                provider = "git",
+                location = origin.toString(),
+                ref = firstCommit,
+                subdir = ".",
+                required = true
+            ),
+            url = origin.toString(),
+            ref = firstCommit,
+            sourceRoot = tempDir.resolve("sources"),
+            reportsDir = reportsDir,
+            timeoutSeconds = 30
+        )
+
+        assertTrue(prepared.path?.resolve("version.txt")?.readText()?.trim() == "first", prepared.toString())
+        assertTrue(prepared.sourceLabel.endsWith("@$firstCommit"), prepared.sourceLabel)
+        assertTrue(
+            reportsDir.resolve("exact-fetch.log").readText().contains("resolvedCommit=$firstCommit"),
+            "fetch log should retain the exact checked-out commit"
+        )
+    }
+
+    @Test
+    fun `client smoke world staging disables early display for deterministic runtime gate`(@TempDir tempDir: Path) {
+        val fixtureWorld = tempDir.resolve("fixture-world")
+        fixtureWorld.resolve("region").createDirectories()
+        fixtureWorld.resolve("level.dat").writeText("fixture")
+
+        val projectDir = tempDir.resolve("project")
+        projectDir.createDirectories()
+
+        val issues = stageClientSmokeWorld(projectDir, fixtureWorld)
+
+        assertTrue(issues.isEmpty(), "Expected smoke world staging to succeed: $issues")
+        assertTrue(projectDir.resolve("run/saves/$CLIENT_SMOKE_WORLD/level.dat").exists())
+        assertTrue(projectDir.resolve("run/options.txt").readText().contains("onboardAccessibility:false"))
+        val fmlConfig = projectDir.resolve("run/config/fml.toml").readText()
+        assertTrue(fmlConfig.contains("earlyWindowControl = false"))
+        assertTrue(fmlConfig.contains("versionCheck = false"))
+        assertTrue(fmlConfig.contains("[dependencyOverrides]"))
+    }
+
+    @Test
+    fun `client runtime staging disables early display before title screen gate`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("project")
+        projectDir.createDirectories()
+
+        stageClientRuntime(projectDir)
+
+        assertTrue(projectDir.resolve("run/options.txt").readText().contains("pauseOnLostFocus:false"))
+        val fmlConfig = projectDir.resolve("run/config/fml.toml").readText()
+        assertTrue(fmlConfig.contains("earlyWindowControl = false"))
+        assertTrue(fmlConfig.contains("earlyWindowProvider = \"fmlearlywindow\""))
+        assertTrue(fmlConfig.contains("versionCheck = false"))
+    }
+
+    @Test
+    fun `converted project validation rejects main source excludes`(@TempDir tempDir: Path) {
+        tempDir.resolve("src/main/resources/META-INF").createDirectories()
+        tempDir.resolve("src/main/resources/META-INF/neoforge.mods.toml").writeText("modLoader=\"javafml\"\n")
+        tempDir.resolve("build.gradle").writeText(
+            """
+            plugins {
+                id 'net.neoforged.moddev'
+            }
+
+            sourceSets.main.java {
+                exclude 'com/example/Broken.java'
+            }
+            """.trimIndent()
+        )
+
+        val issues = validateConvertedProject(tempDir, PipelineResult(emptyList(), dryRun = false))
+
+        assertTrue(
+            issues.any { it.contains("Build file excludes main Java sources") },
+            "Expected main source excludes to fail converted-project validation; got: $issues"
+        )
+    }
+
+    @Test
+    fun `strict converted project validation rejects skipped structural parsing`(@TempDir tempDir: Path) {
+        tempDir.resolve("src/main/resources/META-INF").createDirectories()
+        tempDir.resolve("src/main/resources/META-INF/neoforge.mods.toml").writeText("modLoader=\"javafml\"\n")
+        tempDir.resolve("build.gradle").writeText(
+            """
+            plugins {
+                id 'net.neoforged.moddev'
+            }
+            """.trimIndent()
+        )
+
+        val result = PipelineResult(
+            passResults = listOf(
+                com.modporter.core.pipeline.PassResult(
+                    passName = "Structural Refactor",
+                    changes = emptyList(),
+                    skipped = listOf("Could not parse src/main/java/com/example/Broken.java")
+                )
+            ),
+            dryRun = false
+        )
+        val issues = validateConvertedProject(tempDir, result, strictBenchmarkOptions())
+
+        assertTrue(
+            issues.any { it.contains("Strict source-shape gate failed") },
+            "Expected strict source-shape skipped parsing to fail converted-project validation; got: $issues"
+        )
+    }
+
+    @Test
+    fun `benchmark telemetry records pass metrics and review signals`() {
+        val outcome = BenchmarkOutcome(
+            case = BenchmarkCase(
+                id = "example",
+                displayName = "Example Mod",
+                provider = "git",
+                location = "https://example.invalid/mod.git",
+                ref = "1.20.1",
+                subdir = ".",
+                required = true
+            ),
+            source = "git:https://example.invalid/mod.git#1.20.1@0123456789abcdef0123456789abcdef01234567",
+            outputDir = "build/real-mod-benchmark/tmp/work/example",
+            status = Status.PASS,
+            note = "OK; allowedRuntimeIssues=line 7: source-inherited missing sound definition warning (source declares it)",
+            pipelineResult = PipelineResult(
+                passResults = listOf(
+                    com.modporter.core.pipeline.PassResult(
+                        passName = "Text Replacement",
+                        changes = listOf(
+                            com.modporter.core.pipeline.Change(
+                                file = Path.of("src/main/java/example/Example.java"),
+                                line = 12,
+                                description = "Rename API",
+                                before = "oldCall()",
+                                after = "newCall()",
+                                confidence = Confidence.HIGH,
+                                ruleId = "text-example"
+                            )
+                        )
+                    ),
+                    com.modporter.core.pipeline.PassResult(
+                        passName = "Structural Refactor",
+                        changes = emptyList(),
+                        skipped = listOf("Could not parse generated source")
+                    )
+                ),
+                dryRun = false,
+                pipelineName = "Forge 1.20.1 to NeoForge 1.21.1"
+            ),
+            compile = CheckResult(CheckStatus.PASS, "Passed"),
+            runServer = CheckResult(CheckStatus.PASS, "Passed"),
+            runGameTestServer = CheckResult.notRun("not requested"),
+            runClient = CheckResult.notRun("not requested"),
+            runClientWorld = CheckResult.notRun("not requested")
+        )
+
+        val options = strictBenchmarkOptions().copy(runId = "strict87-20261101")
+        val report = renderReport(listOf(outcome), options)
+        val telemetry = renderTelemetry(listOf(outcome), options)
+
+        assertTrue(report.contains("| runId | strict87-20261101 |"), report)
+        assertTrue(report.contains("| outputRoot | `build/real-mod-benchmark/runs/strict87-20261101` |"), report)
+        assertTrue(telemetry.contains("\"runId\": \"strict87-20261101\""), telemetry)
+        assertTrue(telemetry.contains("\"outputRoot\": \"build/real-mod-benchmark/runs/strict87-20261101\""), telemetry)
+        assertTrue(telemetry.contains("\"id\": \"example\""), telemetry)
+        assertTrue(telemetry.contains("\"passName\": \"Text Replacement\""), telemetry)
+        assertTrue(telemetry.contains("\"changes\": 1"), telemetry)
+        assertTrue(telemetry.contains("\"skipped\": 1"), telemetry)
+        assertTrue(telemetry.contains("\"reviewSignalCount\": 1"), telemetry)
+        assertTrue(telemetry.contains("\"source-inherited\""), telemetry)
+    }
+
+    @Test
+    fun `readme benchmark snapshot records full resolved git commit hashes`() {
+        val outcome = BenchmarkOutcome(
+            case = BenchmarkCase(
+                id = "example",
+                displayName = "Example Mod",
+                provider = "git",
+                location = "https://github.com/example/example-mod.git",
+                ref = "1.20.1",
+                subdir = ".",
+                required = true,
+                dependencies = listOf("base")
+            ),
+            source = "git:https://github.com/example/example-mod.git#1.20.1@0123456789abcdef0123456789abcdef01234567",
+            outputDir = null,
+            status = Status.PASS,
+            note = "OK"
+        )
+
+        val snapshot = renderReadmeBenchmarkSnapshot(listOf(outcome))
+
+        assertTrue(snapshot.contains("Resolved Git commit"), snapshot)
+        assertTrue(snapshot.contains("`example/example-mod`, `1.20.1` with `base` dependency"), snapshot)
+        assertTrue(snapshot.contains("`0123456789abcdef0123456789abcdef01234567`"), snapshot)
+    }
+
+    @Test
+    fun `complete strict benchmark success updates marked readme snapshot`(@TempDir tempDir: Path) {
+        val benchmarkCase = BenchmarkCase(
+            id = "example",
+            displayName = "Example Mod",
+            provider = "git",
+            location = "https://github.com/example/example-mod.git",
+            ref = "1.20.1",
+            subdir = ".",
+            required = true
+        )
+        val outcome = BenchmarkOutcome(
+            case = benchmarkCase,
+            source = "git:https://github.com/example/example-mod.git#1.20.1@0123456789abcdef0123456789abcdef01234567",
+            outputDir = null,
+            status = Status.PASS,
+            note = "OK"
+        )
+        tempDir.resolve("README.md").writeText("""
+            # Example
+
+            $readmeSnapshotStart
+            old snapshot
+            $readmeSnapshotEnd
+        """.trimIndent())
+
+        val updated = updateReadmeBenchmarkSnapshot(
+            repoRoot = tempDir,
+            allCases = listOf(benchmarkCase),
+            outcomes = listOf(outcome),
+            options = strictBenchmarkOptions().copy(updateReadme = true, caseIds = listOf("example"))
+        )
+        val readme = tempDir.resolve("README.md").readText()
+
+        assertTrue(updated)
+        assertTrue(readme.contains("Resolved Git commit"), readme)
+        assertTrue(readme.contains("`0123456789abcdef0123456789abcdef01234567`"), readme)
+        assertTrue(!readme.contains("old snapshot"), readme)
+    }
+
+    @Test
+    fun `converted project validation rejects invalid recipe holder var generic`(@TempDir tempDir: Path) {
+        tempDir.resolve("src/main/resources/META-INF").createDirectories()
+        tempDir.resolve("src/main/resources/META-INF/neoforge.mods.toml").writeText("modLoader=\"javafml\"\n")
+        tempDir.resolve("build.gradle").writeText(
+            """
+            plugins {
+                id 'net.neoforged.moddev'
+            }
+            """.trimIndent()
+        )
+        val sourceFile = tempDir.resolve("src/main/java/com/example/Ported.java")
+        sourceFile.parent.createDirectories()
+        sourceFile.writeText(
+            """
+            package com.example;
+
+            import net.minecraft.world.item.crafting.RecipeHolder;
+
+            public class Ported {
+                void recipes(Iterable<?> recipes) {
+                    for (RecipeHolder<var> recipeHolder : recipes) {
+                    }
+                }
+            }
+            """.trimIndent()
+        )
+
+        val issues = validateConvertedProject(tempDir, PipelineResult(emptyList(), dryRun = false))
+
+        assertTrue(
+            issues.any { it.contains("Converted source contains invalid migration artifacts") },
+            "Expected invalid RecipeHolder<var> to fail converted-project validation; got: $issues"
+        )
+    }
+
+    @Test
+    fun `converted project validation allows a project class sharing a forge class name`(@TempDir tempDir: Path) {
+        tempDir.resolve("src/main/resources/META-INF").createDirectories()
+        tempDir.resolve("src/main/resources/META-INF/neoforge.mods.toml").writeText("modLoader=\"javafml\"\n")
+        tempDir.resolve("build.gradle").writeText("plugins {\n    id 'net.neoforged.moddev'\n}\n")
+        val sourceDir = tempDir.resolve("src/main/java/com/example")
+        sourceDir.createDirectories()
+        sourceDir.resolve("ForgeRegistries.java").writeText(
+            """
+            package com.example;
+
+            class ForgeRegistries {
+                static final ForgeRegistries INSTANCE = new ForgeRegistries();
+            }
+            """.trimIndent()
+        )
+        sourceDir.resolve("Platform.java").writeText(
+            """
+            package com.example;
+
+            public class Platform {
+                Object registries() {
+                    return ForgeRegistries.INSTANCE;
+                }
+            }
+            """.trimIndent()
+        )
+
+        val issues = validateConvertedProject(tempDir, PipelineResult(emptyList(), dryRun = false))
+
+        assertTrue(issues.none { it.contains("Active Forge source references") }, "got: $issues")
+    }
+
+    @Test
+    fun `converted project validation rejects public top level type filename mismatch`(@TempDir tempDir: Path) {
+        tempDir.resolve("src/main/resources/META-INF").createDirectories()
+        tempDir.resolve("src/main/resources/META-INF/neoforge.mods.toml").writeText("modLoader=\"javafml\"\n")
+        tempDir.resolve("build.gradle").writeText(
+            """
+            plugins {
+                id 'net.neoforged.moddev'
+            }
+            """.trimIndent()
+        )
+        val sourceFile = tempDir.resolve("src/main/java/com/example/AetherBlockPathTypes.java")
+        sourceFile.parent.createDirectories()
+        sourceFile.writeText(
+            """
+            package com.example;
+
+            public class AetherPathType {
+            }
+            """.trimIndent()
+        )
+
+        val issues = validateConvertedProject(tempDir, PipelineResult(emptyList(), dryRun = false))
+
+        assertTrue(
+            issues.any { it.contains("Converted source contains invalid migration artifacts") && it.contains("public type AetherPathType") },
+            "Expected public type/file mismatch to fail converted-project validation; got: $issues"
+        )
+    }
+
+    @Test
+    fun `converted project validation rejects build migration placeholders`(@TempDir tempDir: Path) {
+        tempDir.resolve("src/main/resources/META-INF").createDirectories()
+        tempDir.resolve("src/main/resources/META-INF/neoforge.mods.toml").writeText("modLoader=\"javafml\"\n")
+        tempDir.resolve("build.gradle").writeText(
+            """
+            plugins {
+                id 'net.neoforged.moddev'
+            }
+
+            dependencies {
+                // TODO: Update for NeoForge 1.21.1 - implementation "curse.maven:jade-324717:4631193"
+            }
+            """.trimIndent()
+        )
+
+        val issues = validateConvertedProject(tempDir, PipelineResult(emptyList(), dryRun = false))
+
+        assertTrue(
+            issues.any { it.contains("Build files contain migration placeholders") },
+            "Expected build migration placeholders to fail converted-project validation; got: $issues"
+        )
+    }
+
+    @Test
+    fun `converted project validation rejects commented out source logic`(@TempDir tempDir: Path) {
+        tempDir.resolve("src/main/resources/META-INF").createDirectories()
+        tempDir.resolve("src/main/resources/META-INF/neoforge.mods.toml").writeText("modLoader=\"javafml\"\n")
+        tempDir.resolve("build.gradle").writeText(
+            """
+            plugins {
+                id 'net.neoforged.moddev'
+            }
+            """.trimIndent()
+        )
+        val sourceFile = tempDir.resolve("src/main/java/com/example/Ported.java")
+        sourceFile.parent.createDirectories()
+        sourceFile.writeText(
+            """
+            package com.example;
+
+            public class Ported {
+                void tick() {
+                    // [forge2neo] if (Compat.isLoaded()) { // excluded: compat unavailable
+                    runCoreLogic();
+                }
+
+                void runCoreLogic() {}
+            }
+            """.trimIndent()
+        )
+
+        val issues = validateConvertedProject(tempDir, PipelineResult(emptyList(), dryRun = false))
+
+        assertTrue(
+            issues.any { it.contains("Converted source contains bypassed or commented-out logic") },
+            "Expected commented-out source logic to fail converted-project validation; got: $issues"
+        )
+    }
+
+    @Test
+    fun `converted project validation rejects block commented event handlers`(@TempDir tempDir: Path) {
+        tempDir.resolve("src/main/resources/META-INF").createDirectories()
+        tempDir.resolve("src/main/resources/META-INF/neoforge.mods.toml").writeText("modLoader=\"javafml\"\n")
+        tempDir.resolve("build.gradle").writeText(
+            """
+            plugins {
+                id 'net.neoforged.moddev'
+            }
+            """.trimIndent()
+        )
+        val sourceFile = tempDir.resolve("src/main/java/com/example/Ported.java")
+        sourceFile.parent.createDirectories()
+        sourceFile.writeText(
+            """
+            package com.example;
+
+            public class Ported {
+                /*
+                @SubscribeEvent
+                public void onBrewingRecipeRegister(RegisterBrewingRecipesEvent event) {
+                    event.getBuilder().addRecipe(recipe);
+                }
+                */
+
+                void runCoreLogic() {}
+            }
+            """.trimIndent()
+        )
+
+        val issues = validateConvertedProject(tempDir, PipelineResult(emptyList(), dryRun = false))
+
+        assertTrue(
+            issues.any { it.contains("Converted source contains bypassed or commented-out logic") },
+            "Expected block-commented source logic to fail converted-project validation; got: $issues"
+        )
+    }
+
+    /** Reuses an owned converted product for fast native debugging; emits no benchmark acceptance. */
+    @Test
+    @EnabledIfEnvironmentVariable(named = "MODPORTER_CREATE_CLIENT_DIAGNOSTIC", matches = "true")
+    fun `prepared Create client scenarios diagnostic`() {
+        val root = Path.of("").toAbsolutePath().normalize()
+        val output = Path.of(checkNotNull(System.getenv("MODPORTER_CREATE_DIAGNOSTIC_OUTPUT")))
+            .toAbsolutePath().normalize()
+        require(output.startsWith(root.resolve("build/real-mod-benchmark/runs")))
+        require(output.fileName.toString() == "create" && output.parent.fileName.toString() == "work" &&
+            output.parent.parent.fileName.toString() == "tmp")
+        val originalRun = output.parent.parent.parent
+        val id = checkNotNull(System.getenv("MODPORTER_CREATE_DIAGNOSTIC_ID"))
+        require(Regex("[a-z0-9][a-z0-9_-]{0,63}").matches(id))
+        val reports = root.resolve("build/real-mod-benchmark/diagnostics").createDirectories().resolve(id)
+        Files.createDirectory(reports)
+        val oldManifestPath = Files.list(originalRun.resolve("reports")).use { paths ->
+            paths.filter { it.fileName.toString().matches(Regex("strict-spawn-.*-manifest\\.json")) }
+                .toList().single()
+        }
+        val oldManifest = Json.parseToJsonElement(oldManifestPath.readText()).jsonObject
+        require(oldManifest["stationMapRequired"]?.jsonPrimitive?.content == "true")
+        val packageFile = output.resolve("src/main/java/com/simibubi/create/content/logistics/box/PackageEntity.java")
+        val prototype = Change(packageFile, 0,
+            "Preserve raw-join and deferred-lerp phases on the native spawn lifecycle",
+            "setCustomClientFactory(PackageEntity::spawn)",
+            "registered EntityFactory + recreateFromPacket + real readSpawnData prefix",
+            Confidence.MEDIUM, StrictSpawnValidationContract.RULE_ID)
+        val recordedChangeHash = oldManifest.getValue("bindings").jsonObject.getValue("rule.change.sha256")
+            .jsonPrimitive.content
+        fun changeHash(change: Change): String = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(listOf(change.ruleId, change.file.toString(), change.line.toString(), change.description,
+                change.before, change.after, change.confidence.name).joinToString("\u0000").toByteArray())
+            .joinToString("") { "%02x".format(it) }
+        // Recover the exact admitted conversion record rather than inventing a new MEDIUM signal.
+        val replay = (1..5000).map { prototype.copy(line = it) }
+            .singleOrNull { changeHash(it) == recordedChangeHash }
+            ?: error("The admitted source change cannot be replayed from its recorded hash")
+
+        // Only this diagnostic path republishes owned support templates into the prior test output.
+        val support = com.modporter.core.transforms.structural.LegacyRecipeIds::class.java.getDeclaredMethod(
+            "emitCompatSources", Path::class.java, String::class.java, String::class.java,
+            Boolean::class.javaPrimitiveType
+        ).apply { isAccessible = true }
+        support.invoke(com.modporter.core.transforms.structural.LegacyRecipeIds,
+            output.resolve("src/main/java"), "com.modporter.generated.create.compat", "create", false)
+        val source = Path.of(checkNotNull(System.getenv("MODPORTER_BENCHMARK_SOURCE_CREATE")))
+        val station = Change(output.resolve("src/main/java/com/simibubi/create/foundation/map/StationMapDecorationRenderer.java"),
+            1, "Replay the admitted native station-map requirement", "admitted station-map family",
+            "validate the same native station-map family", Confidence.HIGH, StrictSpawnValidationContract.STATION_RULE_ID)
+        val admission = StrictReviewValidationRegistry.admit(root, source, output, output,
+            PipelineResult(listOf(com.modporter.core.pipeline.PassResult("diagnostic replay", listOf(replay, station))), false),
+            "env:MODPORTER_BENCHMARK_SOURCE_CREATE", enforceHandsOff = true)
+        assertTrue(admission.fatalIssues.isEmpty(), admission.fatalIssues.joinToString("; "))
+        val prepared = StrictReviewValidationRegistry.createRuntimeRequest(admission, reports)
+        assertTrue(prepared.issues.isEmpty(), prepared.issues.joinToString("; "))
+        val request = checkNotNull(prepared.request)
+        assertTrue(stageClientWorldHarness(output, request).isEmpty())
+        val compiled = runGradleTask(output, reports, "create", "compileJava", 540)
+        assertTrue(compiled.status == CheckStatus.PASS, compiled.note)
+        val sealed = StrictReviewValidationRegistry.sealRuntimeManifest(request)
+        assertTrue(sealed.issues.isEmpty(), sealed.issues.joinToString("; "))
+        val active = checkNotNull(sealed.request)
+        val pristineWorld = originalRun.resolve("tmp/client-smoke-world/server/$CLIENT_SMOKE_WORLD")
+        assertTrue(stageClientSmokeWorld(output, pristineWorld).isEmpty())
+        reports.resolve("DIAGNOSTIC-ONLY.txt").writeText(
+            "Native client diagnostic only. No fresh conversion, datagen or all11 acceptance.\n" +
+                "Admitted change sha256=$recordedChangeHash; original run=$originalRun\n")
+        val runtime = runRuntimeGradleTask(output, reports, "create", "runClientWorld", 540,
+            RuntimeLogPolicy.clientWorld(true, 75, true, true), source, active)
+        val nativeLog = reports.resolve("create-runClientWorld.log").readText()
+        val preparationLine = nativeLog.indexOf("Runtime evidence prepared before world startup")
+        val worldStartLine = nativeLog.indexOf("Starting integrated minecraft server")
+        assertTrue(preparationLine >= 0 && worldStartLine > preparationLine,
+            "Immutable evidence must be prepared before the integrated world starts")
+        val stationPreparationLine = nativeLog.indexOf("Runtime fingerprint prepared before world startup")
+        assertTrue(stationPreparationLine >= 0 && worldStartLine > stationPreparationLine,
+            "Station immutable fingerprint must be prepared before the integrated world starts")
+        val verified = StrictReviewValidationRegistry.verifyFinal(admission, active,
+            runtime.status == CheckStatus.PASS, runtime.note, reports.resolve("create-runClientWorld.log"))
+        assertTrue(runtime.status == CheckStatus.PASS, runtime.note)
+        assertTrue(verified.state == "VALIDATED", verified.issues.joinToString("; "))
+        println("Prepared Create client diagnostic passed; fresh strict acceptance remains required: $reports")
+    }

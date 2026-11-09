@@ -1,0 +1,31 @@
+public static final com.mojang.serialization.MapCodec<@OWNER@> @STEM@Codec = new com.mojang.serialization.MapCodec<>() {
+    @Override
+    public <T> com.mojang.serialization.DataResult<@OWNER@> decode(com.mojang.serialization.DynamicOps<T> ops, com.mojang.serialization.MapLike<T> input) {
+        try {
+            com.google.gson.JsonObject json = new com.google.gson.JsonObject();
+            input.entries().forEach(pair -> json.add(ops.getStringValue(pair.getFirst()).getOrThrow(), ops.convertTo(com.mojang.serialization.JsonOps.INSTANCE, pair.getSecond())));
+            return com.mojang.serialization.DataResult.success(@SERIALIZER@.parse(json));
+        } catch (RuntimeException failure) {
+            return com.mojang.serialization.DataResult.error(failure::toString);
+        }
+    }
+    @Override
+    public <T> com.mojang.serialization.RecordBuilder<T> encode(@OWNER@ ingredient, com.mojang.serialization.DynamicOps<T> ops, com.mojang.serialization.RecordBuilder<T> output) {
+        com.google.gson.JsonObject json = ingredient.toJson().getAsJsonObject();
+        json.remove("type");
+        for (java.util.Map.Entry<String, com.google.gson.JsonElement> entry : json.entrySet()) {
+            output.add(entry.getKey(), com.mojang.serialization.JsonOps.INSTANCE.convertTo(ops, entry.getValue()));
+        }
+        return output;
+    }
+    @Override
+    public <T> java.util.stream.Stream<T> keys(com.mojang.serialization.DynamicOps<T> ops) {
+        return java.util.stream.Stream.<String>of(@KEYS@).map(ops::createString);
+    }
+};
+public static final net.minecraft.network.codec.StreamCodec<net.minecraft.network.RegistryFriendlyByteBuf, @OWNER@> @STEM@StreamCodec = new net.minecraft.network.codec.StreamCodec<>() {
+    @Override public @OWNER@ decode(net.minecraft.network.RegistryFriendlyByteBuf buffer) { return @SERIALIZER@.parse(buffer); }
+    @Override public void encode(net.minecraft.network.RegistryFriendlyByteBuf buffer, @OWNER@ value) { @SERIALIZER@.write(buffer, value); }
+};
+public static final net.neoforged.neoforge.common.crafting.IngredientType<@OWNER@> @STEM@Type =
+    new net.neoforged.neoforge.common.crafting.IngredientType<>(@STEM@Codec, @STEM@StreamCodec);

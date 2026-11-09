@@ -34,7 +34,24 @@ internal class GradleJavaVersionMigration {
                     rule.pattern.findAll(executable).map { match ->
                         Triple(match.range, match.value, rule.pattern.replace(match.value, rule.replacement))
                     }.toList()
-                }.sortedByDescending { it.first.first }
+                }.toMutableList()
+                val quotedCompatibility = Regex(
+                    """\b((?:source|target)Compatibility\s*=\s*)(["'])17\2"""
+                )
+                quotedCompatibility.findAll(original).forEach { match ->
+                    val executablePrefix = executable.substring(
+                        match.range.first,
+                        match.range.first + match.groupValues[1].length
+                    )
+                    if (executablePrefix.trimEnd() == match.groupValues[1].trimEnd()) {
+                        edits += Triple(
+                            match.range,
+                            match.value,
+                            match.groupValues[1] + match.groupValues[2] + "21" + match.groupValues[2]
+                        )
+                    }
+                }
+                edits.sortByDescending { it.first.first }
                 if (edits.isEmpty()) return@forEach
 
                 var migrated = original

@@ -1,0 +1,17 @@
+package @PACKAGE@;
+
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.block.state.BlockState;
+
+/**
+ * Shared SPI for a dependency plant with an old mayPlaceOn override that cannot be transformed.
+ */
+public interface LegacyPlantPlacementAdapter<T> {
+    boolean mayPlaceOn(
+        T plantable,
+        BlockState soil,
+        BlockGetter level,
+        BlockPos soilPosition
+    );
+}

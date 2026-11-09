@@ -1,0 +1,49 @@
+{
+  "schema": "modporter.legacy-plant-platform-review.v1",
+  "reviewedAt": "2026-11-10",
+  "scope": "NeoForge 21.1.230 dependency-only prepass; exact archive variant",
+  "baseline": {
+    "generatedSha256": "da2570515920276bb884d59868915e924bc80523e8771e145a11b12db41d5b2b",
+    "mergedSha256": "92552fdc76a29894e7e6af44d0a06a10ed0e2c0e7b25545287144b5906e4a16b",
+    "sourcesSha256": "830d5991464c1c43d6960c2aaae6b2e3e61f83021aa192ae3783d47317d806f4"
+  },
+  "admitted": {
+    "generatedSha256": "0d168b646b1f1dfe490afb05a9dc51db34df456c309ab2028e508ed99c7bbd77",
+    "mergedSha256": "1e7ce155d3193663d2f2e077358ecff835de4d758689c0bb1bb6525d43b2e34d",
+    "sourcesSha256": "e3189c01eaddc7abe6c6f71931dc62bc7b1b86ec08eafe9803335236e2ba3ede",
+    "accessTransformerSha256": "408a784139aa4920dc9f65cbfe8bdc35f81d4340c38599b7e646b382a6c64382"
+  },
+  "comparison": {
+    "addedEntries": 0,
+    "removedEntries": 0,
+    "generatedEntryCount": 10557,
+    "mergedEntryCount": 16873,
+    "sourcesEntryCount": 7104,
+    "changedClasses": [
+      "net/minecraft/client/gui/screens/Screen.class",
+      "net/minecraft/world/level/block/entity/BeaconBlockEntity.class"
+    ],
+    "changedSources": [
+      "net/minecraft/client/gui/screens/Screen.java",
+      "net/minecraft/world/level/block/entity/BeaconBlockEntity.java"
+    ],
+    "sourceDifferences": [
+      "Screen.PANORAMA is public rather than protected under the project access transformer.",
+      "BeaconBlockEntity.beamSections remains public; the decompiler moves public past its Javadoc."
+    ]
+  },
+  "unchangedPlantClasses": {
+    "net/minecraft/world/level/block/Block.class": "083bda462c9b9d8a23ea93edca56c137d95d3069824a6a8574c0958673d76741",
+    "net/minecraft/world/level/block/BushBlock.class": "6dd28d71e08c32eae23906c149afc583d600a0229cb8dc22012a8b0a19628990",
+    "net/minecraft/world/level/block/state/BlockState.class": "b7c92980767e378d848bbec0e7faea22d4834fca672e8b11829cb58e8676f9d3",
+    "net/neoforged/neoforge/common/extensions/IBlockExtension.class": "4018a3041dd156b81eb158af084bfea53353fb593ffcb51dc9b87ed0cd9d0615",
+    "net/neoforged/neoforge/common/extensions/IBlockStateExtension.class": "67e4a37c9f242dfdfa9c6d815c2e3232b80d29b6adddf438637eba84fc498806"
+  },
+  "unchangedPlantSources": {
+    "net/minecraft/world/level/block/Block.java": "90e336f7151e3719a1ae8c0694f0023104a2c599c5851aa2d871ffbd1a95ea8f",
+    "net/minecraft/world/level/block/BushBlock.java": "224ea54460f11fcf5d7fd4ad1e92269e94526b647c3eec413a17941e9befd42d",
+    "net/neoforged/neoforge/common/extensions/IBlockExtension.java": "2dea052b03b569b82ca728073ab4299282eb4bb9116637b9ee19ade36975e5a5",
+    "net/neoforged/neoforge/common/extensions/IBlockStateExtension.java": "0ca55c4ed6929e848270097a6c8932a5dd9626ef93b80e6c51ff5f3dd23548f1"
+  },
+  "admission": "Retain both exact archive triples and the reviewed identity, plugin, class, source, method and active-owner checks. This record does not admit other archive hashes."
+}

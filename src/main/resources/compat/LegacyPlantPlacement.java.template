@@ -1,0 +1,16 @@
+package @PACKAGE@;
+
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.block.state.BlockState;
+
+/**
+ * Exact Forge 1.20.1 mayPlaceOn dispatch surface for a transformed source override.
+ */
+public interface LegacyPlantPlacement {
+    boolean modporter$legacyMayPlaceOn(
+        BlockState soil,
+        BlockGetter level,
+        BlockPos soilPosition
+    );
+}

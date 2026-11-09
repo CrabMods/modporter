@@ -1,0 +1,1190 @@
+
+    @Test
+    fun `cumulus menu migration ignores commented registry declarations`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        tempDir.resolve("gradle.properties").writeText("mod_id=example\n")
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleMenus.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.cumulus.Cumulus;
+            import com.aetherteam.cumulus.api.Menu;
+            import com.aetherteam.cumulus.api.Menus;
+            import net.minecraft.client.gui.screens.TitleScreen;
+            import net.minecraft.network.chat.Component;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ExampleMenus {
+                /*
+                public static final DeferredRegister<Menu> MENUS = DeferredRegister.create(Cumulus.MENU_REGISTRY_KEY, ExampleMod.MODID);
+                public static final DeferredHolder<Menu, Menu> CUSTOM = MENUS.register("custom", () -> new Menu(Menus.MINECRAFT_ICON, Component.literal("Custom"), new TitleScreen()));
+                */
+                private static final String DOCS = "com.aetherteam.cumulus.api.Menu Cumulus.MENU_REGISTRY_KEY DeferredRegister<Menu> .register(";
+
+                public static Object keep() {
+                    return DOCS;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val menus = srcDir.resolve("ExampleMenus.java").readText()
+
+        assertTrue(result.changes.none { it.ruleId == "struct-cumulus-menu-api-121" }, result.changes.joinToString("\n"))
+        assertFalse(menus.contains("@CumulusEntrypoint"), menus)
+        assertTrue(menus.contains("DeferredRegister.create(Cumulus.MENU_REGISTRY_KEY, ExampleMod.MODID)"), menus)
+    }
+
+    @Test
+    fun `removes stale Cumulus prepare hooks from already migrated menu initializers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+
+            public class ExampleMod {
+                public ExampleMod(IEventBus modEventBus) {
+                    modEventBus.addListener(MenuHooks::prepareCustomMenus);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleMenus.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.cumulus.api.*;
+            import net.minecraft.client.gui.screens.TitleScreen;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.resources.ResourceLocation;
+
+            @CumulusEntrypoint
+            public class ExampleMenus implements MenuInitializer {
+                public static final Menu CUSTOM = new Menu(Menus.MINECRAFT_ICON, Component.literal("Custom"), new TitleScreen());
+
+                @Override
+                public void registerMenus(MenuRegisterCallback callback) {
+                    callback.registerMenu(ResourceLocation.fromNamespaceAndPath("example", "custom"), CUSTOM);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("MenuListener.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.cumulus.api.MenuHelper;
+            import com.aetherteam.cumulus.client.CumulusClient;
+            import net.minecraft.client.gui.screens.TitleScreen;
+            import net.neoforged.bus.api.EventPriority;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.client.event.ScreenEvent;
+
+            public class MenuListener {
+                /**
+                 * @see MenuHooks#prepareCustomMenus(MenuHelper)
+                 */
+                @SubscribeEvent(priority = EventPriority.HIGHEST)
+                public static void onGuiOpenHighest(ScreenEvent.Opening event) {
+                    MenuHooks.prepareCustomMenus(CumulusClient.MENU_HELPER);
+                }
+
+                @SubscribeEvent
+                public static void onGuiInitialize(ScreenEvent.Init.Post event) {
+                    TitleScreen screen = (TitleScreen) event.getScreen();
+                    MenuHooks.setCustomSplashText(screen);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("MenuHooks.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.cumulus.api.MenuHelper;
+            import net.minecraft.client.gui.screens.TitleScreen;
+
+            public class MenuHooks {
+                /**
+                 * Prepares registered custom menus in Cumulus 1.x.
+                 * @param menuHelper The old menu helper.
+                 */
+                public static void prepareCustomMenus(MenuHelper menuHelper) {
+                    menuHelper.prepareMenu(ExampleMenus.CUSTOM);
+                }
+
+                public static void setCustomSplashText(TitleScreen screen) {
+                    screen.init(null, 0, 0);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val second = StructuralRefactorPass().apply(tempDir)
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+        val listener = srcDir.resolve("MenuListener.java").readText()
+        val hooks = srcDir.resolve("MenuHooks.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-cumulus-menu-api-121" })
+        assertFalse(second.changes.any { it.ruleId == "struct-cumulus-menu-api-121" })
+        assertFalse(mod.contains("MenuHooks::prepareCustomMenus"), mod)
+        assertFalse(listener.contains("prepareCustomMenus"), listener)
+        assertFalse(listener.contains("MenuHelper"), listener)
+        assertFalse(listener.contains("CumulusClient"), listener)
+        assertFalse(listener.contains("EventPriority"), listener)
+        assertFalse(listener.contains("onGuiOpenHighest"), listener)
+        assertTrue(listener.contains("onGuiInitialize"), listener)
+        assertFalse(hooks.contains("prepareMenu"), hooks)
+        assertFalse(hooks.contains("MenuHelper"), hooks)
+        assertFalse(hooks.contains("prepareCustomMenus"), hooks)
+        assertTrue(hooks.contains("setCustomSplashText"), hooks)
+    }
+
+    @Test
+    fun `migrates Quark backpack InventoryIIH wrappers to BackpackContainer`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("QuarkBackpackCompat.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import org.violetmoon.quark.addons.oddities.inventory.slot.BackpackSlot;
+            import org.violetmoon.quark.base.util.InventoryIIH;
+
+            public class QuarkBackpackCompat {
+                public Object create(ItemStack backpack) {
+                    InventoryIIH inv = new InventoryIIH(backpack);
+                    return new BackpackSlot(inv, 0, 8, 18);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val second = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("QuarkBackpackCompat.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-quark-backpack-container-121" })
+        assertFalse(second.changes.any { it.ruleId == "struct-quark-backpack-container-121" })
+        assertTrue(source.contains("import org.violetmoon.quark.addons.oddities.inventory.BackpackContainer;"), source)
+        assertFalse(source.contains("InventoryIIH"), source)
+        assertTrue(source.contains("BackpackContainer inv = new BackpackContainer(backpack);"), source)
+        assertTrue(source.contains("new BackpackSlot(inv, 0, 8, 18)"), source)
+    }
+
+    @Test
+    fun `backpack InventoryIIH wrapper migration requires same variable passed to slot`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BackpackInventorySurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import org.violetmoon.quark.addons.oddities.inventory.slot.BackpackSlot;
+            import org.violetmoon.quark.base.util.InventoryIIH;
+
+            public class BackpackInventorySurface {
+                public Object create(ItemStack backpack, Object container) {
+                    InventoryIIH utility = new InventoryIIH(backpack);
+                    return new BackpackSlot(container, 0, 8, 18);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("BackpackInventorySurface.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-quark-backpack-container-121" })
+        assertTrue(source.contains("import org.violetmoon.quark.base.util.InventoryIIH;"), source)
+        assertTrue(source.contains("InventoryIIH utility = new InventoryIIH(backpack);"), source)
+        assertFalse(source.contains("BackpackContainer utility"), source)
+    }
+
+    @Test
+    fun `backpack InventoryIIH wrapper migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BackpackInventoryDocs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import org.violetmoon.quark.addons.oddities.inventory.slot.BackpackSlot;
+            import org.violetmoon.quark.base.util.InventoryIIH;
+
+            public class BackpackInventoryDocs {
+                /*
+                InventoryIIH inv = new InventoryIIH(backpack);
+                return new BackpackSlot(inv, 0, 8, 18);
+                */
+                private static final String SAMPLE = "InventoryIIH inv = new InventoryIIH(backpack); new BackpackSlot(inv, 0, 8, 18);";
+
+                public Object create(ItemStack backpack) {
+                    return backpack;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("BackpackInventoryDocs.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-quark-backpack-container-121" })
+        assertTrue(source.contains("InventoryIIH inv = new InventoryIIH(backpack);"), source)
+        assertTrue(source.contains("new BackpackSlot(inv, 0, 8, 18);"), source)
+        assertFalse(source.contains("BackpackContainer inv"), source)
+    }
+
+    @Test
+    fun `migrates screen background rendered event overrides to new renderBackground signature`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DialogueScreen.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.screens.Screen;
+            import net.minecraft.network.chat.Component;
+            import net.neoforged.neoforge.client.event.ScreenEvent;
+            import net.neoforged.neoforge.common.NeoForge;
+
+            public class DialogueScreen extends Screen {
+                public DialogueScreen() {
+                    super(Component.empty());
+                }
+
+                /**
+                 * [CODE COPY] - {@link Screen#renderBackground(GuiGraphics)}.
+                 */
+                @Override
+                public void renderBackground(GuiGraphics guiGraphics) {
+                    if (this.getMinecraft().level != null) {
+                        NeoForge.EVENT_BUS.post(new ScreenEvent.BackgroundRendered(this, guiGraphics)).isCanceled().isCanceled();
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val second = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("DialogueScreen.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-screen-background-rendered-event" })
+        assertFalse(second.changes.any { it.ruleId == "struct-screen-background-rendered-event" })
+        assertTrue(source.contains("public void renderBackground(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTicks) {\n    }"), source)
+        assertTrue(source.contains("Screen#renderBackground(GuiGraphics, int, int, float)"), source)
+        assertFalse(source.contains("ScreenEvent.BackgroundRendered"), source)
+        assertFalse(source.contains("NeoForge.EVENT_BUS"), source)
+        assertFalse(source.contains("import net.neoforged.neoforge.client.event.ScreenEvent;"), source)
+        assertFalse(source.contains("import net.neoforged.neoforge.common.NeoForge;"), source)
+    }
+
+    @Test
+    fun `screen background rendered event migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DialogueDocsOnly.java").writeText("""
+            package com.example;
+
+            public class DialogueDocsOnly {
+                private static final String OLD_SIGNATURE = "renderBackground(GuiGraphics) posting ScreenEvent.BackgroundRendered";
+
+                /*
+                @Override
+                public void renderBackground(GuiGraphics guiGraphics) {
+                    NeoForge.EVENT_BUS.post(new ScreenEvent.BackgroundRendered(this, guiGraphics)).isCanceled();
+                }
+                */
+
+                public void keep() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("DialogueDocsOnly.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-screen-background-rendered-event" }, result.changes.toString())
+        assertTrue(source.contains("""private static final String OLD_SIGNATURE = "renderBackground(GuiGraphics) posting ScreenEvent.BackgroundRendered";"""), source)
+        assertTrue(source.contains("public void renderBackground(GuiGraphics guiGraphics)"), source)
+        assertTrue(source.contains("NeoForge.EVENT_BUS.post(new ScreenEvent.BackgroundRendered(this, guiGraphics)).isCanceled();"), source)
+        assertFalse(source.contains("public void renderBackground(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTicks)"), source)
+    }
+
+    @Test
+    fun `migrates strict warning surfaces by source shape without mod specific rules`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("StrictWarningSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.VertexConsumer;
+            import java.util.List;
+            import java.util.function.Consumer;
+            import net.minecraft.core.particles.ColorParticleOption;
+            import net.minecraft.core.particles.ParticleTypes;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.level.block.Block;
+            import net.neoforged.neoforge.client.extensions.common.IClientBlockExtensions;
+            import org.joml.Vector3f;
+
+            public class StrictWarningSurface extends Block {
+                private final String displayName = this.toString();
+                private final String getterName = getDisplayName();
+
+                public StrictWarningSurface(Properties properties) {
+                    super(properties);
+                    this.registerDefaultState(this.getStateDefinition().any());
+                }
+
+                public void render(VertexConsumer buffer, LivingEntity entity) {
+                    float red = 1.0F;
+                    float green = 0.5F;
+                    float blue = 0.25F;
+                    ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, (float) red, (float) green, (float) blue);
+                    Vector3f[] vecList = new Vector3f[]{new Vector3f(), new Vector3f()};
+                    buffer.addVertex((float) (vecList[0].x()), (float) (vecList[0].y()), (float) (vecList[0].z()));
+                    for (Object stack : ((LivingEntity) entity).getArmorSlots()) {
+                    }
+                }
+
+                @Override
+                public void initializeClient(Consumer<IClientBlockExtensions> consumer) {
+                    consumer.accept(new IClientBlockExtensions() {});
+                }
+
+                public String getDisplayName() {
+                    return "name";
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CuriosSurface.java").writeText("""
+            package com.example;
+
+            import java.util.Optional;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.player.Player;
+            import net.neoforged.neoforge.common.util.LazyOptional;
+            import top.theillusivec4.curios.api.CuriosApi;
+            import top.theillusivec4.curios.api.SlotResult;
+            import top.theillusivec4.curios.api.type.capability.ICuriosItemHandler;
+
+            public class CuriosSurface {
+                private final LazyOptional<ICuriosItemHandler> handler;
+
+                public CuriosSurface(Player player) {
+                    this.handler = CuriosApi.getCuriosInventory(player);
+                }
+
+                public static void keep(Player player) {
+                    CuriosApi.getCuriosHelper().getEquippedCurios(player).ifPresent(handler -> {});
+                }
+
+                public static boolean has(LivingEntity entity) {
+                    Optional<SlotResult> slot = CuriosApi.getCuriosHelper().findFirstCurio(entity, stack -> !stack.isEmpty());
+                    return slot.isPresent();
+                }
+
+                public static void local(LivingEntity entity) {
+                    LazyOptional<ICuriosItemHandler> lazyHandler = CuriosApi.getCuriosInventory(entity);
+                    if (lazyHandler.isPresent() && lazyHandler.resolve().isPresent()) {
+                        lazyHandler.resolve().get().getCurios();
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CurioAttributeSurface.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import java.util.UUID;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+            import net.minecraft.world.item.ItemStack;
+            import top.theillusivec4.curios.api.SlotContext;
+            import top.theillusivec4.curios.api.type.capability.ICurioItem;
+
+            public class CurioAttributeSurface implements ICurioItem {
+                @Override
+                public Multimap<Attribute, AttributeModifier> getAttributeModifiers(SlotContext slotContext, UUID uuid, ItemStack stack) {
+                    ImmutableMultimap.Builder<Attribute, AttributeModifier> builder = ImmutableMultimap.builder();
+                    builder.put(Attributes.ATTACK_DAMAGE, new AttributeModifier(uuid, "Damage", 1.0D, AttributeModifier.Operation.ADD_VALUE));
+                    return builder.build();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ConstructorThisCallSurface.java").writeText("""
+            package com.example;
+
+            public class ConstructorThisCallSurface {
+                private final Child child;
+
+                public ConstructorThisCallSurface() {
+                    if (this.shouldInitialize()) {
+                        System.out.println("init");
+                    }
+                    this.child = new Child(this);
+                }
+
+                public boolean shouldInitialize() {
+                    return true;
+                }
+
+                private record Child(ConstructorThisCallSurface owner) {}
+            }
+        """.trimIndent())
+        srcDir.resolve("NestedConstructorThisCallSurface.java").writeText("""
+            package com.example;
+
+            public class NestedConstructorThisCallSurface {
+                public static class LookGoal {
+                    public LookGoal() {
+                        this.setFlags("look");
+                    }
+
+                    public void setFlags(String flag) {
+                    }
+                }
+
+                public static class MoveGoal {
+                    public MoveGoal() {
+                        setFlags("move");
+                    }
+
+                    public void setFlags(String flag) {
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ConstructorMethodReferenceSurface.java").writeText("""
+            package com.example;
+
+            import java.util.function.Consumer;
+
+            public class ConstructorMethodReferenceSurface {
+                public ConstructorMethodReferenceSurface(Consumer<Object> bus) {
+                    bus.accept(this::registerCommands);
+                }
+
+                public void registerCommands(Object event) {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ConstructorAccessorSurface.java").writeText("""
+            package com.example;
+
+            public class ConstructorAccessorSurface {
+                private final Object part;
+
+                public ConstructorAccessorSurface() {
+                    this.part = getRoot().getChild("part");
+                }
+
+                public Root getRoot() {
+                    return new Root();
+                }
+
+                public static class Root {
+                    public Object getChild(String name) {
+                        return name;
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ResourceKeyEnchantmentSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.EnchantmentHelper;
+
+            public class ResourceKeyEnchantmentSurface {
+                public int level(ItemStack stack) {
+                    return EnchantmentHelper.getTagEnchantmentLevel(ModEnchantments.DESTRUCTION.get(), stack);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CategorySurface.java").writeText("""
+            package com.example;
+
+            import mezz.jei.api.gui.builder.IRecipeLayoutBuilder;
+            import mezz.jei.api.gui.drawable.IDrawable;
+            import mezz.jei.api.gui.ingredient.IRecipeSlotsView;
+            import mezz.jei.api.recipe.IFocusGroup;
+            import mezz.jei.api.recipe.RecipeType;
+            import mezz.jei.api.recipe.category.IRecipeCategory;
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.network.chat.Component;
+
+            public class CategorySurface implements IRecipeCategory<CategorySurface.Recipe> {
+                private final IDrawable background;
+                private final IDrawable icon;
+
+                public CategorySurface(IDrawable background, IDrawable icon) {
+                    this.background = background;
+                    this.icon = icon;
+                }
+
+                @Override
+                public RecipeType<Recipe> getRecipeType() { return null; }
+
+                @Override
+                public Component getTitle() { return Component.empty(); }
+
+                @Override
+                public IDrawable getBackground() { return this.background; }
+
+                @Override
+                public IDrawable getIcon() { return this.icon; }
+
+                @Override
+                public void draw(Recipe recipe, IRecipeSlotsView recipeSlotsView, GuiGraphics graphics, double mouseX, double mouseY) {
+                    this.icon.draw(graphics);
+                }
+
+                @Override
+                public void setRecipe(IRecipeLayoutBuilder builder, Recipe recipe, IFocusGroup focuses) {}
+
+                public record Recipe() {}
+            }
+        """.trimIndent())
+        srcDir.resolve("NoDrawCategorySurface.java").writeText("""
+            package com.example;
+
+            import mezz.jei.api.gui.builder.IRecipeLayoutBuilder;
+            import mezz.jei.api.gui.drawable.IDrawable;
+            import mezz.jei.api.recipe.IFocusGroup;
+            import mezz.jei.api.recipe.RecipeType;
+            import mezz.jei.api.recipe.category.IRecipeCategory;
+            import net.minecraft.network.chat.Component;
+
+            public class NoDrawCategorySurface implements IRecipeCategory<NoDrawCategorySurface.Recipe> {
+                private final IDrawable background;
+                private final IDrawable icon;
+
+                public NoDrawCategorySurface(IDrawable background, IDrawable icon) {
+                    this.background = background;
+                    this.icon = icon;
+                }
+
+                @Override
+                public RecipeType<Recipe> getRecipeType() { return null; }
+
+                @Override
+                public Component getTitle() { return Component.empty(); }
+
+                @Override
+                public IDrawable getBackground() { return this.background; }
+
+                @Override
+                public IDrawable getIcon() { return this.icon; }
+
+                @Override
+                public void setRecipe(IRecipeLayoutBuilder builder, Recipe recipe, IFocusGroup focuses) {}
+
+                public record Recipe() {}
+            }
+        """.trimIndent())
+        srcDir.resolve("RendererSurface.java").writeText("""
+            package com.example;
+
+            import java.util.List;
+            import mezz.jei.api.ingredients.IIngredientRenderer;
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.item.TooltipFlag;
+
+            public class RendererSurface implements IIngredientRenderer<String> {
+                @Override
+                public void render(GuiGraphics graphics, String value) {}
+
+                @Override
+                public List<Component> getTooltip(String value, TooltipFlag flag) {
+                    return List.of(Component.literal(value));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("HelperSurface.java").writeText("""
+            package com.example;
+
+            import mezz.jei.api.ingredients.IIngredientHelper;
+            import mezz.jei.api.ingredients.IIngredientType;
+            import mezz.jei.api.ingredients.subtypes.UidContext;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class HelperSurface implements IIngredientHelper<String> {
+                @Override
+                public IIngredientType<String> getIngredientType() { return null; }
+
+                @Override
+                public String getDisplayName(String value) { return value; }
+
+                @Override
+                public String getUniqueId(String value, UidContext context) { return value; }
+
+                @Override
+                public ResourceLocation getResourceLocation(String value) { return ResourceLocation.parse(value); }
+
+                @Override
+                public String copyIngredient(String value) { return value; }
+
+                @Override
+                public String getErrorInfo(String value) { return value; }
+            }
+        """.trimIndent())
+        srcDir.resolve("JeiPluginSurface.java").writeText("""
+            package com.example;
+
+            import java.util.List;
+            import mezz.jei.api.ingredients.IIngredientType;
+            import mezz.jei.api.registration.IModIngredientRegistration;
+
+            public class JeiPluginSurface {
+                public static final IIngredientType<String> TYPE = () -> String.class;
+
+                public void registerIngredients(IModIngredientRegistration registration) {
+                    registration.register(TYPE, List.of(), new HelperSurface(), new RendererSurface());
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+
+        val strict = srcDir.resolve("StrictWarningSurface.java").readText()
+        val curios = srcDir.resolve("CuriosSurface.java").readText()
+        val curioAttributes = srcDir.resolve("CurioAttributeSurface.java").readText()
+        val constructorThisCall = srcDir.resolve("ConstructorThisCallSurface.java").readText()
+        val nestedConstructorThisCall = srcDir.resolve("NestedConstructorThisCallSurface.java").readText()
+        val constructorMethodReference = srcDir.resolve("ConstructorMethodReferenceSurface.java").readText()
+        val constructorAccessor = srcDir.resolve("ConstructorAccessorSurface.java").readText()
+        val resourceKeyEnchantment = srcDir.resolve("ResourceKeyEnchantmentSurface.java").readText()
+        val category = srcDir.resolve("CategorySurface.java").readText()
+        val noDrawCategory = srcDir.resolve("NoDrawCategorySurface.java").readText()
+        val renderer = srcDir.resolve("RendererSurface.java").readText()
+        val helper = srcDir.resolve("HelperSurface.java").readText()
+        val plugin = srcDir.resolve("JeiPluginSurface.java").readText()
+
+        assertTrue(strict.contains("@SuppressWarnings(\"this-escape\")"))
+        assertTrue(Regex("""@SuppressWarnings\("this-escape"\)\s+private\s+final\s+String\s+displayName""").containsMatchIn(strict))
+        assertTrue(Regex("""@SuppressWarnings\("this-escape"\)\s+private\s+final\s+String\s+getterName""").containsMatchIn(strict))
+        assertTrue(strict.contains("ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, red, green, blue)"))
+        assertTrue(strict.contains("buffer.addVertex(vecList[0].x(), vecList[0].y(), vecList[0].z())"))
+        assertTrue(strict.contains("for (Object stack : entity.getArmorSlots())"))
+        assertTrue(Regex("""@SuppressWarnings\("removal"\)\s+@Override\s+public\s+void\s+initializeClient""").containsMatchIn(strict))
+        assertTrue(curios.contains("CuriosApi.getCuriosInventory(player).map(handler -> handler.getEquippedCurios()).ifPresent"))
+        assertTrue(curios.contains("CuriosApi.getCuriosInventory(entity).flatMap(handler -> handler.findFirstCurio(stack -> !stack.isEmpty()))"))
+        assertTrue(curios.contains("private final Optional<ICuriosItemHandler> handler;"), curios)
+        assertTrue(curios.contains("Optional<ICuriosItemHandler> lazyHandler = CuriosApi.getCuriosInventory(entity);"), curios)
+        assertTrue(curios.contains("if (lazyHandler.isPresent())"), curios)
+        assertTrue(curios.contains("lazyHandler.get().getCurios();"), curios)
+        assertFalse(curios.contains("LazyOptional"), curios)
+        assertFalse(curios.contains(".resolve()"), curios)
+        assertTrue(curioAttributes.contains("import net.minecraft.core.Holder;"), curioAttributes)
+        assertTrue(curioAttributes.contains("public Multimap<Holder<Attribute>, AttributeModifier> getAttributeModifiers"), curioAttributes)
+        assertTrue(curioAttributes.contains("ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier> builder"), curioAttributes)
+        assertFalse(curioAttributes.contains("Multimap<Attribute, AttributeModifier>"), curioAttributes)
+        assertTrue(Regex("""@SuppressWarnings\("this-escape"\)\s+public\s+ConstructorThisCallSurface""").containsMatchIn(constructorThisCall))
+        assertTrue(Regex("""@SuppressWarnings\("this-escape"\)\s+public\s+LookGoal""").containsMatchIn(nestedConstructorThisCall))
+        assertTrue(Regex("""@SuppressWarnings\("this-escape"\)\s+public\s+MoveGoal""").containsMatchIn(nestedConstructorThisCall))
+        assertTrue(Regex("""@SuppressWarnings\("this-escape"\)\s+public\s+ConstructorMethodReferenceSurface""").containsMatchIn(constructorMethodReference))
+        assertTrue(Regex("""@SuppressWarnings\("this-escape"\)\s+public\s+ConstructorAccessorSurface""").containsMatchIn(constructorAccessor))
+        assertTrue(resourceKeyEnchantment.contains("EnchantmentHelper.getTagEnchantmentLevel(net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(ModEnchantments.DESTRUCTION), stack)"))
+        assertTrue(!resourceKeyEnchantment.contains("ModEnchantments.DESTRUCTION.get()"))
+        assertTrue(!category.contains("getBackground()"))
+        assertTrue(category.contains("public int getWidth()"))
+        assertTrue(category.contains("return this.background.getWidth();"))
+        assertTrue(category.contains("public int getHeight()"))
+        assertTrue(Regex("""this\.background\.draw\(graphics\);\s+this\.icon\.draw\(graphics\);""").containsMatchIn(category))
+        assertTrue(!noDrawCategory.contains("getBackground()"))
+        assertTrue(noDrawCategory.contains("import mezz.jei.api.gui.ingredient.IRecipeSlotsView;"))
+        assertTrue(noDrawCategory.contains("import net.minecraft.client.gui.GuiGraphics;"))
+        assertTrue(Regex("""public\s+void\s+draw\((?:NoDrawCategorySurface\.)?Recipe\s+recipe,\s+IRecipeSlotsView\s+recipeSlotsView,\s+GuiGraphics\s+graphics,\s+double\s+mouseX,\s+double\s+mouseY\)""").containsMatchIn(noDrawCategory))
+        assertTrue(noDrawCategory.contains("this.background.draw(graphics);"))
+        assertTrue(Regex("""@SuppressWarnings\("removal"\)\s+@Override\s+public\s+List<Component>\s+getTooltip""").containsMatchIn(renderer))
+        assertTrue(Regex("""@SuppressWarnings\("removal"\)\s+@Override\s+public\s+String\s+getUniqueId""").containsMatchIn(helper))
+        assertTrue(Regex("""@SuppressWarnings\("removal"\)\s+public\s+void\s+registerIngredients""").containsMatchIn(plugin))
+    }
+
+    @Test
+    fun `curios attribute modifier holder migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CurioAttributeDocsOnly.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public class CurioAttributeDocsOnly {
+                private static final String DOC = "public Multimap<Attribute, AttributeModifier> getAttributeModifiers(SlotContext slotContext) { ImmutableMultimap.Builder<Attribute, AttributeModifier> builder = ImmutableMultimap.builder(); return builder.build(); }";
+
+                /*
+                public Multimap<Attribute, AttributeModifier> getAttributeModifiers(SlotContext slotContext) {
+                    ImmutableMultimap.Builder<Attribute, AttributeModifier> builder = ImmutableMultimap.builder();
+                    return builder.build();
+                }
+                */
+
+                public void keep() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("CurioAttributeDocsOnly.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, result.changes.toString())
+        assertFalse(migrated.contains("import net.minecraft.core.Holder;"), migrated)
+        assertTrue(migrated.contains("Multimap<Attribute, AttributeModifier> getAttributeModifiers"), migrated)
+        assertTrue(migrated.contains("ImmutableMultimap.Builder<Attribute, AttributeModifier> builder"), migrated)
+        assertFalse(migrated.contains("Multimap<Holder<Attribute>, AttributeModifier>"), migrated)
+        assertFalse(migrated.contains("ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier>"), migrated)
+    }
+
+    @Test
+    fun `legacy item max damage migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ItemMaxDamageDocsOnly.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.Item;
+
+            public class ItemMaxDamageDocsOnly {
+                private static final String DOC = "public int durability(Item item) { return item.getMaxDamage(); }";
+
+                /*
+                public int durability(Item item) {
+                    return item.getMaxDamage();
+                }
+                */
+
+                public void keep() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ItemMaxDamageDocsOnly.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, result.changes.toString())
+        assertTrue(migrated.contains("return item.getMaxDamage();"), migrated)
+        assertFalse(migrated.contains("item.getDefaultInstance().getMaxDamage()"), migrated)
+    }
+
+    @Test
+    fun `JEI recipe category background migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DocumentedCategory.java").writeText("""
+            package com.example;
+
+            import mezz.jei.api.gui.builder.IRecipeLayoutBuilder;
+            import mezz.jei.api.gui.drawable.IDrawable;
+            import mezz.jei.api.recipe.IFocusGroup;
+            import mezz.jei.api.recipe.RecipeType;
+            import mezz.jei.api.recipe.category.IRecipeCategory;
+            import net.minecraft.network.chat.Component;
+
+            public class DocumentedCategory implements IRecipeCategory<DocumentedCategory.Recipe> {
+                private final IDrawable background;
+                private static final String DOC = "public IDrawable getBackground() { return this.background; }";
+
+                /*
+                public IDrawable getBackground() {
+                    return this.background;
+                }
+                */
+
+                public DocumentedCategory(IDrawable background) {
+                    this.background = background;
+                }
+
+                @Override
+                public RecipeType<Recipe> getRecipeType() { return null; }
+
+                @Override
+                public Component getTitle() { return Component.empty(); }
+
+                @Override
+                public void setRecipe(IRecipeLayoutBuilder builder, Recipe recipe, IFocusGroup focuses) {}
+
+                public record Recipe() {}
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val category = srcDir.resolve("DocumentedCategory.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(category.contains("public int getWidth()"), category)
+        assertFalse(category.contains("public int getHeight()"), category)
+        assertFalse(category.contains("this.background.draw("), category)
+        assertTrue(category.contains("private static final String DOC = \"public IDrawable getBackground() { return this.background; }\";"), category)
+        assertTrue(category.contains("public IDrawable getBackground() {\n        return this.background;"), category)
+    }
+
+    @Test
+    fun `Curios helper and inventory optional migrations ignore comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CuriosCommentSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.player.Player;
+            import net.neoforged.neoforge.common.util.LazyOptional;
+            import top.theillusivec4.curios.api.CuriosApi;
+            import top.theillusivec4.curios.api.type.capability.ICuriosItemHandler;
+
+            public class CuriosCommentSurface {
+                private LazyOptional<ICuriosItemHandler> executableHandler;
+
+                public static void real(Player player) {
+                    CuriosApi.getCuriosHelper().getEquippedCurios(player).ifPresent(handler -> {});
+                    Object inventory = CuriosApi.getCuriosInventory(player);
+                }
+
+                public CuriosCommentSurface(Player player) {
+                    this.executableHandler = CuriosApi.getCuriosInventory(player);
+                }
+
+                /*
+                CuriosApi.getCuriosHelper().getEquippedCurios(player);
+                LazyOptional<ICuriosItemHandler> docs = CuriosApi.getCuriosInventory(player);
+                */
+                private static final String SAMPLE = "CuriosApi.getCuriosHelper().findFirstCurio(player, stack -> true); LazyOptional<ICuriosItemHandler>";
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("CuriosCommentSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes} errors=${result.errors}")
+        assertTrue(migrated.contains("CuriosApi.getCuriosInventory(player).map(handler -> handler.getEquippedCurios()).ifPresent"), migrated)
+        assertTrue(migrated.contains("import java.util.Optional;"), migrated)
+        assertTrue(migrated.contains("private Optional<ICuriosItemHandler> executableHandler;"), migrated)
+        assertTrue(migrated.contains("CuriosApi.getCuriosHelper().getEquippedCurios(player);"), migrated)
+        assertTrue(migrated.contains("LazyOptional<ICuriosItemHandler> docs = CuriosApi.getCuriosInventory(player);"), migrated)
+        assertTrue(migrated.contains("CuriosApi.getCuriosHelper().findFirstCurio(player, stack -> true); LazyOptional<ICuriosItemHandler>"), migrated)
+        assertFalse(Regex("""(?m)^[ \t]*Optional\s*<\s*ICuriosItemHandler\s*>\s+docs\b""").containsMatchIn(migrated), migrated)
+    }
+
+    @Test
+    fun `register additional model keys use standalone variant for inline and static field registrations`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ClientEvents.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.resources.model.ModelResourceLocation;
+            import net.neoforged.neoforge.client.event.ModelEvent;
+
+            public class ClientEvents {
+                public static final ModelResourceLocation LOCAL = ModelResourceLocation.inventory(ExampleMod.prefix("local"));
+
+                public static void registerModels(ModelEvent.RegisterAdditional event) {
+                    event.register(ModelResourceLocation.inventory(ExampleMod.prefix("inline")));
+                    event.register(LayerModels.SHIELD);
+                    event.register(LOCAL);
+                }
+
+                public static ModelResourceLocation normalLookup() {
+                    return ModelResourceLocation.inventory(ExampleMod.prefix("item/held"));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LayerModels.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.resources.model.ModelResourceLocation;
+
+            public class LayerModels {
+                public static final ModelResourceLocation SHIELD = ModelResourceLocation.inventory(ExampleMod.prefix("shield"));
+                public static final ModelResourceLocation HELD_ITEM = ModelResourceLocation.inventory(ExampleMod.prefix("held_item"));
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleMod {
+                public static final String ID = "example";
+
+                public static ResourceLocation prefix(String path) {
+                    return ResourceLocation.fromNamespaceAndPath(ID, path);
+                }
+            }
+        """.trimIndent())
+        val modelDir = tempDir.resolve("src/generated/resources/assets/example/models/item")
+        modelDir.createDirectories()
+        modelDir.resolve("inline.json").writeText("{}")
+        modelDir.resolve("local.json").writeText("{}")
+        modelDir.resolve("shield.json").writeText("{}")
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val clientEvents = srcDir.resolve("ClientEvents.java").readText()
+        val layerModels = srcDir.resolve("LayerModels.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-registeradditional-model-standalone" })
+        assertTrue(result.changes.any { it.ruleId == "struct-registeradditional-model-item-path" })
+        assertTrue(clientEvents.contains("event.register(ModelResourceLocation.standalone(ExampleMod.prefix(\"item/inline\")))"))
+        assertTrue(clientEvents.contains("public static final ModelResourceLocation LOCAL = ModelResourceLocation.standalone(ExampleMod.prefix(\"item/local\"));"))
+        assertTrue(clientEvents.contains("return ModelResourceLocation.inventory(ExampleMod.prefix(\"item/held\"));"))
+        assertTrue(layerModels.contains("public static final ModelResourceLocation SHIELD = ModelResourceLocation.standalone(ExampleMod.prefix(\"item/shield\"));"))
+        assertTrue(layerModels.contains("public static final ModelResourceLocation HELD_ITEM = ModelResourceLocation.inventory(ExampleMod.prefix(\"held_item\"));"))
+    }
+
+    @Test
+    fun `legacy model resource location constructor migration ignores comments and string literals`() {
+        val sourceFile = createFile("ModelResourceLocationDocs.java", """
+            package com.example;
+
+            import net.minecraft.client.resources.model.ModelResourceLocation;
+
+            public class ModelResourceLocationDocs {
+                // ModelResourceLocation commented = new ModelResourceLocation(ExampleMod.prefix("item/commented"), "inventory");
+                private static final String DOC = "new ModelResourceLocation(ExampleMod.prefix(\"item/docs\"), \"inventory\")";
+
+                public ModelResourceLocation keep(ModelResourceLocation input) {
+                    return input;
+                }
+            }
+        """.trimIndent()).resolve("src/main/java/com/example/ModelResourceLocationDocs.java")
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = sourceFile.readText()
+
+        assertEquals(original, migrated)
+        assertEquals(0, result.changeCount)
+        assertFalse(migrated.contains("ModelResourceLocation.inventory(ExampleMod.prefix"), migrated)
+        assertFalse(migrated.contains("ModelResourceLocation.standalone(ExampleMod.prefix"), migrated)
+    }
+
+    @Test
+    fun `migrates source backed accessors payload surface and context signatures`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val networkDir = srcDir.resolve("network")
+        srcDir.createDirectories()
+        networkDir.createDirectories()
+        srcDir.resolve("HolderSurface.java").writeText("""
+            package com.example;
+
+            import java.util.Set;
+            import java.util.function.Supplier;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+
+            public class HolderSurface {
+                private Supplier<Set<Holder<Object>>> possibleValues;
+
+                public void addAll(java.util.Set<Holder<Object>> target) {
+                    target.addAll(this.possibleValues.value());
+                }
+
+                public void readBlade(ItemStack stack, Player player, net.minecraft.nbt.CompoundTag tag) {
+                    ItemStack.parseOptional(level.registryAccess(), tag);
+                }
+
+                public int duration(net.minecraft.world.item.Item item, ItemStack stack) {
+                    return item.getUseDuration(stack);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CombatSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.EnchantmentHelper;
+            import net.minecraft.world.level.Level;
+
+            public class CombatSurface {
+                public void releaseUsing(ItemStack stack, Level level, LivingEntity entityLiving) {
+                    if (!(entityLiving instanceof Player player)) return;
+                    if (level.isClientSide()) return;
+                    float sweepRatio = EnchantmentHelper.getSweepingDamageRatio(player);
+                    float baseDamage = (float) player.getAttributeValue(Attributes.ATTACK_DAMAGE);
+                    float enchantBonus = EnchantmentHelper.getDamageBonus(stack, entityLiving.getMobType()) / 1.2F;
+                    entityLiving.hurt(player.damageSources().playerAttack(player), baseDamage + enchantBonus + sweepRatio);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("DrinkKey.java").writeText("""
+            package com.example;
+
+            public enum DrinkKey {
+                ONE;
+
+                public Object[] getEffects() {
+                    return new Object[0];
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("DrinkTest.java").writeText("""
+            package com.example;
+
+            public class DrinkTest {
+                public void check() {
+                    for (DrinkKey key : DrinkKey.values()) {
+                        Object[] effects = key.effects();
+                    }
+                }
+            }
+        """.trimIndent())
+        networkDir.resolve("PayloadRegistrations.java").writeText("""
+            package com.example.network;
+
+            import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
+            import net.neoforged.neoforge.network.registration.PayloadRegistrar;
+
+            public class PayloadRegistrations {
+                public static void register(RegisterPayloadHandlersEvent event) {
+                    PayloadRegistrar registrar = event.registrar("example").versioned("1");
+                    registrar.playToServer(DemoPacket.TYPE, DemoPacket.STREAM_CODEC, DemoPacket::handle);
+                }
+            }
+        """.trimIndent())
+        networkDir.resolve("DemoPacket.java").writeText("""
+            package com.example.network;
+
+            public class DemoPacket {
+                public static final Object TYPE = new Object();
+                public static final Object STREAM_CODEC = new Object();
+                public static void handle(DemoPacket packet, Object context) {}
+            }
+        """.trimIndent())
+        srcDir.resolve("NetworkTest.java").writeText("""
+            package com.example;
+
+            import com.example.network.LegacyNetwork;
+
+            public class NetworkTest {
+                public void check() {
+                    Object channel = LegacyNetwork.CHANNEL;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val holder = srcDir.resolve("HolderSurface.java").readText()
+        val combat = srcDir.resolve("CombatSurface.java").readText()
+        val drinkTest = srcDir.resolve("DrinkTest.java").readText()
+        val networkTest = srcDir.resolve("NetworkTest.java").readText()
+
+        assertTrue(holder.contains("this.possibleValues.get()"))
+        assertTrue(holder.contains("ItemStack.parseOptional(player.registryAccess(), tag)"))
+        assertTrue(holder.contains("item.getUseDuration(stack, null)"))
+        assertTrue(combat.contains("(float) player.getAttributeValue(Attributes.SWEEPING_DAMAGE_RATIO)"))
+        assertTrue(combat.contains("(EnchantmentHelper.modifyDamage((ServerLevel) level, stack, entityLiving, player.damageSources().playerAttack(player), baseDamage) - baseDamage) / 1.2F"))
+        assertTrue(!combat.contains("getSweepingDamageRatio"))
+        assertTrue(!combat.contains("getMobType()"))
+        assertTrue(drinkTest.contains("key.getEffects()"))
+        assertTrue(networkTest.contains("import com.example.network.DemoPacket;"))
+        assertTrue(networkTest.contains("Object channel = DemoPacket.TYPE;"))
+        assertTrue(!networkTest.contains("LegacyNetwork.CHANNEL"))
+    }
+
+    @Test
+    fun `source backed payload surface does not guess channel replacement when multiple payloads are registered`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val networkDir = srcDir.resolve("network")
+        srcDir.createDirectories()
+        networkDir.createDirectories()
+        networkDir.resolve("PayloadRegistrations.java").writeText("""
+            package com.example.network;
+
+            import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
+            import net.neoforged.neoforge.network.registration.PayloadRegistrar;
+
+            public class PayloadRegistrations {
+                public static void register(RegisterPayloadHandlersEvent event) {
+                    PayloadRegistrar registrar = event.registrar("example").versioned("1");
+                    registrar.playToServer(FirstPacket.TYPE, FirstPacket.STREAM_CODEC, FirstPacket::handle);
+                    registrar.playToServer(SecondPacket.TYPE, SecondPacket.STREAM_CODEC, SecondPacket::handle);
+                }
+            }
+        """.trimIndent())
+        networkDir.resolve("FirstPacket.java").writeText("""
+            package com.example.network;
+
+            public class FirstPacket {
+                public static final Object TYPE = new Object();
+                public static final Object STREAM_CODEC = new Object();
+                public static void handle(FirstPacket packet, Object context) {}
+            }
+        """.trimIndent())
+        networkDir.resolve("SecondPacket.java").writeText("""
+            package com.example.network;
+
+            public class SecondPacket {
+                public static final Object TYPE = new Object();
+                public static final Object STREAM_CODEC = new Object();
+                public static void handle(SecondPacket packet, Object context) {}
+            }
+        """.trimIndent())
+        srcDir.resolve("NetworkTest.java").writeText("""
+            package com.example;
+
+            import com.example.network.LegacyNetwork;
+
+            public class NetworkTest {
+                public void check() {
+                    Object channel = LegacyNetwork.CHANNEL;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val networkTest = srcDir.resolve("NetworkTest.java").readText()
+
+        assertTrue(networkTest.contains("import com.example.network.LegacyNetwork;"))
+        assertTrue(networkTest.contains("Object channel = LegacyNetwork.CHANNEL;"))
+        assertTrue(!networkTest.contains("FirstPacket.TYPE"))
+        assertTrue(!networkTest.contains("SecondPacket.TYPE"))
+    }
+
+    @Test
+    fun `legacy damage bonus migration requires server guard before call`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CombatSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.EnchantmentHelper;
+            import net.minecraft.world.level.Level;
+
+            public class CombatSurface {
+                public void releaseUsing(ItemStack stack, Level level, LivingEntity entityLiving, Player player) {
+                    float baseDamage = (float) player.getAttributeValue(Attributes.ATTACK_DAMAGE);
+                    float enchantBonus = EnchantmentHelper.getDamageBonus(stack, entityLiving.getMobType());
+                    if (level.isClientSide()) return;
+                    entityLiving.hurt(player.damageSources().playerAttack(player), baseDamage + enchantBonus);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val combat = srcDir.resolve("CombatSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(combat.contains("EnchantmentHelper.getDamageBonus(stack, entityLiving.getMobType())"), combat)
+        assertTrue(combat.contains("if (level.isClientSide()) return;"), combat)
+        assertFalse(combat.contains("EnchantmentHelper.modifyDamage"), combat)
+        assertFalse(combat.contains("import net.minecraft.server.level.ServerLevel;"), combat)
+    }

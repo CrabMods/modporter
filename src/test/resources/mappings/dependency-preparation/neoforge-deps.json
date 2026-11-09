@@ -1,0 +1,67 @@
+{
+  "description": "Synthetic dependency-closure fixtures for BuildDependencyPreparationTest",
+  "targetLoader": "neoforge",
+  "targetGameVersion": "1.21.1",
+  "dependencies": [
+    {
+      "forgePrefix": "example.removed:optional-api",
+      "packagePrefixes": [
+        "example.removed."
+      ],
+      "status": "remove",
+      "notes": "Synthetic removed API used only to exercise strict source-closure receipts"
+    },
+    {
+      "forgePrefix": "com.aetherteam.nitrogen:nitrogen_internals",
+      "packagePrefixes": [
+        "com.aetherteam.nitrogen."
+      ],
+      "neoforgeCoords": [
+        {
+          "config": "implementation",
+          "coord": "com.aetherteam.nitrogen:nitrogen_internals:1.21.1-1.1.25-neoforge"
+        }
+      ],
+      "versionProperties": [
+        {
+          "name": "nitrogen_version",
+          "value": "1.21.1-1.1.25-neoforge"
+        }
+      ],
+      "mavenUrl": "https://packages.aether-mod.net/Nitrogen",
+      "status": "available"
+    },
+    {
+      "forgePrefix": "top.theillusivec4",
+      "packagePrefixes": [
+        "top.theillusivec4.curios."
+      ],
+      "neoforgeCoords": [
+        {
+          "config": "compileOnly",
+          "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1:api"
+        },
+        {
+          "config": "compileOnly",
+          "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1"
+        },
+        {
+          "config": "compileOnly",
+          "coord": "net.fabricmc:fabric-loader:0.16.14"
+        },
+        {
+          "config": "runtimeOnly",
+          "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1"
+        }
+      ],
+      "versionProperties": [
+        {
+          "name": "curios_version",
+          "value": "9.2.3+1.21.1"
+        }
+      ],
+      "mavenUrl": "https://maven.theillusivec4.top/",
+      "status": "available"
+    }
+  ]
+}

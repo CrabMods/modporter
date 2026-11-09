@@ -1,0 +1,13 @@
+# Managed minecraft-mod-testing files are hash-verified; never convert their line endings.
+* text=auto eol=lf
+src/test/resources/fixtures/** -text
+# Reference sources and upstream legal texts retain their exact whitespace.
+src/test/resources/fixtures/** -whitespace
+third_party/** -text -whitespace
+# Kotlin generators embed tab-indented Java reference snippets.
+*.kt whitespace=-space-before-tab
+*.ktfrag whitespace=-space-before-tab
+.agents/** -text
+.minecraft-mod-testing/** -text
+mod-build.ps1 -text
+mod-build.cmd -text

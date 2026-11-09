@@ -1,0 +1,20 @@
+package @PACKAGE@;
+
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.block.state.BlockState;
+
+/**
+ * Shared SPI for a converted dependency's old boolean Block.canSustainPlant override.
+ */
+public interface LegacySoilAdapter<T> {
+    boolean canSustainPlant(
+        T soilValue,
+        BlockState soil,
+        BlockGetter level,
+        BlockPos soilPosition,
+        Direction facing,
+        Object plantable
+    );
+}

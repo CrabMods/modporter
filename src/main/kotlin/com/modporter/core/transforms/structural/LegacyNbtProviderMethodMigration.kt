@@ -192,7 +192,7 @@ internal class LegacyNbtProviderMethodMigration {
                     }
                     val (unit, method, owner) = matching.singleOrNull() ?: return@calls
                     val shape = resolvedMethodShape(method, typeIndex) ?: return@calls
-                    val providerIndex = dataArgumentIndexes.single() + 1
+                    val providerIndex = shape.parameterTypes.size
                     if (providerIndex !in 0..shape.parameterTypes.size) {
                         throw IllegalStateException("Invalid forwarded provider position $providerIndex for '$call'")
                     }
@@ -355,6 +355,11 @@ internal class LegacyNbtProviderMethodMigration {
         callable: CallableDeclaration<*>,
         typeIndex: JavaProjectTypeIndex
     ): String? {
+        fun blockEntityProvider(receiver: String): String? =
+            "$receiver.getLevel().registryAccess()".takeIf {
+                ExactNullabilityProof.expressionProvenNonNullAt("$receiver.level", callable, call) ||
+                    ExactNullabilityProof.expressionProvenNonNullAt("$receiver.getLevel()", callable, call)
+            }
         fun unique(expressions: List<String>, label: String): String? {
             val distinct = expressions.distinct()
             if (distinct.size > 1) {
@@ -381,7 +386,7 @@ internal class LegacyNbtProviderMethodMigration {
             when (type) {
                 in LEVEL_TYPES -> "$name.registryAccess()"
                 INVENTORY -> "$name.player.registryAccess()"
-                BLOCK_ENTITY -> "$name.getLevel().registryAccess()"
+                BLOCK_ENTITY -> blockEntityProvider(name)
                 in ENTITY_TYPES -> "$name.registryAccess()"
                 MINECRAFT -> "$name.level.registryAccess()"
                 else -> null
@@ -402,10 +407,10 @@ internal class LegacyNbtProviderMethodMigration {
         if (receiverExpression != null && receiverType != null &&
             typeIndex.isTypeAssignableTo(receiverType, BLOCK_ENTITY)
         ) {
-            return "$receiverExpression.getLevel().registryAccess()"
+            blockEntityProvider(receiverExpression)?.let { return it }
         }
         if (typeIndex.isTypeAssignableTo(callerOwner, BLOCK_ENTITY)) {
-            return "this.getLevel().registryAccess()"
+            blockEntityProvider("this")?.let { return it }
         }
         return null
     }

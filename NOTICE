@@ -1,0 +1,18 @@
+ModPorter
+Copyright 2026 ModPorter contributors
+
+ModPorter is licensed under the Apache License, Version 2.0.
+
+Upstream mod source, assets, and third-party libraries retain their own
+copyrights and licenses. Running ModPorter does not relicense an input project
+or grant permission to redistribute its code or assets.
+
+Regression fixtures copied from Create are attributed to The Create Team /
+The Creators of Create. Their code is used under MIT; the upstream license
+overview is in third_party/create/LICENSE.md. Upstream Create assets are not
+redistributed in the source tree or fat JAR. Stock-asset admission tests fetch
+one hash-pinned upstream icon into an ignored, local test cache.
+
+The distribution also contains third-party JVM dependencies. Their bundled
+license notices are retained in META-INF. See third_party/README.md for the
+dependency and fixture attribution inventory.

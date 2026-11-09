@@ -1,9 +1,9 @@
 # id	displayName	provider	location	ref	subdir	required	dependencies
 constructionwand	ConstructionWand	git	https://github.com/Theta-Dev/ConstructionWand.git	1.20	.	true	-
-instantworldmirror	InstantWorldMirror	git	https://github.com/CrabMods/InstantWorldMirror.git	1.20.1	.	false	-
-hotbath	HotBath	git	https://github.com/CrabMods/hotBath.git	1.20.1	.	false	-
-showercore	ShowerCore	git	https://github.com/CrabMods/ShowerCore.git	1.20.1	.	false	hotbath
-sakura	Sakura Mod	git	https://github.com/0999312/Sakura_mod.git	1.20.1	.	false	-
+instantworldmirror	InstantWorldMirror	git	https://github.com/crabsatellite/InstantWorldMirror.git	1.20.1	.	true	-
+hotbath	HotBath	git	https://github.com/crabsatellite/hotBath.git	1.20.1	.	true	-
+showercore	ShowerCore	git	https://github.com/crabsatellite/ShowerCore.git	1.20.1	.	true	hotbath
+sakura	Sakura Mod	git	https://github.com/0999312/Sakura_mod.git	1.20.1	.	true	-
 twilightforest	Twilight Forest	git	https://github.com/TeamTwilight/twilightforest.git	1.20.1	.	true	-
 aether	The Aether	git	https://github.com/The-Aether-Team/The-Aether.git	1.20.1-develop	.	true	-
 beyondtheveil	Beyond the Veil	git	https://github.com/valeriotor/Beyond-The-Veil.git	1.20	.	true	-

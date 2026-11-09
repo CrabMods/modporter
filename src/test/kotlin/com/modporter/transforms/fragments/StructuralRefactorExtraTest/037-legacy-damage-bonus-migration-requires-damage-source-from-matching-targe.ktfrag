@@ -1,0 +1,1193 @@
+
+    @Test
+    fun `legacy damage bonus migration requires damage source from matching target hurt`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CombatSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.EnchantmentHelper;
+            import net.minecraft.world.level.Level;
+
+            public class CombatSurface {
+                public void releaseUsing(ItemStack stack, Level level, LivingEntity firstTarget, LivingEntity entityLiving, Player player) {
+                    if (level.isClientSide()) return;
+                    firstTarget.hurt(player.damageSources().playerAttack(player), 1.0F);
+                    float baseDamage = (float) player.getAttributeValue(Attributes.ATTACK_DAMAGE);
+                    float enchantBonus = EnchantmentHelper.getDamageBonus(stack, entityLiving.getMobType());
+                    entityLiving.setLastHurtByMob(player);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val combat = srcDir.resolve("CombatSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(combat.contains("EnchantmentHelper.getDamageBonus(stack, entityLiving.getMobType())"), combat)
+        assertTrue(combat.contains("firstTarget.hurt(player.damageSources().playerAttack(player), 1.0F);"), combat)
+        assertFalse(combat.contains("EnchantmentHelper.modifyDamage"), combat)
+        assertFalse(combat.contains("import net.minecraft.server.level.ServerLevel;"), combat)
+    }
+
+    @Test
+    fun `migrates source shaped compile debt without comment or fallback inference`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CustomFluidDefinition.java").writeText("""
+            package com.example;
+
+            public record CustomFluidDefinition(int color) {
+            }
+        """.trimIndent())
+        srcDir.resolve("RecordAccessorSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.VertexConsumer;
+
+            public class RecordAccessorSurface {
+                private static final String DOC = "definition.color";
+
+                public int read(CustomFluidDefinition definition, VertexConsumer consumer) {
+                    // definition.color
+                    consumer.color(255, 255, 255, 255);
+                    return definition.setColor() + definition.color;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LocalRecordAccessorSurface.java").writeText("""
+            package com.example;
+
+            public class LocalRecordAccessorSurface {
+                public record LocalRecord(int value) {
+                }
+
+                private static final String DOC = "local.value fn -> fn.value";
+
+                public int read(LocalRecord local) {
+                    // local.value
+                    java.util.function.Function<LocalRecord, Integer> getter = fn -> fn.value;
+                    java.util.function.Function<LocalRecord, Integer> castGetter = (fn) -> fn.value;
+                    return local.value + getter.apply(local) + castGetter.apply(local);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Ghost.java").writeText("""
+            package com.example;
+
+            public class Ghost {
+                public int alpha;
+            }
+        """.trimIndent())
+        srcDir.resolve("GhostAccessorSurface.java").writeText("""
+            package com.example;
+
+            public class GhostAccessorSurface {
+                // public record Ghost(int alpha) {}
+                private static final String DOC = "Ghost ghost; ghost.alpha";
+
+                public int read(Ghost ghost) {
+                    return ghost.alpha;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CommentContainerSurface.java").writeText("""
+            package com.example;
+
+            import java.util.List;
+            import net.minecraft.world.entity.Entity;
+
+            public class CommentContainerSurface {
+                // Container entities are entities with inventories, not Container variables.
+                public int count(List<Entity> entities) {
+                    return entities.size();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("UseDurationSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.renderer.item.ItemProperties;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+
+            public class UseDurationSurface {
+                public int stackDuration(LivingEntity entity) {
+                    return entity.getUseItem().getUseDuration();
+                }
+
+                public int itemDuration(Item item, ItemStack stack) {
+                    return item.getUseDuration(stack);
+                }
+
+                public void itemProperty(Item item) {
+                    ItemProperties.register(item, ResourceLocation.parse("pull"), (stack, world, entity, seed) ->
+                        entity != null ? stack.getUseDuration(entity) : 0);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BucketPickupSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.level.LevelAccessor;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.BucketPickup;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class BucketPickupSurface {
+                public ItemStack pickup(Player player, LevelAccessor level, BlockPos pos, BlockState state) {
+                    Block block = state.getBlock();
+                    if (block instanceof BucketPickup bucketPickup) {
+                        return bucketPickup.pickupBlock(level, pos, state);
+                    }
+                    return ItemStack.EMPTY;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("RecipeSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.inventory.CraftingContainer;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.CraftingRecipe;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.item.crafting.CraftingBookCategory;
+            import net.minecraft.world.level.Level;
+
+            public class RecipeSurface implements CraftingRecipe {
+                public boolean matches(CraftingContainer container, Level level) {
+                    return container.getContainerSize() > 0;
+                }
+
+                public ItemStack assemble(CraftingContainer container, HolderLookup.Provider access) {
+                    return ItemStack.EMPTY;
+                }
+
+                public boolean canCraftInDimensions(int width, int height) { return true; }
+                public ItemStack getResultItem(HolderLookup.Provider access) { return ItemStack.EMPTY; }
+                public RecipeSerializer<?> getSerializer() { return null; }
+                public CraftingBookCategory category() { return CraftingBookCategory.MISC; }
+            }
+        """.trimIndent())
+        srcDir.resolve("ContainerScopeSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.Container;
+            import net.minecraft.world.item.crafting.CraftingInput;
+
+            public class ContainerScopeSurface {
+                private static int recipeSize(CraftingInput matrix) {
+                    return matrix.size();
+                }
+
+                private static int containerSize(Container matrix) {
+                    int count = matrix.size();
+                    for (int i = 0; i < matrix.size(); i++) {
+                        count += i;
+                    }
+                    return count;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CollectionSizeSurface.java").writeText("""
+            package com.example;
+
+            import java.util.HashMap;
+            import java.util.List;
+            import java.util.Map;
+
+            public class CollectionSizeSurface {
+                private final Map<Integer, String> pages = new HashMap<>();
+                private final Map<Integer, List<String>> nestedPages = new HashMap<>();
+
+                public int pageCount() {
+                    return this.pages.getSize() + this.nestedPages.getSize();
+                }
+
+                public int localCount(Map<String, Integer> counts, SizeCarrier carrier) {
+                    return counts.getSize() + carrier.getSize();
+                }
+            }
+
+            class SizeCarrier {
+                int getSize() {
+                    return 1;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ScreenCollectionSizeSurface.java").writeText("""
+            package com.example;
+
+            import java.util.HashMap;
+            import java.util.Map;
+            import java.util.List;
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.components.Button;
+            import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
+            import net.minecraft.network.chat.Component;
+
+            public class ScreenCollectionSizeSurface extends AbstractContainerScreen<MenuSurface> {
+                private final Map<Integer, List<String>> pages = new HashMap<>();
+                private int currentPageNumber;
+
+                public int pageCount() {
+                    return this.pages.size();
+                }
+
+                @Override
+                protected void init() {
+                    super.init();
+                    this.addRenderableWidget(new Button.Builder(Component.literal(">"), (button) -> {
+                        if (this.currentPageNumber < this.pages.size() - 1) {
+                            this.currentPageNumber++;
+                        }
+                    }).bounds(0, 0, 20, 20));
+                }
+
+                @Override
+                public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTicks) {
+                    this.renderBackground(guiGraphics);
+                    super.render(guiGraphics, mouseX, mouseY, partialTicks);
+                }
+            }
+
+            class MenuSurface {
+            }
+        """.trimIndent())
+        srcDir.resolve("BlockRegistrySurface.java").writeText("""
+            package com.example;
+
+            import java.util.function.Supplier;
+            import net.minecraft.world.item.BlockItem;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.level.block.Block;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockRegistrySurface {
+                public static final DeferredRegister<Block> BLOCKS = null;
+
+                private static <T extends Block> DeferredHolder<Block, T> registerBlock(String name, Supplier<T> block) {
+                    DeferredHolder<Block, T> toReturn = BLOCKS.register(name, block);
+                    registerBlockItem(name, toReturn);
+                    return toReturn;
+                }
+
+                private static <T extends Block> DeferredHolder<Block, Item> registerBlockItem(String name, DeferredHolder<Block, T> block) {
+                    return ItemRegistry.ITEMS.register(name, () -> new BlockItem(block.get(), new Item.Properties()));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ItemRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.Item;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ItemRegistry {
+                public static final DeferredRegister<Item> ITEMS = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("CleanlinessBridge.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.world.entity.player.Player;
+
+            public final class CleanlinessBridge {
+                public static final Object CLEAN_STATE = null;
+
+                public static LazyOptional<CleanlinessState> get(Player player) {
+                    return LazyOptional.of(() -> new CleanlinessState());
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CleanlinessState.java").writeText("""
+            package com.example;
+
+            public class CleanlinessState {
+                public void clean() {}
+            }
+        """.trimIndent())
+        srcDir.resolve("CapabilityUseSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.player.Player;
+
+            public class CapabilityUseSurface {
+                public void clean(Player player) {
+                    com.modporter.generated.example.compat.LazyOptional.ofNullable(player.getCapability(CleanlinessBridge.CLEAN_STATE, null)).ifPresent(CleanlinessState::clean);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExternalUuidModifierSurface.java").writeText("""
+            package com.example;
+
+            import java.util.UUID;
+            import net.minecraft.world.entity.player.Player;
+
+            public class ExternalUuidModifierSurface {
+                private static final UUID HOT_BATH_TEMP_MODIFIER_UUID = UUID.fromString("123e4567-e89b-12d3-a456-426614174000");
+
+                public void apply(Player player) {
+                    TemperatureUtil.addTemperatureModifier(player, 1.0D, HOT_BATH_TEMP_MODIFIER_UUID);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("AbstractTypedEntityBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.BaseEntityBlock;
+            import net.minecraft.world.level.block.SkullBlock;
+
+            public abstract class AbstractTypedEntityBlock extends BaseEntityBlock {
+                private final SkullBlock.Type type;
+
+                protected AbstractTypedEntityBlock(SkullBlock.Type type, Properties properties) {
+                    super(properties);
+                    this.type = type;
+                }
+
+                public SkullBlock.Type getType() {
+                    return this.type;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("SkullCandleBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.SkullBlock;
+
+            public class SkullCandleBlock extends AbstractTypedEntityBlock {
+                public SkullCandleBlock(SkullBlock.Type type, Properties properties) {
+                    super(type, properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("StaticLiquidBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.LiquidBlock;
+            import net.minecraft.world.level.material.Fluids;
+
+            public class StaticLiquidBlock extends LiquidBlock {
+                public StaticLiquidBlock(Properties properties) {
+                    super(Fluids.WATER, properties);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+
+        val record = srcDir.resolve("RecordAccessorSurface.java").readText()
+        val localRecord = srcDir.resolve("LocalRecordAccessorSurface.java").readText()
+        val ghost = srcDir.resolve("GhostAccessorSurface.java").readText()
+        val comment = srcDir.resolve("CommentContainerSurface.java").readText()
+        val duration = srcDir.resolve("UseDurationSurface.java").readText()
+        val bucketPickup = srcDir.resolve("BucketPickupSurface.java").readText()
+        val recipe = srcDir.resolve("RecipeSurface.java").readText()
+        val containerScope = srcDir.resolve("ContainerScopeSurface.java").readText()
+        val collectionSize = srcDir.resolve("CollectionSizeSurface.java").readText()
+        val screenCollectionSize = srcDir.resolve("ScreenCollectionSizeSurface.java").readText()
+        val registry = srcDir.resolve("BlockRegistrySurface.java").readText()
+        val capability = srcDir.resolve("CapabilityUseSurface.java").readText()
+        val externalUuid = srcDir.resolve("ExternalUuidModifierSurface.java").readText()
+        val skull = srcDir.resolve("SkullCandleBlock.java").readText()
+        val liquid = srcDir.resolve("StaticLiquidBlock.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(record.contains("consumer.setColor(255, 255, 255, 255)"))
+        assertTrue(record.contains("""private static final String DOC = "definition.color";"""), record)
+        assertTrue(record.contains("// definition.color"), record)
+        assertTrue(record.contains("return definition.color() + definition.color();"))
+        assertTrue(!record.contains("definition.setColor()"))
+        assertTrue(localRecord.contains("""private static final String DOC = "local.value fn -> fn.value";"""), localRecord)
+        assertTrue(localRecord.contains("// local.value"), localRecord)
+        assertTrue(localRecord.contains("java.util.function.Function<LocalRecord, Integer> getter = fn -> fn.value();"), localRecord)
+        assertTrue(localRecord.contains("java.util.function.Function<LocalRecord, Integer> castGetter = (fn) -> fn.value();"), localRecord)
+        assertTrue(localRecord.contains("return local.value() + getter.apply(local) + castGetter.apply(local);"), localRecord)
+        assertTrue(ghost.contains("return ghost.alpha;"), ghost)
+        assertFalse(ghost.contains("ghost.alpha()"), ghost)
+        assertTrue(ghost.contains("// public record Ghost(int alpha) {}"), ghost)
+        assertTrue(ghost.contains("""private static final String DOC = "Ghost ghost; ghost.alpha";"""), ghost)
+        assertTrue(comment.contains("return entities.size();"))
+        assertTrue(!comment.contains("entities.getContainerSize()"))
+        assertTrue(duration.contains("entity.getUseItem().getUseDuration(entity)"))
+        assertTrue(duration.contains("item.getUseDuration(stack, null)"))
+        assertTrue(duration.contains("stack.getUseDuration(entity) : 0"), duration)
+        assertFalse(duration.contains("stack.getUseDuration(entity, null)"), duration)
+        assertTrue(bucketPickup.contains("bucketPickup.pickupBlock(player, level, pos, state)"), bucketPickup)
+        assertTrue(recipe.contains("matches(CraftingInput container, Level level)"))
+        assertTrue(recipe.contains("assemble(CraftingInput container, HolderLookup.Provider access)"))
+        assertTrue(recipe.contains("container.size() > 0"))
+        assertTrue(!recipe.contains("CraftingContainer"))
+        assertTrue(containerScope.contains("return matrix.size();"))
+        assertTrue(containerScope.contains("int count = matrix.getContainerSize();"))
+        assertTrue(containerScope.contains("i < matrix.getContainerSize()"))
+        assertTrue(collectionSize.contains("return this.pages.size() + this.nestedPages.size();"))
+        assertTrue(collectionSize.contains("return counts.size() + carrier.getSize();"))
+        assertTrue(screenCollectionSize.contains("return this.pages.size();"))
+        assertTrue(screenCollectionSize.contains("this.currentPageNumber < this.pages.size() - 1"))
+        assertTrue(!screenCollectionSize.contains("this.pages.getSize()"))
+        assertTrue(registry.contains("DeferredHolder<Item, BlockItem> registerBlockItem"))
+        assertTrue(capability.contains("CleanlinessBridge.get(player).ifPresent(CleanlinessState::clean)"))
+        assertTrue(!capability.contains("LazyOptional.ofNullable(CleanlinessBridge.get"))
+        assertTrue(!capability.contains("CleanlinessBridge.CLEAN_STATE"))
+        assertTrue(externalUuid.contains("private static final UUID HOT_BATH_TEMP_MODIFIER_UUID = UUID.fromString"))
+        assertTrue(externalUuid.contains("TemperatureUtil.addTemperatureModifier(player, 1.0D, HOT_BATH_TEMP_MODIFIER_UUID)"))
+        assertTrue(!externalUuid.contains("ResourceLocation HOT_BATH_TEMP_MODIFIER_UUID"))
+        assertTrue(skull.contains("simpleCodec(properties -> new SkullCandleBlock(this.getType(), properties))"))
+        assertTrue(liquid.contains("public com.mojang.serialization.MapCodec<net.minecraft.world.level.block.LiquidBlock> codec()"))
+    }
+
+    @Test
+    fun `migrates block codec saveToItem and update packet provider signatures from source structure`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("GlassJarBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.LevelReader;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockState;
+            import org.jetbrains.annotations.NotNull;
+
+            public class GlassJarBlock extends Block {
+                public static final com.mojang.serialization.MapCodec<GlassJarBlock> CODEC = simpleCodec(GlassJarBlock::new);
+
+                @Override
+                protected com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.block.Block> codec() {
+                    return CODEC;
+                }
+
+                public GlassJarBlock(Properties properties) {
+                    super(properties);
+                }
+
+                @Override
+                public @NotNull ItemStack getCloneItemStack(LevelReader level, BlockPos pos, BlockState state) {
+                    ItemStack stack = super.getCloneItemStack(level, pos, state);
+                    level.getBlockEntity(pos).ifPresent(be -> {
+                        be.saveToItem(stack);
+                    });
+                    return stack;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("GlassJarBlockEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.network.Connection;
+            import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class GlassJarBlockEntity extends BlockEntity {
+                public GlassJarBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+
+                public void onDataPacket(Connection connection, ClientboundBlockEntityDataPacket pkt) {
+                    load(pkt.getTag());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("GlassJarBlock.java").readText()
+        val blockEntity = srcDir.resolve("GlassJarBlockEntity.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("protected com.mojang.serialization.MapCodec<GlassJarBlock> codec()"), migrated)
+        assertTrue(migrated.contains("be.saveToItem(stack, level.registryAccess());"), migrated)
+        assertTrue(blockEntity.contains("public void onDataPacket(Connection connection, ClientboundBlockEntityDataPacket pkt, HolderLookup.Provider lookupProvider)"), blockEntity)
+        assertTrue(blockEntity.contains("this.loadAdditional(pkt.getTag(), lookupProvider);"), blockEntity)
+    }
+
+    @Test
+    fun `does not migrate ordinary Objects equality to holder is without holder proof`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ResourceLocationEqualitySurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.resources.ResourceLocation;
+            import org.jetbrains.annotations.Nullable;
+
+            public class ResourceLocationEqualitySurface {
+                private ResourceLocation materialBlockId;
+
+                public void setMaterialBlockId(@Nullable ResourceLocation materialBlockId) {
+                    if (java.util.Objects.equals(this.materialBlockId, materialBlockId)) {
+                        return;
+                    }
+                    this.materialBlockId = materialBlockId;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ResourceLocationEqualitySurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("java.util.Objects.equals(this.materialBlockId, materialBlockId)"))
+        assertFalse(migrated.contains("java.util.materialBlockId.is"))
+        assertFalse(migrated.contains("materialBlockId.is("))
+    }
+
+    @Test
+    fun `block item handler capability uses source block entity level relation`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CapabilityLevelSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+
+            public class CapabilityLevelSurface {
+                public void caps(Level unrelated, Level level, BlockPos blockPos, Direction side) {
+                    BlockEntity blockEntity = level.getBlockEntity(blockPos);
+                    if (blockEntity != null) {
+                        blockEntity.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("CapabilityLevelSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("if (level instanceof ServerLevel modporterServerLevel)"), migrated)
+        assertTrue(migrated.contains("BlockCapabilityCache.create(Capabilities.ItemHandler.BLOCK, modporterServerLevel, blockPos, side)"), migrated)
+        assertFalse(migrated.contains("if (unrelated instanceof ServerLevel"), migrated)
+    }
+
+    @Test
+    fun `block item handler capability without level position source relation uses receiver state only`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CapabilityAmbiguousSurface.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+
+            public class CapabilityAmbiguousSurface {
+                public void caps(Level level, BlockEntity blockEntity, Direction side, Object unknown) {
+                    blockEntity.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());
+                    unknown.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.toString());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("CapabilityAmbiguousSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("LazyOptional.ofNullable(Capabilities.ItemHandler.BLOCK.getCapability(blockEntity.getLevel(), blockEntity.getBlockPos(), blockEntity.getBlockState(), blockEntity, side)).ifPresent(handler -> handler.getSlots());"), migrated)
+        assertTrue(migrated.contains("unknown.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.toString());"), migrated)
+        assertFalse(migrated.contains("BlockCapabilityCache.create"), migrated)
+        assertFalse(migrated.contains("ENTITY_AUTOMATION"), migrated)
+    }
+
+    @Test
+    fun `block and entity capability accessor migration uses executable typed receiver evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CapabilityDocsSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.phys.AABB;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.items.IItemHandler;
+            import java.util.ArrayList;
+            import java.util.HashMap;
+            import java.util.List;
+            import java.util.Map;
+
+            public class CapabilityDocsSurface {
+                private static final String DOC = "entity.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());";
+                private static final String NO_SIDE_DOC = "inventoryStack.getCapability(Capabilities.ItemHandler.BLOCK) != null";
+
+                /*
+                 BlockEntity fake = level.getBlockEntity(pos);
+                 fake.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());
+                 mystery.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());
+                 */
+
+                public void caps(Level level, BlockPos pos, Direction side, Entity entity, Object unknown) {
+                    BlockEntity blockEntity = level.getBlockEntity(pos);
+                    blockEntity.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());
+                    entity.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());
+                    unknown.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());
+                }
+
+                public boolean entityNoSide(LivingEntity living) {
+                    return living.getCapability(Capabilities.ItemHandler.BLOCK) != null;
+                }
+
+                public void entityCollectionCaps(Level level, BlockPos pos, Direction side) {
+                    level.getEntities((Entity) null, new AABB(pos).inflate(2), entity -> entity.isAlive()).forEach(entity -> {
+                        List<IItemHandler> handlers = new ArrayList<>();
+                        entity.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handlers::add);
+                    });
+                    level.getEntitiesOfClass(Entity.class, new AABB(pos).inflate(16)).forEach(entity -> {
+                        Map<IItemHandler, Object> outputMap = new HashMap<>();
+                        entity.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> outputMap.put(handler, entity.position()));
+                    });
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("CapabilityDocsSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(
+            migrated.contains("BlockCapabilityCache.create(Capabilities.ItemHandler.BLOCK, modporterServerLevel, pos, side)"),
+            migrated
+        )
+        assertTrue(
+            migrated.contains("IItemHandler modporterItemHandler1 = entity.getCapability(Capabilities.ItemHandler.ENTITY_AUTOMATION, side);"),
+            migrated
+        )
+        assertTrue(
+            migrated.contains("unknown.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());"),
+            migrated
+        )
+        assertTrue(
+            migrated.contains("private static final String DOC = \"entity.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());\""),
+            migrated
+        )
+        assertTrue(
+            migrated.contains("private static final String NO_SIDE_DOC = \"inventoryStack.getCapability(Capabilities.ItemHandler.BLOCK) != null\""),
+            migrated
+        )
+        assertTrue(migrated.contains("fake.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent"), migrated)
+        assertTrue(migrated.contains("mystery.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent"), migrated)
+        assertTrue(migrated.contains("entity.getCapability(Capabilities.ItemHandler.ENTITY_AUTOMATION, side)"), migrated)
+        assertTrue(migrated.contains("handlers.add(modporterItemHandler"), migrated)
+        assertTrue(migrated.contains("outputMap.put(modporterItemHandler"), migrated)
+        assertTrue(migrated.contains("living.getCapability(Capabilities.ItemHandler.ENTITY) != null"), migrated)
+    }
+
+    @Test
+    fun `migrates legacy Gui HeartType sheet coordinates without changing texture source`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("HeartOverlaySurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.Gui;
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class HeartOverlaySurface {
+                private static final ResourceLocation HEARTS = ResourceLocation.fromNamespaceAndPath(ExampleMod.ID, "textures/gui/custom_hearts.png");
+
+                public void render(GuiGraphics guiGraphics, Gui.HeartType heartType, int x, int y, boolean halfHeart, boolean blink) {
+                    guiGraphics.blit(HEARTS, x, y, heartType.getX(halfHeart, blink), 0, 9, 9);
+                    guiGraphics.blit(HEARTS, x + 10, y, Gui.HeartType.CONTAINER.getX(false, blink), 0, 9, 9);
+                }
+            }
+
+            // trailing documentation mentions a brace }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("HeartOverlaySurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("""ResourceLocation.fromNamespaceAndPath(ExampleMod.ID, "textures/gui/custom_hearts.png")"""), migrated)
+        assertTrue(migrated.contains("guiGraphics.blit(HEARTS, x, y, modporterLegacyHeartTypeX(heartType, halfHeart, blink), 0, 9, 9);"), migrated)
+        assertTrue(migrated.contains("modporterLegacyHeartTypeX(Gui.HeartType.CONTAINER, false, blink)"), migrated)
+        assertTrue(migrated.contains("private static int modporterLegacyHeartTypeX(net.minecraft.client.gui.Gui.HeartType heartType, boolean halfHeart, boolean blinking)"), migrated)
+        assertTrue(migrated.contains("return 16 + (index * 2 + offset) * 9;"), migrated)
+        assertTrue(migrated.contains("// trailing documentation mentions a brace }"), migrated)
+        val helperIndex = migrated.indexOf("private static int modporterLegacyHeartTypeX")
+        val trailingCommentIndex = migrated.indexOf("// trailing documentation mentions a brace }")
+        val classCloseBeforeComment = migrated.lastIndexOf('}', trailingCommentIndex)
+        assertTrue(helperIndex >= 0 && helperIndex < classCloseBeforeComment && classCloseBeforeComment < trailingCommentIndex, migrated)
+        assertFalse(migrated.contains(".getX("), migrated)
+    }
+
+    @Test
+    fun `legacy Gui HeartType sheet coordinate migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("HeartOverlayDocsOnly.java").writeText("""
+            package com.example;
+
+            public class HeartOverlayDocsOnly {
+                private static final String OLD_SAMPLE = "guiGraphics.blit(HEARTS, x, y, heartType.getX(halfHeart, blink), 0, 9, 9);";
+
+                /*
+                public void copied(GuiGraphics guiGraphics, Gui.HeartType heartType, int x, int y, boolean halfHeart, boolean blink) {
+                    guiGraphics.blit(HEARTS, x, y, heartType.getX(halfHeart, blink), 0, 9, 9);
+                }
+                */
+
+                public void render(GuiGraphics guiGraphics, int x, int y) {
+                    guiGraphics.blit(HEARTS, x, y, 0, 0, 9, 9);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("HeartOverlayDocsOnly.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-hearttype-legacy-sheet-coordinates" }, result.changes.toString())
+        assertTrue(migrated.contains("""private static final String OLD_SAMPLE = "guiGraphics.blit(HEARTS, x, y, heartType.getX(halfHeart, blink), 0, 9, 9);";"""), migrated)
+        assertTrue(migrated.contains("guiGraphics.blit(HEARTS, x, y, heartType.getX(halfHeart, blink), 0, 9, 9);"), migrated)
+        assertTrue(migrated.contains("guiGraphics.blit(HEARTS, x, y, 0, 0, 9, 9);"), migrated)
+        assertFalse(migrated.contains("modporterLegacyHeartTypeX("), migrated)
+        assertFalse(migrated.contains("private static int modporterLegacyHeartTypeX("), migrated)
+    }
+
+    @Test
+    fun `migrates legacy add layer skin name loops to PlayerSkin models`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AddLayersSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.renderer.entity.player.PlayerRenderer;
+            import net.neoforged.neoforge.client.event.EntityRenderersEvent;
+
+            public class AddLayersSurface {
+                public static void add(EntityRenderersEvent.AddLayers event) {
+                    String[] types = new String[]{"default", "slim"};
+                    for (String type : types) {
+                        PlayerRenderer playerRenderer = event.getSkin(type);
+                        if (playerRenderer != null) {
+                            playerRenderer.addLayer(new ExampleLayer(playerRenderer));
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("AddLayersSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.minecraft.client.resources.PlayerSkin;"), migrated)
+        assertTrue(migrated.contains("for (PlayerSkin.Model type : event.getSkins()) {"), migrated)
+        assertTrue(migrated.contains("PlayerRenderer playerRenderer = event.getSkin(type);"), migrated)
+        assertFalse(migrated.contains("String[] types"), migrated)
+        assertFalse(migrated.contains("for (String type"), migrated)
+    }
+
+    @Test
+    fun `legacy add layer skin migrations ignore comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AddLayersDocs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.renderer.entity.player.PlayerRenderer;
+            import net.neoforged.neoforge.client.event.EntityRenderersEvent;
+
+            public class AddLayersDocs {
+                private static final String DOC = "event.getSkin(\"default\") String[] types = {\"default\", \"slim\"};";
+
+                /*
+                public static void docs(EntityRenderersEvent.AddLayers event) {
+                    String[] types = new String[]{"default", "slim"};
+                    for (String type : types) {
+                        PlayerRenderer playerRenderer = event.getSkin(type);
+                    }
+                }
+                */
+
+                public static void add(EntityRenderersEvent.AddLayers event) {
+                    PlayerRenderer wide = event.getSkin("default");
+                    final String[] types = new String[]{"default", "slim"};
+                    for (String type : types) {
+                        PlayerRenderer playerRenderer = event.getSkin(type);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("AddLayersDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("""private static final String DOC = "event.getSkin(\"default\") String[] types = {\"default\", \"slim\"};";"""), migrated)
+        assertTrue(migrated.contains("""PlayerRenderer wide = event.getSkin(PlayerSkin.Model.WIDE);"""), migrated)
+        assertTrue(migrated.contains("for (PlayerSkin.Model type : event.getSkins()) {"), migrated)
+        assertTrue(migrated.contains("PlayerRenderer playerRenderer = event.getSkin(type);"), migrated)
+        assertTrue(
+            Regex("""/\*\s*public static void docs\(EntityRenderersEvent\.AddLayers event\)\s*\{\s*String\[] types = new String\[]\{"default", "slim"};\s*for \(String type : types\)""", RegexOption.DOT_MATCHES_ALL)
+                .containsMatchIn(migrated),
+            migrated
+        )
+    }
+
+    @Test
+    fun `migrates ModifyBakingResult model entry loops to model resource locations`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ModelBakeSurface.java").writeText("""
+            package com.example;
+
+            import java.util.ArrayList;
+            import java.util.List;
+            import java.util.Map;
+            import net.minecraft.client.resources.model.BakedModel;
+            import net.minecraft.resources.ResourceLocation;
+            import net.neoforged.neoforge.client.event.ModelEvent;
+
+            public class ModelBakeSurface {
+                public static void bake(ModelEvent.ModifyBakingResult event) {
+                    List<Map.Entry<ResourceLocation, BakedModel>> models = new ArrayList<>();
+                    for (Map.Entry<ResourceLocation, BakedModel> entry : event.getModels().entrySet()) {
+                        if (entry.getKey().getNamespace().equals(ExampleMod.ID)) {
+                            String path = entry.getKey().getPath();
+                            models.add(entry);
+                        }
+                    }
+                    models.forEach(entry -> event.getModels().put(entry.getKey(), new WrappedModel(entry.getValue())));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ModelBakeSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.minecraft.client.resources.model.ModelResourceLocation;"), migrated)
+        assertTrue(migrated.contains("List<Map.Entry<ModelResourceLocation, BakedModel>> models = new ArrayList<>();"), migrated)
+        assertTrue(migrated.contains("for (Map.Entry<ModelResourceLocation, BakedModel> entry : event.getModels().entrySet())"), migrated)
+        assertTrue(migrated.contains("entry.getKey().id().getNamespace().equals(ExampleMod.ID)"), migrated)
+        assertTrue(migrated.contains("String path = entry.getKey().id().getPath();"), migrated)
+        assertFalse(migrated.contains("Map.Entry<ResourceLocation, BakedModel>"), migrated)
+    }
+
+    @Test
+    fun `removes legacy copied projectile portal branch with removed APIs`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LegacyProjectileSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.projectile.Projectile;
+            import net.minecraft.world.entity.projectile.ProjectileUtil;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.Blocks;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.TheEndGatewayBlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.phys.BlockHitResult;
+            import net.minecraft.world.phys.HitResult;
+
+            public class LegacyProjectileSurface extends Projectile {
+                public LegacyProjectileSurface(EntityType<? extends LegacyProjectileSurface> type, Level level) {
+                    super(type, level);
+                }
+
+                public void tick() {
+                    HitResult result = ProjectileUtil.getHitResultOnMoveVector(this, this::canHitEntity);
+                    boolean flag = false;
+                    if (result.getType() == HitResult.Type.BLOCK) {
+                        BlockPos blockPos = ((BlockHitResult) result).getBlockPos();
+                        BlockState blockState = this.level().getBlockState(blockPos);
+                        if (blockState.is(Blocks.NETHER_PORTAL)) {
+                            this.handleInsidePortal(blockPos);
+                            flag = true;
+                        } else if (blockState.is(Blocks.END_GATEWAY)) {
+                            BlockEntity blockEntity = this.level().getBlockEntity(blockPos);
+                            if (blockEntity instanceof TheEndGatewayBlockEntity endGatewayBlockEntity && TheEndGatewayBlockEntity.canEntityTeleport(this)) {
+                                TheEndGatewayBlockEntity.teleportEntity(this.level(), blockPos, blockState, this, endGatewayBlockEntity);
+                            }
+                            flag = true;
+                        }
+                    }
+                    if (result.getType() != HitResult.Type.MISS && !flag && !net.neoforged.neoforge.event.EventHooks.onProjectileImpact(this, result)) {
+                        this.onHit(result);
+                    }
+                    this.checkInsideBlocks();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("LegacyProjectileSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(migrated.contains("handleInsidePortal"), migrated)
+        assertFalse(migrated.contains("TheEndGatewayBlockEntity"), migrated)
+        assertFalse(migrated.contains("Blocks.NETHER_PORTAL"), migrated)
+        assertTrue(migrated.contains("if (result.getType() != HitResult.Type.MISS && !flag && !net.neoforged.neoforge.event.EventHooks.onProjectileImpact(this, result))"), migrated)
+        assertTrue(migrated.contains("this.checkInsideBlocks();"), migrated)
+    }
+
+    @Test
+    fun `legacy projectile portal branch removal ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LegacyProjectileDocsOnly.java").writeText("""
+            package com.example;
+
+            public class LegacyProjectileDocsOnly {
+                private static final String OLD_BRANCH = "if (result.getType() == HitResult.Type.BLOCK) { handleInsidePortal(pos); TheEndGatewayBlockEntity.teleportEntity(level, pos, state, entity, gateway); }";
+
+                /*
+                if (result.getType() == HitResult.Type.BLOCK) {
+                    if (state.is(Blocks.NETHER_PORTAL)) {
+                        this.handleInsidePortal(pos);
+                    } else if (state.is(Blocks.END_GATEWAY)) {
+                        if (TheEndGatewayBlockEntity.canEntityTeleport(this)) {
+                            TheEndGatewayBlockEntity.teleportEntity(level, pos, state, this, gateway);
+                        }
+                    }
+                }
+                */
+
+                public void tick(HitResult result) {
+                    if (result.getType() == HitResult.Type.BLOCK) {
+                        this.onHit(result);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("LegacyProjectileDocsOnly.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-projectile-legacy-portal-branch" }, result.changes.toString())
+        assertTrue(migrated.contains("private static final String OLD_BRANCH"), migrated)
+        assertTrue(migrated.contains("this.handleInsidePortal(pos);"), migrated)
+        assertTrue(migrated.contains("TheEndGatewayBlockEntity.teleportEntity(level, pos, state, this, gateway);"), migrated)
+        assertTrue(migrated.contains("public void tick(HitResult result)"), migrated)
+        assertTrue(migrated.contains("if (result.getType() == HitResult.Type.BLOCK)"), migrated)
+        assertTrue(migrated.contains("this.onHit(result);"), migrated)
+    }
+
+    @Test
+    fun `migrates colored cutout layer helper RGB floats to packed color`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ColoredLayerSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import net.minecraft.client.model.EntityModel;
+            import net.minecraft.client.renderer.MultiBufferSource;
+            import net.minecraft.client.renderer.entity.layers.RenderLayer;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.entity.LivingEntity;
+
+            public class ColoredLayerSurface {
+                public <T extends LivingEntity> void render(EntityModel<T> parent, EntityModel<T> model, ResourceLocation texture, PoseStack poseStack, MultiBufferSource buffer, int packedLight, T entity, float limbSwing, float limbSwingAmount, float ageInTicks, float netHeadYaw, float headPitch, float partialTicks, float red, float green, float blue) {
+                    RenderLayer.coloredCutoutModelCopyLayerRender(parent, model, texture, poseStack, buffer, packedLight, entity, limbSwing, limbSwingAmount, ageInTicks, netHeadYaw, headPitch, partialTicks, red, green, blue);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ColoredLayerSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.minecraft.util.FastColor;"), migrated)
+        assertTrue(migrated.contains("RenderLayer.coloredCutoutModelCopyLayerRender(parent, model, texture, poseStack, buffer, packedLight, entity, limbSwing, limbSwingAmount, ageInTicks, netHeadYaw, headPitch, partialTicks, FastColor.ARGB32.colorFromFloat(1.0F, red, green, blue));"), migrated)
+        assertFalse(migrated.contains("partialTicks, red, green, blue);"), migrated)
+    }
+
+    @Test
+    fun `colored cutout layer helper packed color migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ColoredLayerDocsOnly.java").writeText("""
+            package com.example;
+
+            public class ColoredLayerDocsOnly {
+                private static final String OLD_CALL = "RenderLayer.coloredCutoutModelCopyLayerRender(parent, model, texture, poseStack, buffer, packedLight, entity, limbSwing, limbSwingAmount, ageInTicks, netHeadYaw, headPitch, partialTicks, red, green, blue);";
+
+                /*
+                RenderLayer.coloredCutoutModelCopyLayerRender(parent, model, texture, poseStack, buffer, packedLight, entity, limbSwing, limbSwingAmount, ageInTicks, netHeadYaw, headPitch, partialTicks, red, green, blue);
+                */
+
+                public void render() {
+                    this.toString();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ColoredLayerDocsOnly.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-colored-cutout-layer-packed-color" }, result.changes.toString())
+        assertFalse(migrated.contains("import net.minecraft.util.FastColor;"), migrated)
+        assertTrue(migrated.contains("""private static final String OLD_CALL = "RenderLayer.coloredCutoutModelCopyLayerRender(parent, model, texture, poseStack, buffer, packedLight, entity, limbSwing, limbSwingAmount, ageInTicks, netHeadYaw, headPitch, partialTicks, red, green, blue);";"""), migrated)
+        assertTrue(migrated.contains("RenderLayer.coloredCutoutModelCopyLayerRender(parent, model, texture, poseStack, buffer, packedLight, entity, limbSwing, limbSwingAmount, ageInTicks, netHeadYaw, headPitch, partialTicks, red, green, blue);"), migrated)
+        assertFalse(migrated.contains("FastColor.ARGB32.colorFromFloat"), migrated)
+    }
+
+    @Test
+    fun `migrates RecipeHolder optional map lambdas to recipe values`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RecipeHolderOptionalMapSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.inventory.CraftingContainer;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.Level;
+
+            public class RecipeHolderOptionalMapSurface {
+                public ItemStack assemble(Level level, CraftingContainer craftingInventory) {
+                    return level.getRecipeManager().getRecipeFor(RecipeType.CRAFTING, craftingInventory, level)
+                            .map(recipe -> recipe.assemble(craftingInventory, level.registryAccess()))
+                            .orElse(ItemStack.EMPTY);
+                }
+
+                public ResourceLocation id(Level level, CraftingContainer craftingInventory) {
+                    return level.getRecipeManager().getRecipeFor(RecipeType.CRAFTING, craftingInventory, level)
+                            .map((recipe) -> recipe.getId())
+                            .orElseThrow();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("RecipeHolderOptionalMapSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains(".map(recipe -> recipe.value().assemble(craftingInventory.asCraftInput(), level.registryAccess()))"), migrated)
+        assertTrue(migrated.contains(".map((recipe) -> recipe.id())"), migrated)
+        assertFalse(migrated.contains("recipe.assemble(craftingInventory,"), migrated)
+        assertFalse(migrated.contains("recipe.getId()"), migrated)
+    }
+
+    @Test
+    fun `migrates legacy shearable signatures without dropping used fortune semantics`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ShearableSignatureSurface.java").writeText("""
+            package com.example;
+
+            import java.util.Collections;
+            import java.util.List;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+            import org.jetbrains.annotations.Nullable;
+
+            public class ShearableSignatureSurface {
+                @Override
+                public List<ItemStack> onSheared(@Nullable Player player, ItemStack item, Level level, BlockPos pos, int fortune) {
+                    return Collections.emptyList();
+                }
+
+                @Override
+                public boolean isShearable(ItemStack item, Level world, BlockPos pos) {
+                    return true;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("FortuneAwareShearableSurface.java").writeText("""
+            package com.example;
+
+            import java.util.Collections;
+            import java.util.List;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+
+            public class FortuneAwareShearableSurface {
+                public List<ItemStack> onSheared(Player player, ItemStack item, Level level, BlockPos pos, int fortune) {
+                    return fortune > 0 ? Collections.singletonList(item) : Collections.emptyList();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ShearableSignatureSurface.java").readText()
+        val fortuneAware = srcDir.resolve("FortuneAwareShearableSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("onSheared(@Nullable Player player, ItemStack item, Level level, BlockPos pos)"), migrated)
+        assertTrue(migrated.contains("isShearable(Player player, ItemStack item, Level world, BlockPos pos)"), migrated)
+        assertFalse(migrated.contains("int fortune"), migrated)
+        assertTrue(fortuneAware.contains("int fortune"), fortuneAware)
+        assertTrue(fortuneAware.contains("fortune > 0"), fortuneAware)
+    }
+
+    @Test
+    fun `legacy shearable signature migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DocumentedShearableSurface.java").writeText("""
+            package com.example;
+
+            import java.util.Collections;
+            import java.util.List;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+
+            public class DocumentedShearableSurface {
+                private static final String DOC = "isShearable(ItemStack item, Level world, BlockPos pos)";
+
+                /*
+                public List<ItemStack> onSheared(Player player, ItemStack item, Level level, BlockPos pos, int fortune) {
+                    return Collections.emptyList();
+                }
+
+                public boolean isShearable(ItemStack item, Level world, BlockPos pos) {
+                    return true;
+                }
+                */
+
+                public boolean keep() {
+                    return DOC.length() > 0;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("DocumentedShearableSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("private static final String DOC = \"isShearable(ItemStack item, Level world, BlockPos pos)\";"), migrated)
+        assertTrue(migrated.contains("onSheared(Player player, ItemStack item, Level level, BlockPos pos, int fortune)"), migrated)
+        assertTrue(migrated.contains("isShearable(ItemStack item, Level world, BlockPos pos)"), migrated)
+        assertFalse(migrated.contains("isShearable(Player player, ItemStack item, Level world, BlockPos pos)"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.world.entity.player.Player;"), migrated)
+    }

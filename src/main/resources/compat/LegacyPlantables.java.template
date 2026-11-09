@@ -1,0 +1,712 @@
+/*
+ * Copyright (c) Forge Development LLC and contributors
+ * SPDX-License-Identifier: LGPL-2.1-only
+ */
+
+package @PACKAGE@;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.tags.BlockTags;
+import net.minecraft.tags.FluidTags;
+import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.block.AttachedStemBlock;
+import net.minecraft.world.level.block.AzaleaBlock;
+import net.minecraft.world.level.block.BambooStalkBlock;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.BushBlock;
+import net.minecraft.world.level.block.CactusBlock;
+import net.minecraft.world.level.block.CropBlock;
+import net.minecraft.world.level.block.DeadBushBlock;
+import net.minecraft.world.level.block.FlowerBlock;
+import net.minecraft.world.level.block.FungusBlock;
+import net.minecraft.world.level.block.GlazedTerracottaBlock;
+import net.minecraft.world.level.block.IceBlock;
+import net.minecraft.world.level.block.MangrovePropaguleBlock;
+import net.minecraft.world.level.block.MushroomBlock;
+import net.minecraft.world.level.block.NetherSproutsBlock;
+import net.minecraft.world.level.block.NetherWartBlock;
+import net.minecraft.world.level.block.PitcherCropBlock;
+import net.minecraft.world.level.block.PumpkinBlock;
+import net.minecraft.world.level.block.RootsBlock;
+import net.minecraft.world.level.block.SaplingBlock;
+import net.minecraft.world.level.block.SeaPickleBlock;
+import net.minecraft.world.level.block.SeagrassBlock;
+import net.minecraft.world.level.block.SmallDripleafBlock;
+import net.minecraft.world.level.block.StemBlock;
+import net.minecraft.world.level.block.SugarCaneBlock;
+import net.minecraft.world.level.block.TallSeagrassBlock;
+import net.minecraft.world.level.block.WaterlilyBlock;
+import net.minecraft.world.level.block.WitherRoseBlock;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.material.Fluids;
+import net.neoforged.neoforge.common.util.TriState;
+
+/**
+ * Shared Forge 1.20.1 plant compatibility runtime for converted NeoForge 1.21.1 mods.
+ *
+ * Every converted mod embeds this same group/artifact/version through Jar-in-Jar. The artifact
+ * version contains the canonical source hash and its build verifies the complete canonical JAR
+ * hash. A different runtime under the same coordinate is a build failure.
+ */
+public final class LegacyPlantables {
+    public static final String RUNTIME_SOURCE_SHA256 = "@RUNTIME_SOURCE_SHA256@";
+
+    private static final Map<Object, Registration<LegacyPlantableAdapter<Object>>> EXACT_PLANTS =
+        java.util.Collections.synchronizedMap(new IdentityHashMap<>());
+    private static final Map<Class<?>, Registration<LegacyPlantableAdapter<Object>>> PLANT_CLASSES =
+        new ConcurrentHashMap<>();
+    private static final Map<Object, Registration<LegacySoilAdapter<Object>>> EXACT_SOILS =
+        java.util.Collections.synchronizedMap(new IdentityHashMap<>());
+    private static final Map<Class<?>, Registration<LegacySoilAdapter<Object>>> SOIL_CLASSES =
+        new ConcurrentHashMap<>();
+    private static final Map<Object, Registration<LegacyPlantPlacementAdapter<Object>>> EXACT_PLACEMENTS =
+        java.util.Collections.synchronizedMap(new IdentityHashMap<>());
+    private static final Map<Class<?>, Registration<LegacyPlantPlacementAdapter<Object>>> PLACEMENT_CLASSES =
+        new ConcurrentHashMap<>();
+    private static final Set<Object> VERIFIED_VANILLA_PLANTS = verifiedVanillaPlants();
+
+    private LegacyPlantables() {
+    }
+
+    public static void requireRuntime(String sourceSha256) {
+        if (!RUNTIME_SOURCE_SHA256.equals(sourceSha256)) {
+            throw new LinkageError(
+                "Conflicting ModPorter legacy plant runtimes: expected source=" + sourceSha256
+                    + " but loaded source=" + RUNTIME_SOURCE_SHA256
+            );
+        }
+    }
+
+    public static <T> void registerPlantClass(
+        String owner,
+        Class<T> type,
+        LegacyPlantableAdapter<? super T> adapter
+    ) {
+        putUnique(
+            PLANT_CLASSES,
+            type,
+            new Registration<>(owner, castPlantAdapter(adapter)),
+            "plant class"
+        );
+    }
+
+    public static <T> void registerExactPlant(
+        String owner,
+        T value,
+        LegacyPlantableAdapter<? super T> adapter
+    ) {
+        putUniqueIdentity(
+            EXACT_PLANTS,
+            value,
+            new Registration<>(owner, castPlantAdapter(adapter)),
+            "exact plant"
+        );
+    }
+
+    public static <T> void registerSoilClass(
+        String owner,
+        Class<T> type,
+        LegacySoilAdapter<? super T> adapter
+    ) {
+        putUnique(
+            SOIL_CLASSES,
+            type,
+            new Registration<>(owner, castSoilAdapter(adapter)),
+            "soil class"
+        );
+    }
+
+    public static <T> void registerExactSoil(
+        String owner,
+        T value,
+        LegacySoilAdapter<? super T> adapter
+    ) {
+        putUniqueIdentity(
+            EXACT_SOILS,
+            value,
+            new Registration<>(owner, castSoilAdapter(adapter)),
+            "exact soil"
+        );
+    }
+
+    public static <T> void registerPlacementClass(
+        String owner,
+        Class<T> type,
+        LegacyPlantPlacementAdapter<? super T> adapter
+    ) {
+        putUnique(
+            PLACEMENT_CLASSES,
+            type,
+            new Registration<>(owner, castPlacementAdapter(adapter)),
+            "plant placement class"
+        );
+    }
+
+    public static <T> void registerExactPlacement(
+        String owner,
+        T value,
+        LegacyPlantPlacementAdapter<? super T> adapter
+    ) {
+        putUniqueIdentity(
+            EXACT_PLACEMENTS,
+            value,
+            new Registration<>(owner, castPlacementAdapter(adapter)),
+            "exact plant placement"
+        );
+    }
+
+    public static boolean isPlantable(Object value) {
+        if (value == null) return false;
+        if (value instanceof IPlantable) return true;
+        if (resolveAdapter(value, EXACT_PLANTS, PLANT_CLASSES, "plant") != null) return true;
+        return isVerifiedVanillaPlant(value);
+    }
+
+    /**
+     * Keeps the old cast's runtime check while returning the original object rather than a wrapper.
+     */
+    public static Object requirePlantable(Object value) {
+        if (value == null) return null;
+        if (!isPlantable(value)) {
+            throw new ClassCastException(
+                value.getClass().getName()
+                    + " is not registered in the shared legacy IPlantable compatibility domain"
+            );
+        }
+        return value;
+    }
+
+    public static BlockState getPlant(Object plantable, BlockGetter level, BlockPos pos) {
+        requirePlantable(plantable);
+        if (plantable == null) throw new NullPointerException();
+        if (plantable instanceof IPlantable sourcePlantable) {
+            return sourcePlantable.getPlant(level, pos);
+        }
+        LegacyPlantableAdapter<Object> adapter =
+            resolveAdapter(plantable, EXACT_PLANTS, PLANT_CLASSES, "plant");
+        if (adapter != null) {
+            return Objects.requireNonNull(adapter.getPlant(plantable, level, pos));
+        }
+        return defaultPlant(plantable, level, pos);
+    }
+
+    /**
+     * Bodies verified from the mapped Forge 1.20.1 jar:
+     * Bush/Bamboo/StemGrown use current-if-same; Cactus/SugarCane return default state.
+     */
+    public static BlockState defaultPlant(Object plantable, BlockGetter level, BlockPos pos) {
+        if (plantable instanceof CactusBlock || plantable instanceof SugarCaneBlock) {
+            return ((Block) plantable).defaultBlockState();
+        }
+        if (plantable instanceof BushBlock
+            || plantable instanceof BambooStalkBlock
+            || plantable instanceof PumpkinBlock
+            || plantable == Blocks.MELON
+        ) {
+            Block block = (Block) plantable;
+            BlockState current = level.getBlockState(pos);
+            return current.getBlock() == block ? current : block.defaultBlockState();
+        }
+        throw unsupportedExternalPlant(plantable, "getPlant");
+    }
+
+    public static PlantType getPlantType(Object plantable, BlockGetter level, BlockPos pos) {
+        requirePlantable(plantable);
+        if (plantable == null) throw new NullPointerException();
+        if (plantable instanceof IPlantable sourcePlantable) {
+            return sourcePlantable.getPlantType(level, pos);
+        }
+        LegacyPlantableAdapter<Object> adapter =
+            resolveAdapter(plantable, EXACT_PLANTS, PLANT_CLASSES, "plant");
+        if (adapter != null) {
+            return Objects.requireNonNull(adapter.getPlantType(plantable, level, pos));
+        }
+        return defaultPlantType(plantable, level, pos);
+    }
+
+    /**
+     * Forge 1.20.1 IPlantable#getPlantType plus the Cactus/SugarCane overrides.
+     */
+    public static PlantType defaultPlantType(Object plantable, BlockGetter level, BlockPos pos) {
+        if (plantable instanceof CactusBlock) return PlantType.DESERT;
+        if (plantable instanceof SugarCaneBlock) return PlantType.BEACH;
+        if (plantable instanceof CropBlock || plantable == Blocks.PITCHER_CROP) {
+            return PlantType.CROP;
+        }
+        if (plantable instanceof SaplingBlock) return PlantType.PLAINS;
+        if (plantable instanceof FlowerBlock) return PlantType.PLAINS;
+        if (plantable == Blocks.DEAD_BUSH) return PlantType.DESERT;
+        if (plantable == Blocks.LILY_PAD) return PlantType.WATER;
+        if (plantable == Blocks.RED_MUSHROOM) return PlantType.CAVE;
+        if (plantable == Blocks.BROWN_MUSHROOM) return PlantType.CAVE;
+        if (plantable == Blocks.NETHER_WART) return PlantType.NETHER;
+        if (plantable == Blocks.TALL_GRASS) return PlantType.PLAINS;
+        return PlantType.PLAINS;
+    }
+
+    public static boolean canSustainPlant(
+        BlockState soil,
+        BlockGetter level,
+        BlockPos soilPosition,
+        Direction facing,
+        Object plantable
+    ) {
+        return canSustainPlant(
+            soil.getBlock(),
+            soil,
+            level,
+            soilPosition,
+            facing,
+            plantable
+        );
+    }
+
+    public static boolean canSustainPlant(
+        Block soilBlock,
+        BlockState soil,
+        BlockGetter level,
+        BlockPos soilPosition,
+        Direction facing,
+        Object plantable
+    ) {
+        requirePlantable(plantable);
+        if (soilBlock instanceof LegacyPlantSustainer sourceSoil) {
+            return sourceSoil.modporter$legacyCanSustainPlant(
+                soil,
+                level,
+                soilPosition,
+                facing,
+                plantable
+            );
+        }
+        LegacySoilAdapter<Object> adapter =
+            resolveAdapter(soilBlock, EXACT_SOILS, SOIL_CLASSES, "soil");
+        if (adapter != null) {
+            return adapter.canSustainPlant(
+                soilBlock,
+                soil,
+                level,
+                soilPosition,
+                facing,
+                plantable
+            );
+        }
+        return canSustainPlantAfterSource(
+            soilBlock,
+            soil,
+            level,
+            soilPosition,
+            facing,
+            plantable
+        );
+    }
+
+    /**
+     * Continuation used by a transformed source override's exact old super.canSustainPlant call.
+     */
+    public static boolean canSustainPlantAfterSource(
+        Block soilBlock,
+        BlockState soil,
+        BlockGetter level,
+        BlockPos soilPosition,
+        Direction facing,
+        Object plantable
+    ) {
+        BlockPos plantPosition = soilPosition.relative(facing);
+        BlockState plant = getPlant(plantable, level, plantPosition);
+        PlantType type = getPlantType(plantable, level, plantPosition);
+
+        TriState nativeDecision =
+            soil.canSustainPlant(level, soilPosition, facing, plant);
+        if (!nativeDecision.isDefault()) {
+            return nativeDecision.isTrue();
+        }
+
+        return defaultCanSustainPlant(
+            soilBlock,
+            soil,
+            level,
+            soilPosition,
+            facing,
+            plantable,
+            plantPosition,
+            plant,
+            type
+        );
+    }
+
+    /**
+     * Forge 1.20.1 Block.canSustainPlant, with plant and type computed once by the caller.
+     */
+    public static boolean defaultCanSustainPlant(
+        Block soilBlock,
+        BlockState soil,
+        BlockGetter level,
+        BlockPos soilPosition,
+        Direction facing,
+        Object plantable,
+        BlockPos plantPosition,
+        BlockState plant,
+        PlantType type
+    ) {
+        if (plant.getBlock() == Blocks.CACTUS) {
+            return soil.is(Blocks.CACTUS) || soil.is(BlockTags.SAND);
+        }
+        if (plant.getBlock() == Blocks.SUGAR_CANE && soilBlock == Blocks.SUGAR_CANE) {
+            return true;
+        }
+        if (plantable instanceof BushBlock
+            && oldMayPlaceOn(plantable, soil, level, soilPosition)
+        ) {
+            return true;
+        }
+        if (PlantType.DESERT.equals(type)) {
+            return soil.is(BlockTags.SAND)
+                || soilBlock == Blocks.TERRACOTTA
+                || soilBlock instanceof GlazedTerracottaBlock;
+        }
+        if (PlantType.NETHER.equals(type)) {
+            return soilBlock == Blocks.SOUL_SAND;
+        }
+        if (PlantType.CROP.equals(type)) {
+            return soil.is(Blocks.FARMLAND);
+        }
+        if (PlantType.CAVE.equals(type)) {
+            return soil.isFaceSturdy(level, soilPosition, Direction.UP);
+        }
+        if (PlantType.PLAINS.equals(type)) {
+            return soil.is(BlockTags.DIRT) || soilBlock == Blocks.FARMLAND;
+        }
+        if (PlantType.WATER.equals(type)) {
+            return (soil.is(Blocks.WATER) || soilBlock instanceof IceBlock)
+                && level.getFluidState(plantPosition).isEmpty();
+        }
+        if (PlantType.BEACH.equals(type)) {
+            boolean sand = soil.is(BlockTags.DIRT) || soil.is(BlockTags.SAND);
+            boolean water = false;
+            for (Direction direction : Direction.Plane.HORIZONTAL) {
+                BlockPos adjacentPosition = soilPosition.relative(direction);
+                BlockState adjacent = level.getBlockState(adjacentPosition);
+                water = water
+                    || adjacent.is(Blocks.FROSTED_ICE)
+                    || level.getFluidState(adjacentPosition).is(FluidTags.WATER);
+                if (water) break;
+            }
+            return sand && water;
+        }
+        return false;
+    }
+
+    public static boolean oldMayPlaceOn(
+        Object plantable,
+        BlockState soil,
+        BlockGetter level,
+        BlockPos soilPosition
+    ) {
+        if (plantable instanceof LegacyPlantPlacement sourcePlacement) {
+            return sourcePlacement.modporter$legacyMayPlaceOn(soil, level, soilPosition);
+        }
+        LegacyPlantPlacementAdapter<Object> adapter =
+            resolveAdapter(
+                plantable,
+                EXACT_PLACEMENTS,
+                PLACEMENT_CLASSES,
+                "plant placement"
+            );
+        if (adapter != null) {
+            return adapter.mayPlaceOn(plantable, soil, level, soilPosition);
+        }
+        Class<?> declaringClass = nearestMayPlaceOnDeclarer(plantable.getClass());
+        if (declaringClass == null) {
+            throw unsupportedExternalPlant(plantable, "mayPlaceOn");
+        }
+        return oldMayPlaceOnFrom(
+            declaringClass,
+            plantable,
+            soil,
+            level,
+            soilPosition
+        );
+    }
+
+    /**
+     * Exact non-virtual old-super dispatcher used by cloned source mayPlaceOn compatibility bodies.
+     */
+    public static boolean oldMayPlaceOnFrom(
+        Class<?> oldDeclaringClass,
+        Object plantable,
+        BlockState soil,
+        BlockGetter level,
+        BlockPos soilPosition
+    ) {
+        if (!oldDeclaringClass.isInstance(plantable)) {
+            throw new LinkageError(
+                plantable.getClass().getName() + " is not an instance of "
+                    + oldDeclaringClass.getName()
+            );
+        }
+
+        if (oldDeclaringClass == AttachedStemBlock.class
+            || oldDeclaringClass == CropBlock.class
+            || oldDeclaringClass == PitcherCropBlock.class
+            || oldDeclaringClass == StemBlock.class
+        ) {
+            return soil.is(Blocks.FARMLAND);
+        }
+        if (oldDeclaringClass == AzaleaBlock.class) {
+            return soil.is(Blocks.CLAY) || oldBushMayPlaceOn(soil);
+        }
+        if (oldDeclaringClass == BushBlock.class) {
+            return oldBushMayPlaceOn(soil);
+        }
+        if (oldDeclaringClass == DeadBushBlock.class) {
+            return soil.is(BlockTags.DEAD_BUSH_MAY_PLACE_ON);
+        }
+        if (oldDeclaringClass == FungusBlock.class) {
+            return soil.is(BlockTags.NYLIUM)
+                || soil.is(Blocks.MYCELIUM)
+                || soil.is(Blocks.SOUL_SOIL)
+                || oldBushMayPlaceOn(soil);
+        }
+        if (oldDeclaringClass == MangrovePropaguleBlock.class) {
+            return oldBushMayPlaceOn(soil) || soil.is(Blocks.CLAY);
+        }
+        if (oldDeclaringClass == MushroomBlock.class) {
+            return soil.isSolidRender(level, soilPosition);
+        }
+        if (oldDeclaringClass == NetherSproutsBlock.class
+            || oldDeclaringClass == RootsBlock.class
+        ) {
+            return soil.is(BlockTags.NYLIUM)
+                || soil.is(Blocks.SOUL_SOIL)
+                || oldBushMayPlaceOn(soil);
+        }
+        if (oldDeclaringClass == NetherWartBlock.class) {
+            return soil.is(Blocks.SOUL_SAND);
+        }
+        if (oldDeclaringClass == SeaPickleBlock.class) {
+            return !soil.getCollisionShape(level, soilPosition)
+                    .getFaceShape(Direction.UP)
+                    .isEmpty()
+                || soil.isFaceSturdy(level, soilPosition, Direction.UP);
+        }
+        if (oldDeclaringClass == SeagrassBlock.class
+            || oldDeclaringClass == TallSeagrassBlock.class
+        ) {
+            return soil.isFaceSturdy(level, soilPosition, Direction.UP)
+                && !soil.is(Blocks.MAGMA_BLOCK);
+        }
+        if (oldDeclaringClass == SmallDripleafBlock.class) {
+            return soil.is(BlockTags.SMALL_DRIPLEAF_PLACEABLE)
+                || level.getFluidState(soilPosition.above()).isSourceOfType(Fluids.WATER)
+                    && oldBushMayPlaceOn(soil);
+        }
+        if (oldDeclaringClass == WaterlilyBlock.class) {
+            return (level.getFluidState(soilPosition).getType() == Fluids.WATER
+                    || soil.getBlock() instanceof IceBlock)
+                && level.getFluidState(soilPosition.above()).getType() == Fluids.EMPTY;
+        }
+        if (oldDeclaringClass == WitherRoseBlock.class) {
+            return oldBushMayPlaceOn(soil)
+                || soil.is(Blocks.NETHERRACK)
+                || soil.is(Blocks.SOUL_SAND)
+                || soil.is(Blocks.SOUL_SOIL);
+        }
+        throw new UnsupportedOperationException(
+            "No verified Forge 1.20.1 mayPlaceOn body for "
+                + oldDeclaringClass.getName()
+                + "; register a shared LegacyPlantPlacementAdapter"
+        );
+    }
+
+    private static boolean oldBushMayPlaceOn(BlockState soil) {
+        return soil.is(BlockTags.DIRT) || soil.is(Blocks.FARMLAND);
+    }
+
+    private static Class<?> nearestMayPlaceOnDeclarer(Class<?> runtimeClass) {
+        Class<?> current = runtimeClass;
+        while (current != null && BushBlock.class.isAssignableFrom(current)) {
+            try {
+                Method ignored = current.getDeclaredMethod(
+                    "mayPlaceOn",
+                    BlockState.class,
+                    BlockGetter.class,
+                    BlockPos.class
+                );
+                return current;
+            } catch (NoSuchMethodException absent) {
+                current = current.getSuperclass();
+            }
+        }
+        return null;
+    }
+
+    private static boolean isVerifiedVanillaPlant(Object value) {
+        return VERIFIED_VANILLA_PLANTS.contains(value);
+    }
+
+    /**
+     * Old vanilla membership is identity based. A modded subclass of a vanilla plant base may
+     * carry custom old getters and must implement the canonical ABI or register an adapter.
+     */
+    private static Set<Object> verifiedVanillaPlants() {
+        Set<Object> result = Collections.newSetFromMap(new IdentityHashMap<>());
+        try {
+            for (Field field : Blocks.class.getFields()) {
+                if (!Modifier.isStatic(field.getModifiers())
+                    || !Block.class.isAssignableFrom(field.getType())
+                ) {
+                    continue;
+                }
+                Object value = field.get(null);
+                if (value instanceof BushBlock
+                    || value instanceof BambooStalkBlock
+                    || value instanceof CactusBlock
+                    || value instanceof SugarCaneBlock
+                    || value instanceof PumpkinBlock
+                ) {
+                    result.add(value);
+                }
+            }
+        } catch (IllegalAccessException failure) {
+            throw new ExceptionInInitializerError(failure);
+        }
+        result.add(Blocks.MELON);
+        return Collections.unmodifiableSet(result);
+    }
+
+    private static UnsupportedOperationException unsupportedExternalPlant(
+        Object plantable,
+        String operation
+    ) {
+        return new UnsupportedOperationException(
+            "No shared legacy plant adapter for "
+                + plantable.getClass().getName()
+                + " during "
+                + operation
+        );
+    }
+
+    private static <A> A resolveAdapter(
+        Object value,
+        Map<Object, Registration<A>> exact,
+        Map<Class<?>, Registration<A>> classes,
+        String kind
+    ) {
+        Registration<A> exactRegistration;
+        synchronized (exact) {
+            exactRegistration = exact.get(value);
+        }
+        if (exactRegistration != null) return exactRegistration.adapter;
+
+        Registration<A> direct = classes.get(value.getClass());
+        if (direct != null) return direct.adapter;
+
+        List<Map.Entry<Class<?>, Registration<A>>> candidates = new ArrayList<>();
+        for (Map.Entry<Class<?>, Registration<A>> entry : classes.entrySet()) {
+            if (entry.getKey().isInstance(value)) candidates.add(entry);
+        }
+        List<Map.Entry<Class<?>, Registration<A>>> mostSpecific = candidates.stream()
+            .filter(candidate ->
+                candidates.stream().noneMatch(other ->
+                    candidate != other
+                        && candidate.getKey().isAssignableFrom(other.getKey())
+                )
+            )
+            .toList();
+        if (mostSpecific.isEmpty()) return null;
+        if (mostSpecific.size() == 1) return mostSpecific.get(0).getValue().adapter;
+        throw new IllegalStateException(
+            "Ambiguous shared " + kind + " adapters for " + value.getClass().getName()
+                + ": " + mostSpecific.stream()
+                    .map(entry -> entry.getKey().getName() + " from " + entry.getValue().owner)
+                    .sorted()
+                    .toList()
+        );
+    }
+
+    private static <K, A> void putUnique(
+        Map<K, Registration<A>> registrations,
+        K key,
+        Registration<A> incoming,
+        String kind
+    ) {
+        registrations.compute(key, (ignored, existing) -> {
+            if (existing == null) return incoming;
+            if (existing.sameRegistration(incoming)) return existing;
+            throw new IllegalStateException(
+                "Conflicting shared " + kind + " registration for " + key
+                    + ": " + existing.owner + " versus " + incoming.owner
+            );
+        });
+    }
+
+    private static <K, A> void putUniqueIdentity(
+        Map<K, Registration<A>> registrations,
+        K key,
+        Registration<A> incoming,
+        String kind
+    ) {
+        synchronized (registrations) {
+            Registration<A> existing = registrations.get(key);
+            if (existing == null) {
+                registrations.put(key, incoming);
+            } else if (!existing.sameRegistration(incoming)) {
+                throw new IllegalStateException(
+                    "Conflicting shared " + kind + " registration for "
+                        + key.getClass().getName()
+                        + ": " + existing.owner + " versus " + incoming.owner
+                );
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> LegacyPlantableAdapter<Object> castPlantAdapter(
+        LegacyPlantableAdapter<? super T> adapter
+    ) {
+        return (LegacyPlantableAdapter<Object>) adapter;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> LegacySoilAdapter<Object> castSoilAdapter(
+        LegacySoilAdapter<? super T> adapter
+    ) {
+        return (LegacySoilAdapter<Object>) adapter;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> LegacyPlantPlacementAdapter<Object> castPlacementAdapter(
+        LegacyPlantPlacementAdapter<? super T> adapter
+    ) {
+        return (LegacyPlantPlacementAdapter<Object>) adapter;
+    }
+
+    private static final class Registration<A> {
+        private final String owner;
+        private final A adapter;
+
+        private Registration(String owner, A adapter) {
+            this.owner = Objects.requireNonNull(owner);
+            this.adapter = Objects.requireNonNull(adapter);
+        }
+
+        private boolean sameRegistration(Registration<A> other) {
+            return this.owner.equals(other.owner)
+                && this.adapter == other.adapter;
+        }
+    }
+}

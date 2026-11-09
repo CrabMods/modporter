@@ -1,0 +1,77 @@
+package @PACKAGE@;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.Optional;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.CubeMap;
+import net.minecraft.client.renderer.PanoramaRenderer;
+
+/** Preserves the old cube-map operation. Its callers continue to draw their own overlays. */
+public final class LegacyPanoramaRenderer {
+    private static final Field CLIENT = field("minecraft", Minecraft.class);
+    private static final Field CUBE = field("cubeMap", CubeMap.class);
+    private static final Field SPIN = field("spin", float.class);
+    private static final Field BOB = field("bob", float.class);
+    private static final ClassValue<Optional<Method>> OVERRIDES = new ClassValue<>() {
+        @Override protected Optional<Method> computeValue(Class<?> type) {
+            try {
+                Method method = type.getMethod("render", float.class, float.class);
+                method.setAccessible(true);
+                return Optional.of(method);
+            } catch (NoSuchMethodException absent) {
+                return Optional.empty();
+            }
+        }
+    };
+    private LegacyPanoramaRenderer() {}
+
+    private static Field field(String name, Class<?> type) {
+        try {
+            Field field = PanoramaRenderer.class.getDeclaredField(name);
+            if (field.getType() != type) throw new IllegalStateException("Unexpected panorama field type: " + name);
+            field.setAccessible(true);
+            return field;
+        } catch (ReflectiveOperationException failure) {
+            throw new ExceptionInInitializerError(failure);
+        }
+    }
+
+    public static void render(PanoramaRenderer renderer, float partialTick, float fade) {
+        java.util.Objects.requireNonNull(renderer);
+        Optional<Method> override = OVERRIDES.get(renderer.getClass());
+        if (override.isPresent()) {
+            try {
+                override.get().invoke(renderer, partialTick, fade);
+                return;
+            } catch (InvocationTargetException failure) {
+                Throwable cause = failure.getCause();
+                if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+                if (cause instanceof Error) throw (Error) cause;
+                throw new IllegalStateException(cause);
+            } catch (ReflectiveOperationException failure) {
+                throw new IllegalStateException(failure);
+            }
+        }
+        renderBase(renderer, partialTick, fade);
+    }
+
+    public static void renderBase(PanoramaRenderer renderer, float partialTick, float fade) {
+        try {
+            Minecraft client = (Minecraft) CLIENT.get(renderer);
+            float step = (float) ((double) partialTick * client.options.panoramaSpeed().get());
+            float spin = wrap(SPIN.getFloat(renderer) + step * 0.1F, 360.0F);
+            float bob = wrap(BOB.getFloat(renderer) + step * 0.001F, 6.2831855F);
+            SPIN.setFloat(renderer, spin);
+            BOB.setFloat(renderer, bob);
+            ((CubeMap) CUBE.get(renderer)).render(client, 10.0F, -spin, fade);
+        } catch (ReflectiveOperationException failure) {
+            throw new IllegalStateException(failure);
+        }
+    }
+
+    private static float wrap(float value, float maximum) {
+        return value > maximum ? value - maximum : value;
+    }
+}

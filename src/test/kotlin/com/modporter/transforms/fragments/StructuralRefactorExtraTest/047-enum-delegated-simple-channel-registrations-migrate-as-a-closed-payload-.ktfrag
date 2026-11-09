@@ -1,0 +1,1185 @@
+
+
+    @Test
+    fun `enum delegated simple channel registrations migrate as a closed payload graph`() {
+        val projectDir = tempDir.resolve("enum-delegated-simple-channel")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("SimplePacketBase.java").writeText("""
+            package com.example;
+            import net.neoforged.neoforge.network.NetworkEvent.Context;
+            public abstract class SimplePacketBase {
+                public abstract void write(net.minecraft.network.FriendlyByteBuf buffer);
+                public abstract boolean handle(Context context);
+            }
+        """.trimIndent())
+        srcDir.resolve("PingPacket.java").writeText("""
+            package com.example;
+            import net.minecraft.network.FriendlyByteBuf;
+            public class PingPacket extends ConfigPacketBase {
+                public PingPacket(FriendlyByteBuf buffer) { super(buffer); }
+            }
+        """.trimIndent())
+        srcDir.resolve("ConfigPacketBase.java").writeText("""
+            package com.example;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.neoforged.neoforge.network.NetworkEvent.Context;
+            public abstract class ConfigPacketBase extends SimplePacketBase {
+                protected ConfigPacketBase(FriendlyByteBuf buffer) {}
+                public void write(FriendlyByteBuf buffer) {}
+                public boolean handle(Context context) {
+                    context.enqueueWork(() -> ((net.minecraft.server.level.ServerPlayer) context.getSender()).getId());
+                    return true;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ContainerPacket.java").writeText("""
+            package com.example;
+            import net.minecraft.network.FriendlyByteBuf;
+            public class ContainerPacket {
+                public static class Request extends ConfigPacketBase {
+                    public Request(FriendlyByteBuf buffer) { super(buffer); }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Actions.java").writeText("""
+            package com.example;
+            public class Actions {
+                public static void install() {}
+            }
+        """.trimIndent())
+        srcDir.resolve("AllPackets.java").writeText("""
+            package com.example;
+
+            import static net.neoforged.neoforge.network.NetworkDirection.PLAY_TO_SERVER;
+            import java.util.function.BiConsumer;
+            import java.util.function.Function;
+            import java.util.function.Supplier;
+            import com.example.ContainerPacket.Request;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.Level;
+            import net.neoforged.neoforge.network.NetworkDirection;
+            import net.neoforged.neoforge.network.NetworkEvent.Context;
+            import net.neoforged.neoforge.network.PacketDistributor;
+            import net.neoforged.neoforge.network.PacketDistributor.TargetPoint;
+            import net.neoforged.neoforge.network.simple.SimpleChannel;
+            import net.neoforged.neoforge.network.NetworkRegistry;
+
+            public enum AllPackets {
+                PING(PingPacket.class, PingPacket::new, PLAY_TO_SERVER),
+                REQUEST(Request.class, Request::new, PLAY_TO_SERVER);
+
+                static {
+                    Actions.install();
+                }
+
+                public static final ResourceLocation CHANNEL_NAME = ResourceLocation.fromNamespaceAndPath("example", "main");
+                private static SimpleChannel channel;
+                private PacketType<?> packetType;
+
+                <T extends SimplePacketBase> AllPackets(Class<T> type, Function<FriendlyByteBuf, T> factory, NetworkDirection direction) {
+                    packetType = new PacketType<>(type, factory, direction);
+                }
+
+                public static void registerPackets() {
+                    channel = NetworkRegistry.ChannelBuilder.named(CHANNEL_NAME).simpleChannel();
+                    for (AllPackets packet : values()) packet.packetType.register();
+                }
+
+                public static SimpleChannel getChannel() { return channel; }
+
+                public static void sendToNear(Level world, BlockPos pos, int range, Object message) {
+                    getChannel().send(PacketDistributor.NEAR.with(TargetPoint.p(pos.getX(), pos.getY(), pos.getZ(), range, world.dimension())), message);
+                }
+
+                private static class PacketType<T extends SimplePacketBase> {
+                    private BiConsumer<T, FriendlyByteBuf> encoder;
+                    private Function<FriendlyByteBuf, T> decoder;
+                    private BiConsumer<T, Supplier<Context>> handler;
+                    private Class<T> type;
+                    private NetworkDirection direction;
+                    private PacketType(Class<T> type, Function<FriendlyByteBuf, T> factory, NetworkDirection direction) {
+                        encoder = T::write;
+                        decoder = factory;
+                        handler = (packet, supplier) -> packet.handle(supplier.get());
+                        this.type = type;
+                        this.direction = direction;
+                    }
+                    private void register() {
+                        channel.messageBuilder(type, 0, direction).encoder(encoder).decoder(decoder).consumerNetworkThread(handler).add();
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Caller.java").writeText("""
+            package com.example;
+
+            import net.minecraft.server.level.ServerPlayer;
+            import net.neoforged.neoforge.network.PacketDistributor;
+
+            public class Caller {
+                void send(PingPacket packet, ServerPlayer player) {
+                    AllPackets.getChannel()
+                        .sendToServer(packet);
+                    AllPackets.getChannel()
+                        .send(PacketDistributor.PLAYER.with(() -> (ServerPlayer)
+                            player), packet);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ClientCaller.java").writeText("""
+            package com.example;
+
+            public class ClientCaller {
+                void send(PingPacket packet) {
+                    AllPackets.getChannel()
+                        .sendToServer(packet);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+            @Mod("example")
+            public class ExampleMod {
+                public ExampleMod(IEventBus modEventBus) {
+                    AllPackets.registerPackets();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val packet = srcDir.resolve("PingPacket.java").readText()
+        val base = srcDir.resolve("SimplePacketBase.java").readText()
+        val configBase = srcDir.resolve("ConfigPacketBase.java").readText()
+        val container = srcDir.resolve("ContainerPacket.java").readText()
+        val registry = srcDir.resolve("AllPackets.java").readText()
+        val caller = srcDir.resolve("Caller.java").readText()
+        val clientCaller = srcDir.resolve("ClientCaller.java").readText()
+        val main = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-packet-table-payloads" })
+        assertTrue(base.contains("implements CustomPacketPayload"), base)
+        assertTrue(packet.contains("CustomPacketPayload.Type<PingPacket> TYPE"), packet)
+        assertTrue(packet.contains("StreamCodec<RegistryFriendlyByteBuf, PingPacket> STREAM_CODEC"), packet)
+        assertTrue(base.contains("handle(IPayloadContext context)"), base)
+        assertTrue(configBase.contains("boolean handle(IPayloadContext context)"), configBase)
+        assertTrue(configBase.contains("context.player()"), configBase)
+        assertFalse(configBase.contains("getSender()"), configBase)
+        assertTrue(container.contains("class Request extends ConfigPacketBase"), container)
+        assertTrue(container.contains("CustomPacketPayload.Type<Request> TYPE"), container)
+        assertTrue(container.contains("StreamCodec<RegistryFriendlyByteBuf, Request> STREAM_CODEC"), container)
+        assertTrue(registry.contains("PING(PingPacket.TYPE, PingPacket.STREAM_CODEC, PacketFlow.SERVERBOUND)"), registry)
+        assertTrue(registry.contains("REQUEST(Request.TYPE, Request.STREAM_CODEC, PacketFlow.SERVERBOUND)"), registry)
+        assertTrue(registry.contains("registrar.playToServer(type, codec, (packet, context) -> packet.handle(context));"), registry)
+        assertTrue(registry.contains("Actions.install();"), registry)
+        assertTrue(registry.contains("void sendToNear(Level world, BlockPos pos, int range"), registry)
+        assertTrue(registry.contains("PacketDistributor.sendToPlayersNear((ServerLevel) world"), registry)
+        assertFalse(registry.contains("SimpleChannel"), registry)
+        assertTrue(caller.contains("PacketDistributor.sendToServer(packet)"), caller)
+        assertTrue(
+            Regex("""PacketDistributor\s*\.sendToPlayer\s*\(\s*\(ServerPlayer\)""").containsMatchIn(caller),
+            caller
+        )
+        assertFalse(caller.contains("AllPackets.getChannel()"), caller)
+        assertTrue(clientCaller.contains("import net.neoforged.neoforge.network.PacketDistributor;"), clientCaller)
+        assertTrue(clientCaller.contains("PacketDistributor.sendToServer(packet)"), clientCaller)
+        assertTrue(main.contains("modEventBus.addListener(AllPackets::registerPackets);"), main)
+    }
+
+
+    @Test
+    fun `third party record components migrate only with exact imported type evidence`() {
+        val projectDir = createFile("ExternalRecordSurface.java", """
+            package com.example;
+
+            import com.dtteam.dynamictrees.block.branch.TrunkShellBlock;
+
+            public class ExternalRecordSurface {
+                Object[] read(TrunkShellBlock.ShellMuse muse, OtherShellMuse other) {
+                    Object pos = muse.pos;
+                    Object state = muse.state;
+                    Object unrelatedPos = other.pos;
+                    Object unrelatedState = other.state;
+                    String documentation = "muse.pos and muse.state";
+                    // muse.pos and muse.state remain documentation.
+                    return new Object[] { pos, state, unrelatedPos, unrelatedState, documentation };
+                }
+
+                static class OtherShellMuse {
+                    Object pos;
+                    Object state;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = projectDir.resolve("src/main/java/com/example/ExternalRecordSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "struct-record-component-accessors" })
+        assertTrue(migrated.contains("Object pos = muse.pos();"), migrated)
+        assertTrue(migrated.contains("Object state = muse.state();"), migrated)
+        assertTrue(migrated.contains("Object unrelatedPos = other.pos;"), migrated)
+        assertTrue(migrated.contains("Object unrelatedState = other.state;"), migrated)
+        assertTrue(migrated.contains("\"muse.pos and muse.state\""), migrated)
+        assertTrue(migrated.contains("// muse.pos and muse.state remain documentation."), migrated)
+    }
+
+
+    @Test
+    fun `forge game bus subscriber defaults without changing unrelated annotations`() {
+        val projectDir = createFile("GameBusSubscriber.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.fml.common.EventBusSubscriber.Bus;
+
+            @EventBusSubscriber(bus = Bus.FORGE)
+            public class GameBusSubscriber {
+                @SubscribeEvent
+                public static void onEvent(Object event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = projectDir.resolve("src/main/java/com/example/GameBusSubscriber.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(migrated.contains("@EventBusSubscriber\npublic class GameBusSubscriber"), migrated)
+        assertFalse(migrated.contains("bus = Bus.FORGE"), migrated)
+        assertFalse(migrated.contains("EventBusSubscriber.Bus;"), migrated)
+    }
+
+
+    @Test
+    fun `unregistered mod bus subscriber hard gates instead of changing event bus semantics`() {
+        val projectDir = createFile("UnresolvedModBusSubscriber.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.fml.common.EventBusSubscriber.Bus;
+
+            @EventBusSubscriber(bus = Bus.MOD)
+            public class UnresolvedModBusSubscriber {
+                @SubscribeEvent
+                public static void onEvent(Object event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = projectDir.resolve("src/main/java/com/example/UnresolvedModBusSubscriber.java").readText()
+
+        assertTrue(
+            result.errors.any { it.contains("without a proven explicit mod-event-bus registration") },
+            result.errors.joinToString("\n")
+        )
+        assertTrue(migrated.contains("@EventBusSubscriber(bus = Bus.MOD)"), migrated)
+        assertTrue(migrated.contains("import net.neoforged.fml.common.EventBusSubscriber.Bus;"), migrated)
+    }
+
+
+    @Test
+    fun `static FML helper receives event bus through an exact same owner call`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext;
+
+            @Mod("example")
+            public class ExampleMod {
+                public ExampleMod(ModContainer modContainer) {
+                    onCtor();
+                }
+
+                public static void onCtor() {
+                    IEventBus modEventBus = FMLJavaModLoadingContext.get().getModEventBus();
+                    RegistryHooks.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = projectDir.resolve("src/main/java/com/example/ExampleMod.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "struct-static-fml-helper-eventbus" })
+        assertTrue(result.changes.any { it.ruleId == "struct-static-fml-helper-callsite" })
+        assertTrue(migrated.contains("public ExampleMod(IEventBus modEventBus, ModContainer modContainer)"), migrated)
+        assertTrue(migrated.contains("onCtor(modEventBus);"), migrated)
+        assertTrue(migrated.contains("public static void onCtor(IEventBus modEventBus)"), migrated)
+        assertFalse(migrated.contains("IEventBus modEventBus = modEventBus"), migrated)
+        assertFalse(migrated.contains("FMLJavaModLoadingContext"), migrated)
+    }
+
+
+    @Test
+    fun `client mod bus subscribers register behind an exact dist guard`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val main = srcDir.resolve("ExampleMod.java")
+        val hooks = srcDir.resolve("ClientHooks.java")
+        main.writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        hooks.writeText("""
+            package com.example;
+
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent;
+
+            @EventBusSubscriber(value = Dist.CLIENT, bus = EventBusSubscriber.Bus.MOD)
+            public class ClientHooks {
+                @SubscribeEvent
+                public static void registerKeys(RegisterKeyMappingsEvent event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val mainText = main.readText()
+        val hooksText = hooks.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(hooksText.contains("@EventBusSubscriber"), hooksText)
+        assertFalse(hooksText.contains("@SubscribeEvent"), hooksText)
+        assertTrue(mainText.contains("public ExampleMod(IEventBus modEventBus)"), mainText)
+        assertTrue(mainText.contains("FMLLoader.getDist() == net.neoforged.api.distmarker.Dist.CLIENT"), mainText)
+        assertTrue(mainText.contains("modEventBus.addListener(com.example.ClientHooks::registerKeys);"), mainText)
+    }
+
+
+    @Test
+    fun `private nested mod bus subscribers register through an accessible owner bridge`() {
+        val mainDir = tempDir.resolve("src/main/java/dev/example")
+        val clientDir = tempDir.resolve("src/main/java/dev/example/client")
+        mainDir.createDirectories()
+        clientDir.createDirectories()
+        val main = mainDir.resolve("ExampleMod.java")
+        val hooks = clientDir.resolve("RenderHooks.java")
+        main.writeText("""
+            package dev.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        hooks.writeText("""
+            package dev.example.client;
+
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.neoforge.client.event.RegisterShadersEvent;
+
+            public class RenderHooks {
+                @EventBusSubscriber(value = Dist.CLIENT, bus = EventBusSubscriber.Bus.MOD)
+                private static class ShaderHooks {
+                    @SubscribeEvent
+                    public static void registerShaders(RegisterShadersEvent event) {
+                        ShaderState.accept(event);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val mainText = main.readText()
+        val hooksText = hooks.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(
+            mainText.contains("dev.example.client.RenderHooks.registerClientModBusListeners(modEventBus);"),
+            mainText
+        )
+        assertTrue(mainText.contains("FMLLoader.getDist() == net.neoforged.api.distmarker.Dist.CLIENT"), mainText)
+        assertTrue(
+            hooksText.contains("\n    public static void registerClientModBusListeners(net.neoforged.bus.api.IEventBus modEventBus)"),
+            hooksText
+        )
+        assertTrue(hooksText.contains("modEventBus.addListener(ShaderHooks::registerShaders);"), hooksText)
+        assertTrue(hooksText.contains("ShaderState.accept(event);"), hooksText)
+        assertFalse(hooksText.contains("public     public"), hooksText)
+        assertFalse(hooksText.contains("@EventBusSubscriber"), hooksText)
+        assertFalse(hooksText.contains("@SubscribeEvent"), hooksText)
+    }
+
+
+    @Test
+    fun `delegating entity portal overrides migrate to dimension transition exactly`() {
+        val projectDir = createFile("PortalEntity.java", """
+            package com.example;
+
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.level.portal.PortalInfo;
+
+            public class PortalEntity extends BasePortalEntity {
+                private static PortalInfo cachedTransition;
+
+                @Override
+                public PortalInfo findDimensionEntryPoint(ServerLevel destination) {
+                    return super.findDimensionEntryPoint(destination);
+                }
+
+                public PortalInfo customTransition(ServerLevel destination) {
+                    return calculateTransition(destination);
+                }
+
+                String documentation = "PortalInfo findDimensionEntryPoint";
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = projectDir.resolve("src/main/java/com/example/PortalEntity.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "struct-entity-delegating-dimension-transition" })
+        assertTrue(
+            migrated.contains("public DimensionTransition findDimensionEntryPoint(ServerLevel destination)"),
+            migrated
+        )
+        assertTrue(migrated.contains("return super.findDimensionEntryPoint(destination);"), migrated)
+        assertTrue(migrated.contains("private static PortalInfo cachedTransition;"), migrated)
+        assertTrue(migrated.contains("public PortalInfo customTransition(ServerLevel destination)"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.level.portal.DimensionTransition;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.level.portal.PortalInfo;"), migrated)
+        assertTrue(migrated.contains("\"PortalInfo findDimensionEntryPoint\""), migrated)
+    }
+
+
+    @Test
+    fun `registry key accessor migration requires exact registry receiver type`() {
+        val projectDir = createFile("RegistryAccess.java", """
+            package com.example;
+
+            import net.minecraft.core.Registry;
+            import net.neoforged.neoforge.registries.RegisterEvent;
+
+            public class RegistryAccess {
+                private final Registry<String> field;
+
+                public RegistryAccess(Registry<String> field) {
+                    this.field = field;
+                }
+
+                public <T> void collect(Registry<T> registry, RegisterEvent event) {
+                    registry.getRegistryKey();
+                    this.field.getRegistryKey();
+                    event.getRegistryKey();
+                    String documentation = "registry.getRegistryKey()";
+                }
+            }
+        """.trimIndent())
+        projectDir.resolve("src/main/java/com/example/UnrelatedRegistry.java").writeText("""
+            package com.example;
+
+            public class UnrelatedRegistry {
+                public Object getRegistryKey() {
+                    return null;
+                }
+
+                public void inspect(UnrelatedRegistry registry) {
+                    registry.getRegistryKey();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val registryAccess = projectDir.resolve("src/main/java/com/example/RegistryAccess.java").readText()
+        val unrelated = projectDir.resolve("src/main/java/com/example/UnrelatedRegistry.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "struct-registry-key-accessor" })
+        assertTrue(registryAccess.contains("registry.key();"), registryAccess)
+        assertTrue(registryAccess.contains("this.field.key();"), registryAccess)
+        assertTrue(registryAccess.contains("event.getRegistryKey();"), registryAccess)
+        assertTrue(registryAccess.contains("\"registry.getRegistryKey()\""), registryAccess)
+        assertTrue(unrelated.contains("registry.getRegistryKey();"), unrelated)
+        assertFalse(unrelated.contains("registry.key();"), unrelated)
+    }
+
+
+    @Test
+    fun `deferred holder generics use lexical bounds and exact registry contracts`() {
+        val sourceDir = tempDir.resolve("src/main/java/com/example")
+        sourceDir.createDirectories()
+        val source = sourceDir.resolve("RegistryBridge.java")
+        source.writeText(
+            """
+            package com.example;
+
+            import com.tterrag.registrate.builders.Builder;
+            import com.tterrag.registrate.util.entry.RegistryEntry;
+            import com.tterrag.registrate.util.nullness.NonNullFunction;
+            import com.tterrag.registrate.util.nullness.NonNullSupplier;
+            import net.minecraft.core.Registry;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.world.level.block.Block;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class RegistryBridge {
+                protected <R, T extends R> RegistryEntry<R, T> register(
+                    String name,
+                    ResourceKey<? extends Registry<R>> registryKey,
+                    Builder<R, T, ?, ?> builder,
+                    NonNullSupplier<? extends T> creator,
+                    NonNullFunction<DeferredHolder<T, T>, ? extends RegistryEntry<R, T>> entryFactory
+                ) {
+                    RegistryEntry<R, T> entry = forward(name, registryKey, builder, creator, entryFactory);
+                    return entry;
+                }
+
+                private <T extends Block> DeferredHolder<T, T> block(DeferredHolder<T, T> holder) {
+                    return holder;
+                }
+
+                private <T extends Object> DeferredHolder<T, T> unrelated(DeferredHolder<T, T> holder) {
+                    return holder;
+                }
+            }
+            """.trimIndent()
+        )
+
+        StructuralRefactorPass().apply(tempDir)
+
+        val migrated = source.readText()
+        assertTrue(
+            migrated.contains(
+                "NonNullFunction<DeferredHolder<T, T>, ? extends RegistryEntry<R, T>> entryFactory"
+            ),
+            migrated
+        )
+        assertTrue(
+            migrated.contains(
+                "private <T extends Block> DeferredHolder<Block, T> block(DeferredHolder<Block, T> holder)"
+            ),
+            migrated
+        )
+        assertTrue(
+            migrated.contains(
+                "private <T extends Object> DeferredHolder<T, T> unrelated(DeferredHolder<T, T> holder)"
+            ),
+            migrated
+        )
+        assertFalse(migrated.contains("NonNullFunction<DeferredHolder<Block, T>"), migrated)
+    }
+
+
+    @Test
+    fun `registry holder coupling rejects incomplete ambiguous and documentary shapes`() {
+        val sourceDir = tempDir.resolve("src/main/java/com/example")
+        sourceDir.createDirectories()
+        val source = sourceDir.resolve("RegistryBridge.java")
+        val lookalike = sourceDir.resolve("Lookalike.java")
+        val original =
+            """
+            package com.example;
+
+            import com.tterrag.registrate.util.entry.RegistryEntry;
+            import com.tterrag.registrate.util.nullness.NonNullFunction;
+            import net.minecraft.core.Registry;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.world.level.block.Block;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class RegistryBridge {
+                private static final String DOC =
+                    "NonNullFunction<DeferredHolder<T, T>, ? extends RegistryEntry<R, T>>";
+                // ResourceKey<? extends Registry<R>>
+
+                protected <R, T extends R> RegistryEntry<R, T> noKey(
+                    NonNullFunction<DeferredHolder<T, T>, ? extends RegistryEntry<R, T>> factory
+                ) {
+                    return null;
+                }
+
+                protected <R, T extends R> RegistryEntry<R, T> ambiguousKeys(
+                    ResourceKey<? extends Registry<R>> first,
+                    ResourceKey<? extends Registry<R>> second,
+                    NonNullFunction<DeferredHolder<T, T>, ? extends RegistryEntry<R, T>> factory
+                ) {
+                    return null;
+                }
+
+                protected <R, T extends R> T wrongReturn(
+                    ResourceKey<? extends Registry<R>> key,
+                    NonNullFunction<DeferredHolder<T, T>, ? extends RegistryEntry<R, T>> factory
+                ) {
+                    return null;
+                }
+
+                private <T extends Object> DeferredHolder<T, T> objectHolder(DeferredHolder<T, T> holder) {
+                    return holder;
+                }
+
+                private <T extends Block> void unrelatedBound() {
+                }
+            }
+            """.trimIndent()
+        source.writeText(original)
+        val lookalikeOriginal =
+            """
+            package com.example;
+
+            public class Lookalike {
+                static class Block {}
+                static class Registry<R> {}
+                static class ResourceKey<R> {}
+                static class RegistryEntry<R, T extends R> {}
+                static class DeferredHolder<R, T extends R> {}
+                interface NonNullFunction<T, R> {}
+
+                protected <R, T extends R> RegistryEntry<R, T> register(
+                    ResourceKey<? extends Registry<R>> key,
+                    NonNullFunction<DeferredHolder<T, T>, ? extends RegistryEntry<R, T>> factory
+                ) {
+                    return null;
+                }
+
+                private <T extends Block> DeferredHolder<T, T> customBlock(
+                    DeferredHolder<T, T> holder
+                ) {
+                    return holder;
+                }
+            }
+            """.trimIndent()
+        lookalike.writeText(lookalikeOriginal)
+
+        StructuralRefactorPass().apply(tempDir)
+
+        assertEquals(original, source.readText())
+        assertEquals(lookalikeOriginal, lookalike.readText())
+    }
+
+
+    @Test
+    fun `potion utils migration preserves evaluation collection and receiver contracts`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val exact = srcDir.resolve("ExactPotionCalls.java")
+        exact.writeText("""
+            package com.example;
+
+            import java.util.Collection;
+            import java.util.List;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.alchemy.Potion;
+            import net.minecraft.world.item.alchemy.PotionUtils;
+            import net.minecraft.world.item.alchemy.Potions;
+
+            class ExactPotionCalls {
+                private static final String DOC =
+                    "PotionUtils.setPotion(new ItemStack(Items.POTION), Potions.WATER)";
+
+                ItemStack create(Potion potion) {
+                    return PotionUtils.setPotion(new ItemStack(Items.POTION), next(potion));
+                }
+
+                ItemStack configure(ItemStack stack) {
+                    return PotionUtils.setPotion(stack, Potions.WATER);
+                }
+
+                void clear(ItemStack stack) {
+                    PotionUtils.setPotion(stack, Potions.EMPTY);
+                }
+
+                List<MobEffectInstance> custom(ItemStack stack) {
+                    List<MobEffectInstance> result = PotionUtils.getCustomEffects(stack);
+                    result.clear();
+                    return result;
+                }
+
+                List<MobEffectInstance> all(ItemStack stack) {
+                    List<MobEffectInstance> result = PotionUtils.getMobEffects(stack);
+                    result.clear();
+                    return result;
+                }
+
+                ItemStack setCustom(ItemStack stack, Collection<MobEffectInstance> effects) {
+                    return PotionUtils.setCustomEffects(stack, effects);
+                }
+
+                int conditionalColor(boolean first, ItemStack left, ItemStack right) {
+                    return PotionUtils.getColor(first ? left : right);
+                }
+
+                int castColor(Object stack) {
+                    return PotionUtils.getColor((ItemStack) stack);
+                }
+
+                int methodColor(ItemStack stack) {
+                    return PotionUtils.getColor(nextStack(stack));
+                }
+
+                boolean water(ItemStack stack) {
+                    return Potions.WATER == PotionUtils.getPotion(stack);
+                }
+
+                boolean absent(ItemStack stack) {
+                    return PotionUtils.getPotion(stack) == Potions.EMPTY;
+                }
+
+                boolean storedWater(ItemStack stack) {
+                    Potion potion = PotionUtils.getPotion(stack);
+                    return potion == Potions.WATER;
+                }
+
+                boolean storedNonEmpty(ItemStack stack) {
+                    Potion potion = PotionUtils.getPotion(stack);
+                    return potion != Potions.EMPTY;
+                }
+
+                String unsupportedPotionUse(ItemStack stack) {
+                    Potion potion = PotionUtils.getPotion(stack);
+                    return potion.toString();
+                }
+
+                void tooltip(ItemStack stack, List<Component> lines) {
+                    PotionUtils.addPotionTooltip(stack, lines, 0.5F);
+                }
+
+                int unresolved(CompoundTag tag) {
+                    return PotionUtils.getColor(PotionUtils.getAllEffects(tag));
+                }
+
+                Potion next(Potion potion) {
+                    return potion;
+                }
+
+                ItemStack nextStack(ItemStack stack) {
+                    return stack;
+                }
+            }
+        """.trimIndent())
+
+        val lookalike = srcDir.resolve("LookalikePotionCalls.java")
+        val lookalikeOriginal = """
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+
+            class LookalikePotionCalls {
+                static class PotionUtils {
+                    static int getColor(ItemStack stack) {
+                        return 0;
+                    }
+                }
+
+                int color(ItemStack stack) {
+                    return PotionUtils.getColor(stack);
+                }
+            }
+        """.trimIndent()
+        lookalike.writeText(lookalikeOriginal)
+
+        StructuralRefactorPass().apply(tempDir)
+        val migrated = exact.readText()
+
+        assertTrue(
+            migrated.contains(
+                "return PotionUtils.setPotion(new ItemStack(Items.POTION), next(potion));"
+            ),
+            migrated
+        )
+        assertTrue(!migrated.contains("PotionContents.createItemStack"), migrated)
+        assertTrue(
+            Regex(
+                """net\.minecraft\.Util\.make\(stack,\s*modPorterPotionStack\d*\s*->\s*""" +
+                    """modPorterPotionStack\d*\.update\(DataComponents\.POTION_CONTENTS,\s*""" +
+                    """PotionContents\.EMPTY,\s*Potions\.WATER,\s*PotionContents::withPotion\)\)"""
+            ).containsMatchIn(migrated),
+            migrated
+        )
+        assertTrue(migrated.contains("(stack).update(DataComponents.POTION_CONTENTS, PotionContents.EMPTY"), migrated)
+        assertTrue(migrated.contains("new PotionContents(java.util.Optional.empty()"), migrated)
+        assertTrue(
+            migrated.contains(
+                "new java.util.ArrayList<>((stack).getOrDefault(" +
+                    "DataComponents.POTION_CONTENTS, PotionContents.EMPTY).customEffects())"
+            ),
+            migrated
+        )
+        assertTrue(migrated.contains("result.clear();"), migrated)
+        assertTrue(
+            Regex(
+                """List<MobEffectInstance> result = net\.minecraft\.Util\.make\(""" +
+                    """new java\.util\.ArrayList<""" +
+                    """net\.minecraft\.world\.effect\.MobEffectInstance>\(\),\s*""" +
+                    """modPorterPotionEffects\d* -> \{[\s\S]*?PotionContents modPorterPotionContents\d* = """ +
+                    """\(stack\)\.getOrDefault\(DataComponents\.POTION_CONTENTS, PotionContents\.EMPTY\);[\s\S]*?""" +
+                    """modPorterPotionContents\d*\.potion\(\)\.ifPresent\([\s\S]*?""" +
+                    """modPorterPotionEffects\d*\.addAll\(modPorterPotionContents\d*\.customEffects\(\)\);[\s\S]*?\}\)"""
+            ).containsMatchIn(migrated),
+            migrated
+        )
+        assertTrue(
+            Regex(
+                """net\.minecraft\.Util\.make\(stack,\s*modPorterPotionStack\d*\s*->\s*""" +
+                    """net\.minecraft\.Util\.make\(effects,\s*modPorterPotionEffects\d*\s*->\s*\{\s*""" +
+                    """if\s*\(!modPorterPotionEffects\d*\.isEmpty\(\)\)"""
+            ).containsMatchIn(migrated),
+            migrated
+        )
+        assertTrue(
+            Regex(
+                """java\.util\.stream\.Stream\.concat\(""" +
+                    """modPorterPotionContents\d*\.customEffects\(\)\.stream\(\),\s*""" +
+                    """modPorterPotionEffects\d*\.stream\(\)\.map\(""" +
+                    """net\.minecraft\.world\.effect\.MobEffectInstance::new\)\)\.toList\(\)"""
+            ).containsMatchIn(migrated),
+            migrated
+        )
+        assertTrue(
+            migrated.contains(
+                "(first ? left : right).getOrDefault(" +
+                    "DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"
+            ),
+            migrated
+        )
+        assertTrue(
+            migrated.contains(
+                "((ItemStack) stack).getOrDefault(" +
+                    "DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"
+            ),
+            migrated
+        )
+        assertTrue(
+            migrated.contains(
+                "(nextStack(stack)).getOrDefault(" +
+                    "DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"
+            ),
+            migrated
+        )
+        assertTrue(
+            Regex(
+                """\(stack\)\.getOrDefault\(DataComponents\.POTION_CONTENTS,\s*PotionContents\.EMPTY\)""" +
+                    """\.potion\(\)\.map\(\s*modPorterPotionHolder\d*\s*->\s*""" +
+                    """modPorterPotionHolder\d*\.value\(\)\s*==\s*Potions\.WATER\.value\(\)\)""" +
+                    """\.orElse\(false\)"""
+            ).containsMatchIn(migrated),
+            migrated
+        )
+        assertTrue(!migrated.contains(".is(Potions.WATER)"), migrated)
+        assertTrue(
+            migrated.contains(
+                "(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY)" +
+                    ".potion().isEmpty()"
+            ),
+            migrated
+        )
+        assertTrue(
+            migrated.contains(
+                "java.util.Optional<net.minecraft.core.Holder<" +
+                    "net.minecraft.world.item.alchemy.Potion>> potion = " +
+                    "(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).potion();"
+            ),
+            migrated
+        )
+        assertTrue(
+            Regex(
+                """return potion\.map\(\s*modPorterPotionHolder\d* -> """ +
+                    """modPorterPotionHolder\d*\.value\(\) == Potions\.WATER\.value\(\)\)""" +
+                    """\.orElse\(false\);"""
+            ).containsMatchIn(migrated),
+            migrated
+        )
+        assertTrue(migrated.contains("return potion.isPresent();"), migrated)
+        assertTrue(
+            migrated.contains(
+                "Potion potion = PotionUtils.getPotion(stack);\n" +
+                    "        return potion.toString();"
+            ),
+            migrated
+        )
+        assertTrue(
+            migrated.contains(
+                "(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY)" +
+                    ".addPotionTooltip(lines::add, 0.5F, 20.0F)"
+            ),
+            migrated
+        )
+        assertTrue(
+            migrated.contains("return PotionUtils.getColor(PotionUtils.getAllEffects(tag));"),
+            migrated
+        )
+        assertTrue(
+            migrated.contains(
+                "\"PotionUtils.setPotion(new ItemStack(Items.POTION), Potions.WATER)\""
+            ),
+            migrated
+        )
+        assertTrue(migrated.contains("import net.minecraft.world.item.alchemy.PotionUtils;"), migrated)
+        assertEquals(lookalikeOriginal, lookalike.readText())
+
+        val residualGate = BuildSystemPass().apply(tempDir)
+        assertTrue(residualGate.errors.any { it.contains("PotionUtils") }, residualGate.errors.toString())
+    }
+
+
+    @Test
+    fun `potion utils migration qualifies conflicting target names and outer this fields`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val source = srcDir.resolve("ConflictingPotionNames.java")
+        source.writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.alchemy.PotionUtils;
+
+            class ConflictingPotionNames {
+                static class PotionContents {
+                }
+
+                static class DataComponents {
+                }
+
+                ItemStack stack;
+
+                class Inner {
+                    CompoundTag stack;
+
+                    int outerColor() {
+                        return PotionUtils.getColor(ConflictingPotionNames.this.stack);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val migrated = source.readText()
+
+        assertTrue(
+            migrated.contains(
+                "(ConflictingPotionNames.this.stack).getOrDefault(" +
+                    "net.minecraft.core.component.DataComponents.POTION_CONTENTS, " +
+                    "net.minecraft.world.item.alchemy.PotionContents.EMPTY).getColor()"
+            ),
+            migrated
+        )
+        assertTrue(!migrated.contains("import net.minecraft.core.component.DataComponents;"), migrated)
+        assertTrue(!migrated.contains("import net.minecraft.world.item.alchemy.PotionContents;"), migrated)
+        assertTrue(migrated.contains("static class PotionContents"), migrated)
+        assertTrue(migrated.contains("static class DataComponents"), migrated)
+    }
+
+
+    @Test
+    fun `fully qualified looking value chains do not prove minecraft owners`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val source = srcDir.resolve("QualifiedLookalike.java")
+        val original = """
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+
+            class QualifiedLookalike {
+                static final Root net = new Root();
+
+                int color(ItemStack stack) {
+                    return net.minecraft.world.item.alchemy.PotionUtils.getColor(stack);
+                }
+
+                static class Root {
+                    final Minecraft minecraft = new Minecraft();
+                }
+
+                static class Minecraft {
+                    final World world = new World();
+                }
+
+                static class World {
+                    final Item item = new Item();
+                }
+
+                static class Item {
+                    final Alchemy alchemy = new Alchemy();
+                }
+
+                static class Alchemy {
+                    final ProjectPotionUtils PotionUtils = new ProjectPotionUtils();
+                }
+
+                static class ProjectPotionUtils {
+                    int getColor(ItemStack stack) {
+                        return 0;
+                    }
+                }
+            }
+        """.trimIndent()
+        source.writeText(original)
+
+        StructuralRefactorPass().apply(tempDir)
+
+        assertEquals(original, source.readText())
+    }
+
+
+    @Test
+    fun `potion receiver types follow lexical loop catch and resource bindings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val source = srcDir.resolve("LexicalPotionBindings.java")
+        source.writeText("""
+            package com.example;
+
+            import java.util.Collection;
+            import java.util.List;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.alchemy.PotionUtils;
+
+            class LexicalPotionBindings {
+                ItemStack stack;
+                java.util.function.ToIntFunction<List<MobEffectInstance>> lambda =
+                    stack -> PotionUtils.getColor(stack);
+
+                int field() {
+                    return PotionUtils.getColor(stack);
+                }
+
+                int exactLoop(Iterable<ItemStack> values) {
+                    for (ItemStack stack : values) {
+                        return PotionUtils.getColor(stack);
+                    }
+                    return 0;
+                }
+
+                int collectionLoop(Iterable<List<MobEffectInstance>> values) {
+                    for (List<MobEffectInstance> stack : values) {
+                        return PotionUtils.getColor(stack);
+                    }
+                    return 0;
+                }
+
+                int caught() {
+                    try {
+                        mayFail();
+                        return 0;
+                    } catch (ColorException stack) {
+                        return PotionUtils.getColor(stack);
+                    }
+                }
+
+                int resource() throws Exception {
+                    try (ColorResource stack = open()) {
+                        return PotionUtils.getColor(stack);
+                    }
+                }
+
+                void mayFail() throws ColorException {
+                }
+
+                ColorResource open() {
+                    return null;
+                }
+
+                abstract static class ColorException extends Exception
+                    implements Collection<MobEffectInstance> {
+                }
+
+                abstract static class ColorResource
+                    implements AutoCloseable, Collection<MobEffectInstance> {
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val migrated = source.readText()
+
+        assertEquals(
+            2,
+            Regex("""\.getOrDefault\(DataComponents\.POTION_CONTENTS""")
+                .findAll(migrated)
+                .count(),
+            migrated
+        )
+        assertEquals(4, Regex("""PotionUtils\.getColor\(stack\)""").findAll(migrated).count(), migrated)
+        assertTrue(migrated.contains("for (List<MobEffectInstance> stack : values)"), migrated)
+        assertTrue(migrated.contains("catch (ColorException stack)"), migrated)
+        assertTrue(migrated.contains("try (ColorResource stack = open())"), migrated)
+    }
+
+
+    @Test
+    fun `potion value graph rewrites only references bound to one declaration`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val source = srcDir.resolve("ScopedPotionValues.java")
+        source.writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.alchemy.Potion;
+            import net.minecraft.world.item.alchemy.PotionUtils;
+            import net.minecraft.world.item.alchemy.Potions;
+
+            class ScopedPotionValues {
+                boolean siblingBlocks(ItemStack stack) {
+                    boolean first;
+                    {
+                        Potion potion = PotionUtils.getPotion(stack);
+                        first = potion == Potions.WATER;
+                    }
+                    {
+                        Potion potion = Potions.WATER;
+                        return first && potion == Potions.WATER;
+                    }
+                }
+
+                boolean unsupportedUse(ItemStack stack) {
+                    Potion potion = PotionUtils.getPotion(stack);
+                    boolean water = potion == Potions.WATER;
+                    return water && consume(potion);
+                }
+
+                boolean consume(Potion potion) {
+                    return potion != Potions.EMPTY;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val migrated = source.readText()
+
+        assertTrue(
+            migrated.contains(
+                "java.util.Optional<net.minecraft.core.Holder<" +
+                    "net.minecraft.world.item.alchemy.Potion>> potion = " +
+                    "(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).potion();"
+            ),
+            migrated
+        )
+        assertTrue(migrated.contains("Potion potion = Potions.WATER;"), migrated)
+        assertTrue(migrated.contains("return first && potion == Potions.WATER;"), migrated)
+        assertTrue(migrated.contains("Potion potion = PotionUtils.getPotion(stack);"), migrated)
+        assertTrue(migrated.contains("boolean water = potion == Potions.WATER;"), migrated)
+        assertTrue(migrated.contains("return water && consume(potion);"), migrated)
+    }

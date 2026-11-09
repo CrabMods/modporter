@@ -1,0 +1,1192 @@
+
+    @Test
+    fun `legacy loot serializers migrate to MapCodec backed loot types`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ModExistsCondition.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonDeserializationContext;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSerializationContext;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.Serializer;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemConditionType;
+
+            public class ModExistsCondition implements LootItemCondition {
+                private final String modID;
+
+                public ModExistsCondition(String modID) {
+                    this.modID = modID;
+                }
+
+                public LootItemConditionType getType() {
+                    return TestLoot.MOD_EXISTS.get();
+                }
+
+                public boolean test(LootContext context) {
+                    return true;
+                }
+
+                public static class ConditionSerializer implements Serializer<ModExistsCondition> {
+                    public void serialize(JsonObject json, ModExistsCondition value, JsonSerializationContext context) {
+                        json.addProperty("mod_id", value.modID);
+                    }
+
+                    public ModExistsCondition deserialize(JsonObject json, JsonDeserializationContext context) {
+                        return new ModExistsCondition(GsonHelper.getAsString(json, "mod_id"));
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("EntityTargetCondition.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableSet;
+            import com.google.gson.JsonDeserializationContext;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSerializationContext;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.Serializer;
+            import net.minecraft.world.level.storage.loot.parameters.LootContextParam;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemConditionType;
+            import java.util.Set;
+
+            public class EntityTargetCondition implements LootItemCondition {
+                final LootContext.EntityTarget entityTarget;
+
+                private EntityTargetCondition(LootContext.EntityTarget entityTarget) {
+                    this.entityTarget = entityTarget;
+                }
+
+                public Set<LootContextParam<?>> getReferencedContextParams() {
+                    return ImmutableSet.of(this.entityTarget.getParam());
+                }
+
+                public LootItemConditionType getType() {
+                    return TestLoot.ENTITY_TARGET.get();
+                }
+
+                public boolean test(LootContext context) {
+                    return true;
+                }
+
+                public static class ConditionSerializer implements Serializer<EntityTargetCondition> {
+                    public void serialize(JsonObject json, EntityTargetCondition condition, JsonSerializationContext context) {
+                        json.add("entity", context.serialize(condition.entityTarget));
+                    }
+
+                    public EntityTargetCondition deserialize(JsonObject json, JsonDeserializationContext context) {
+                        return new EntityTargetCondition(GsonHelper.getAsObject(json, "entity", context, LootContext.EntityTarget.class));
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("IsMinionCondition.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonDeserializationContext;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSerializationContext;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.Serializer;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemConditionType;
+
+            public record IsMinionCondition(boolean inverse) implements LootItemCondition {
+                public LootItemConditionType getType() {
+                    return TestLoot.IS_MINION.get();
+                }
+
+                public boolean test(LootContext context) {
+                    return !inverse;
+                }
+
+                public static class ConditionSerializer implements Serializer<IsMinionCondition> {
+                    public void serialize(JsonObject json, IsMinionCondition value, JsonSerializationContext context) {
+                        json.addProperty("inverse", value.inverse);
+                    }
+
+                    public IsMinionCondition deserialize(JsonObject json, JsonDeserializationContext context) {
+                        return new IsMinionCondition(GsonHelper.getAsBoolean(json, "inverse", false));
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("UncraftingTableEnabledCondition.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonDeserializationContext;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSerializationContext;
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.Serializer;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemConditionType;
+
+            public class UncraftingTableEnabledCondition implements LootItemCondition {
+                private UncraftingTableEnabledCondition() {
+                }
+
+                public LootItemConditionType getType() {
+                    return TestLoot.UNCRAFTING_TABLE_ENABLED.get();
+                }
+
+                public boolean test(LootContext context) {
+                    return true;
+                }
+
+                public static class ConditionSerializer implements Serializer<UncraftingTableEnabledCondition> {
+                    public void serialize(JsonObject json, UncraftingTableEnabledCondition value, JsonSerializationContext context) {
+                    }
+
+                    public UncraftingTableEnabledCondition deserialize(JsonObject json, JsonDeserializationContext context) {
+                        return new UncraftingTableEnabledCondition();
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ConfigEnabled.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonDeserializationContext;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSerializationContext;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemConditionType;
+
+            public class ConfigEnabled implements LootItemCondition {
+                private final ConfigValue config;
+
+                public ConfigEnabled(ConfigValue config) {
+                    this.config = config;
+                }
+
+                public LootItemConditionType getType() {
+                    return TestLoot.CONFIG_ENABLED.get();
+                }
+
+                public boolean test(LootContext context) {
+                    return true;
+                }
+
+                public static class Serializer implements net.minecraft.world.level.storage.loot.Serializer<ConfigEnabled> {
+                    public void serialize(JsonObject json, ConfigEnabled instance, JsonSerializationContext context) {
+                        json.addProperty("config", ConfigSerializationUtil.serialize(instance.config));
+                    }
+
+                    public ConfigEnabled deserialize(JsonObject json, JsonDeserializationContext context) {
+                        return new ConfigEnabled(ConfigSerializationUtil.deserialize(GsonHelper.getAsString(json, "config")));
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ModItemSwap.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonDeserializationContext;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSerializationContext;
+            import com.google.gson.JsonSyntaxException;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.functions.LootItemConditionalFunction;
+            import net.minecraft.world.level.storage.loot.functions.LootItemFunction;
+            import net.minecraft.world.level.storage.loot.functions.LootItemFunctionType;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+            import net.minecraft.core.registries.BuiltInRegistries;
+
+            public class ModItemSwap extends LootItemConditionalFunction {
+                private final Item item;
+                private final Item oldItem;
+                private final boolean success;
+
+                protected ModItemSwap(LootItemCondition[] conditions, Item item, Item old, boolean success) {
+                    super(conditions);
+                    this.item = item;
+                    this.oldItem = old;
+                    this.success = success;
+                }
+
+                public LootItemFunctionType getType() {
+                    return TestLoot.ITEM_OR_DEFAULT.get();
+                }
+
+                public ItemStack run(ItemStack stack, LootContext context) {
+                    return new ItemStack(this.item, stack.getCount());
+                }
+
+                public static class Builder extends LootItemConditionalFunction.Builder<ModItemSwap.Builder> {
+                    private Item item;
+                    private Item oldItem;
+
+                    protected ModItemSwap.Builder getThis() {
+                        return this;
+                    }
+
+                    public LootItemFunction build() {
+                        return new ModItemSwap(this.getConditions(), this.item, this.oldItem, true);
+                    }
+                }
+
+                public static class Serializer extends LootItemConditionalFunction.Serializer<ModItemSwap> {
+                    public void serialize(JsonObject object, ModItemSwap function, JsonSerializationContext serializationContext) {
+                        if (function.success)
+                            object.addProperty("item", BuiltInRegistries.ITEM.getKey(function.item).toString());
+                        else
+                            object.addProperty("default", BuiltInRegistries.ITEM.getKey(function.item).toString());
+                        object.addProperty("default", BuiltInRegistries.ITEM.getKey(function.oldItem).toString());
+                    }
+
+                    public ModItemSwap deserialize(JsonObject object, JsonDeserializationContext deserializationContext, LootItemCondition[] conditions) {
+                        Item item;
+                        boolean success;
+                        try {
+                            item = GsonHelper.getAsItem(object, "item");
+                            success = true;
+                        } catch (JsonSyntaxException e) {
+                            item = GsonHelper.getAsItem(object, "default");
+                            success = false;
+                        }
+                        return new ModItemSwap(conditions, item, GsonHelper.getAsItem(object, "default"), success);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("NoExtraLootFunction.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonDeserializationContext;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSerializationContext;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.functions.LootItemConditionalFunction;
+            import net.minecraft.world.level.storage.loot.functions.LootItemFunctionType;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+
+            public class NoExtraLootFunction extends LootItemConditionalFunction {
+                protected NoExtraLootFunction(LootItemCondition[] conditions) {
+                    super(conditions);
+                }
+
+                public LootItemFunctionType getType() {
+                    return TestLoot.NO_EXTRA.get();
+                }
+
+                public ItemStack run(ItemStack stack, LootContext context) {
+                    return stack;
+                }
+
+                public static class Serializer extends LootItemConditionalFunction.Serializer<NoExtraLootFunction> {
+                    public void serialize(JsonObject json, NoExtraLootFunction instance, JsonSerializationContext context) {
+                        super.serialize(json, instance, context);
+                    }
+
+                    public NoExtraLootFunction deserialize(JsonObject json, JsonDeserializationContext context, LootItemCondition[] conditions) {
+                        return new NoExtraLootFunction(conditions);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("SpawnEntityLootFunction.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonDeserializationContext;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSerializationContext;
+            import com.google.gson.JsonSyntaxException;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.functions.LootItemConditionalFunction;
+            import net.minecraft.world.level.storage.loot.functions.LootItemFunctionType;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+
+            public class SpawnEntityLootFunction extends LootItemConditionalFunction {
+                private final EntityType<?> entityType;
+                private final int count;
+
+                protected SpawnEntityLootFunction(LootItemCondition[] conditions, EntityType<?> entityType, int count) {
+                    super(conditions);
+                    this.entityType = entityType;
+                    this.count = count;
+                }
+
+                public LootItemFunctionType getType() {
+                    return TestLoot.SPAWN_ENTITY.get();
+                }
+
+                public ItemStack run(ItemStack stack, LootContext context) {
+                    return stack;
+                }
+
+                public static class Serializer extends LootItemConditionalFunction.Serializer<SpawnEntityLootFunction> {
+                    public void serialize(JsonObject json, SpawnEntityLootFunction instance, JsonSerializationContext context) {
+                        super.serialize(json, instance, context);
+                        json.addProperty("entity", EntityType.getKey(instance.entityType).toString());
+                        json.addProperty("count", instance.count);
+                    }
+
+                    public SpawnEntityLootFunction deserialize(JsonObject json, JsonDeserializationContext context, LootItemCondition[] conditions) {
+                        EntityType<?> entityType = EntityType.byString(GsonHelper.getAsString(json, "entity")).orElseThrow(() -> new JsonSyntaxException("No value present!"));
+                        int count = GsonHelper.getAsInt(json, "count");
+                        return new SpawnEntityLootFunction(conditions, entityType, count);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TestLoot.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.storage.loot.functions.LootItemFunctionType;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemConditionType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class TestLoot {
+                public static final DeferredRegister<LootItemConditionType> CONDITIONS = DeferredRegister.create(Registries.LOOT_CONDITION_TYPE, "example");
+                public static final DeferredRegister<LootItemFunctionType> FUNCTIONS = DeferredRegister.create(Registries.LOOT_FUNCTION_TYPE, "example");
+
+                public static final DeferredHolder<LootItemFunctionType, LootItemFunctionType> ITEM_OR_DEFAULT =
+                        FUNCTIONS.register("item_or_default", () -> new LootItemFunctionType(new ModItemSwap.Serializer()));
+                public static final DeferredHolder<LootItemFunctionType, LootItemFunctionType> NO_EXTRA =
+                        FUNCTIONS.register("no_extra", () -> new LootItemFunctionType(new NoExtraLootFunction.Serializer()));
+                public static final DeferredHolder<LootItemFunctionType, LootItemFunctionType> SPAWN_ENTITY =
+                        FUNCTIONS.register("spawn_entity", () -> new LootItemFunctionType(new SpawnEntityLootFunction.Serializer()));
+                public static final DeferredHolder<LootItemConditionType, LootItemConditionType> MOD_EXISTS =
+                        CONDITIONS.register("mod_exists", () -> new LootItemConditionType(new ModExistsCondition.ConditionSerializer()));
+                public static final DeferredHolder<LootItemConditionType, LootItemConditionType> CONFIG_ENABLED =
+                        CONDITIONS.register("config_enabled", () -> new LootItemConditionType(new ConfigEnabled.Serializer()));
+                public static final DeferredHolder<LootItemConditionType, LootItemConditionType> ENTITY_TARGET =
+                        CONDITIONS.register("entity_target", () -> new LootItemConditionType(new EntityTargetCondition.ConditionSerializer()));
+                public static final DeferredHolder<LootItemConditionType, LootItemConditionType> IS_MINION =
+                        CONDITIONS.register("is_minion", () -> new LootItemConditionType(new IsMinionCondition.ConditionSerializer()));
+                public static final DeferredHolder<LootItemConditionType, LootItemConditionType> UNCRAFTING_TABLE_ENABLED =
+                        CONDITIONS.register("uncrafting_table_enabled", () -> new LootItemConditionType(new UncraftingTableEnabledCondition.ConditionSerializer()));
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(tempDir)
+
+        val modExists = srcDir.resolve("ModExistsCondition.java").readText()
+        val entityTarget = srcDir.resolve("EntityTargetCondition.java").readText()
+        val isMinion = srcDir.resolve("IsMinionCondition.java").readText()
+        val uncrafting = srcDir.resolve("UncraftingTableEnabledCondition.java").readText()
+        val configEnabled = srcDir.resolve("ConfigEnabled.java").readText()
+        val modItemSwap = srcDir.resolve("ModItemSwap.java").readText()
+        val noExtraLootFunction = srcDir.resolve("NoExtraLootFunction.java").readText()
+        val spawnEntityLootFunction = srcDir.resolve("SpawnEntityLootFunction.java").readText()
+        val registry = srcDir.resolve("TestLoot.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "loot-serializer-mapcodec" })
+        assertTrue(modExists.contains("public static final MapCodec<ModExistsCondition> CODEC = com.mojang.serialization.codecs.RecordCodecBuilder.mapCodec"))
+        assertTrue(modExists.contains("com.mojang.serialization.Codec.STRING.fieldOf(\"mod_id\").forGetter(o -> o.modID)"))
+        assertTrue(entityTarget.contains("LootContext.EntityTarget.CODEC.fieldOf(\"entity\").forGetter(o -> o.entityTarget)"))
+        assertTrue(isMinion.contains("com.mojang.serialization.Codec.BOOL.optionalFieldOf(\"inverse\", false).forGetter(o -> o.inverse)"))
+        assertTrue(uncrafting.contains("public static final MapCodec<UncraftingTableEnabledCondition> CODEC = MapCodec.unit(new UncraftingTableEnabledCondition());"))
+        assertTrue(configEnabled.contains("com.mojang.serialization.Codec.STRING.fieldOf(\"config\").forGetter(o -> ConfigSerializationUtil.serialize(o.config))"))
+        assertTrue(configEnabled.contains("value -> new ConfigEnabled(ConfigSerializationUtil.deserialize(value))"))
+        assertTrue(modItemSwap.contains("public static final MapCodec<ModItemSwap> CODEC = com.mojang.serialization.codecs.RecordCodecBuilder.mapCodec"))
+        assertTrue(modItemSwap.contains("protected ModItemSwap(java.util.List<LootItemCondition> conditions, Item item, Item old, boolean success)"))
+        assertTrue(modItemSwap.contains("public LootItemFunctionType<ModItemSwap> getType()"))
+        assertTrue(noExtraLootFunction.contains("public static final MapCodec<NoExtraLootFunction> CODEC = com.mojang.serialization.codecs.RecordCodecBuilder.mapCodec(instance -> commonFields(instance).apply(instance, NoExtraLootFunction::new));"))
+        assertTrue(noExtraLootFunction.contains("protected NoExtraLootFunction(java.util.List<LootItemCondition> conditions)"))
+        assertTrue(noExtraLootFunction.contains("public LootItemFunctionType<NoExtraLootFunction> getType()"))
+        assertTrue(spawnEntityLootFunction.contains("BuiltInRegistries.ENTITY_TYPE.byNameCodec().fieldOf(\"entity\").forGetter(o -> o.entityType)"))
+        assertTrue(spawnEntityLootFunction.contains("com.mojang.serialization.Codec.INT.fieldOf(\"count\").forGetter(o -> o.count)"))
+        assertTrue(spawnEntityLootFunction.contains("protected SpawnEntityLootFunction(java.util.List<LootItemCondition> conditions, EntityType<?> entityType, int count)"))
+        assertTrue(spawnEntityLootFunction.contains("public LootItemFunctionType<SpawnEntityLootFunction> getType()"))
+        assertTrue(registry.contains("DeferredRegister<LootItemFunctionType<?>> FUNCTIONS"))
+        assertTrue(registry.contains("DeferredHolder<LootItemFunctionType<?>, LootItemFunctionType<ModItemSwap>> ITEM_OR_DEFAULT"))
+        assertTrue(registry.contains("DeferredHolder<LootItemFunctionType<?>, LootItemFunctionType<NoExtraLootFunction>> NO_EXTRA"))
+        assertTrue(registry.contains("DeferredHolder<LootItemFunctionType<?>, LootItemFunctionType<SpawnEntityLootFunction>> SPAWN_ENTITY"))
+        assertTrue(registry.contains("new LootItemFunctionType<>(ModItemSwap.CODEC)"))
+        assertTrue(registry.contains("new LootItemFunctionType<>(NoExtraLootFunction.CODEC)"))
+        assertTrue(registry.contains("new LootItemFunctionType<>(SpawnEntityLootFunction.CODEC)"))
+        assertTrue(registry.contains("new LootItemConditionType(ModExistsCondition.CODEC)"))
+        assertTrue(registry.contains("new LootItemConditionType(ConfigEnabled.CODEC)"))
+        assertTrue(registry.contains("new LootItemConditionType(EntityTargetCondition.CODEC)"))
+        assertTrue(registry.contains("new LootItemConditionType(IsMinionCondition.CODEC)"))
+        assertTrue(registry.contains("new LootItemConditionType(UncraftingTableEnabledCondition.CODEC)"))
+        assertFalse(modExists.contains("ConditionSerializer"))
+        assertFalse(configEnabled.contains("net.minecraft.world.level.storage.loot.Serializer"))
+        assertFalse(modItemSwap.contains("LootItemConditionalFunction.Serializer"))
+        assertFalse(noExtraLootFunction.contains("LootItemConditionalFunction.Serializer"))
+        assertFalse(spawnEntityLootFunction.contains("LootItemConditionalFunction.Serializer"))
+        assertFalse(spawnEntityLootFunction.contains("EntityType.byString"))
+        assertFalse(modItemSwap.contains("JsonSyntaxException"))
+        assertFalse(modExists.contains("net.minecraft.world.level.storage.loot.Serializer"))
+    }
+
+    @Test
+    fun `loot conditional function codec migration rejects member name fallbacks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AmbiguousItemSwap.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonDeserializationContext;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSerializationContext;
+            import com.google.gson.JsonSyntaxException;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.functions.LootItemConditionalFunction;
+            import net.minecraft.world.level.storage.loot.functions.LootItemFunctionType;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+
+            public class AmbiguousItemSwap extends LootItemConditionalFunction {
+                private final Item replacement;
+                private final Item fallback;
+                private final boolean selected;
+
+                protected AmbiguousItemSwap(LootItemCondition[] conditions, Item replacement, Item fallback, boolean selected) {
+                    super(conditions);
+                    this.replacement = replacement;
+                    this.fallback = fallback;
+                    this.selected = selected;
+                }
+
+                public LootItemFunctionType getType() {
+                    return null;
+                }
+
+                public ItemStack run(ItemStack stack, LootContext context) {
+                    return new ItemStack(this.replacement, stack.getCount());
+                }
+
+                public static class Serializer extends LootItemConditionalFunction.Serializer<AmbiguousItemSwap> {
+                    public void serialize(JsonObject object, AmbiguousItemSwap function, JsonSerializationContext serializationContext) {
+                        object.addProperty("marker", function.selected);
+                    }
+
+                    public AmbiguousItemSwap deserialize(JsonObject object, JsonDeserializationContext deserializationContext, LootItemCondition[] conditions) {
+                        Item item;
+                        boolean success;
+                        try {
+                            item = GsonHelper.getAsItem(object, "item");
+                            success = true;
+                        } catch (JsonSyntaxException e) {
+                            item = GsonHelper.getAsItem(object, "default");
+                            success = false;
+                        }
+                        return new AmbiguousItemSwap(conditions, item, GsonHelper.getAsItem(object, "default"), success);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(tempDir)
+
+        val ambiguous = srcDir.resolve("AmbiguousItemSwap.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(ambiguous.contains("MapCodec<AmbiguousItemSwap>"), ambiguous)
+        assertTrue(ambiguous.contains("LootItemConditionalFunction.Serializer<AmbiguousItemSwap>"), ambiguous)
+        assertTrue(ambiguous.contains("GsonHelper.getAsItem(object, \"item\")"), ambiguous)
+        assertTrue(ambiguous.contains("GsonHelper.getAsItem(object, \"default\")"), ambiguous)
+    }
+
+    @Test
+    fun `loot condition codec migration rejects json key member fallbacks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AmbiguousKeyCondition.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonDeserializationContext;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSerializationContext;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.Serializer;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemConditionType;
+
+            public class AmbiguousKeyCondition implements LootItemCondition {
+                private final String actualValue;
+
+                public AmbiguousKeyCondition(String actualValue) {
+                    this.actualValue = actualValue;
+                }
+
+                public LootItemConditionType getType() {
+                    return TestLoot.AMBIGUOUS.get();
+                }
+
+                public boolean test(LootContext context) {
+                    return true;
+                }
+
+                public static class ConditionSerializer implements Serializer<AmbiguousKeyCondition> {
+                    public void serialize(JsonObject json, AmbiguousKeyCondition value, JsonSerializationContext context) {
+                        json.addProperty("marker", value.actualValue);
+                    }
+
+                    public AmbiguousKeyCondition deserialize(JsonObject json, JsonDeserializationContext context) {
+                        return new AmbiguousKeyCondition(GsonHelper.getAsString(json, "display_name"));
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TestLoot.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemConditionType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class TestLoot {
+                public static final DeferredRegister<LootItemConditionType> CONDITIONS = DeferredRegister.create(Registries.LOOT_CONDITION_TYPE, "example");
+
+                public static final DeferredHolder<LootItemConditionType, LootItemConditionType> AMBIGUOUS =
+                        CONDITIONS.register("ambiguous", () -> new LootItemConditionType(new AmbiguousKeyCondition.ConditionSerializer()));
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(tempDir)
+
+        val ambiguous = srcDir.resolve("AmbiguousKeyCondition.java").readText()
+        val registry = srcDir.resolve("TestLoot.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(ambiguous.contains("MapCodec<AmbiguousKeyCondition>"), ambiguous)
+        assertTrue(ambiguous.contains("Serializer<AmbiguousKeyCondition>"), ambiguous)
+        assertTrue(ambiguous.contains("GsonHelper.getAsString(json, \"display_name\")"), ambiguous)
+        assertTrue(registry.contains("new LootItemConditionType(new AmbiguousKeyCondition.ConditionSerializer())"), registry)
+        assertFalse(registry.contains("AmbiguousKeyCondition.CODEC"), registry)
+    }
+
+    @Test
+    fun `loot condition codec migration ignores commented serializer structure`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CommentOnlyCondition.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemConditionType;
+
+            public class CommentOnlyCondition implements LootItemCondition {
+                private static final String DOC = "public static class ConditionSerializer implements Serializer<CommentOnlyCondition>";
+
+                /*
+                public static class ConditionSerializer implements Serializer<CommentOnlyCondition> {
+                    public CommentOnlyCondition deserialize(JsonObject json, JsonDeserializationContext context) {
+                        return new CommentOnlyCondition();
+                    }
+                }
+                */
+
+                public LootItemConditionType getType() {
+                    return null;
+                }
+
+                public boolean test(LootContext context) {
+                    return true;
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(tempDir)
+
+        val condition = srcDir.resolve("CommentOnlyCondition.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(condition.contains("MapCodec<CommentOnlyCondition>"), condition)
+        assertTrue(condition.contains("public static class ConditionSerializer implements Serializer<CommentOnlyCondition>"), condition)
+        assertTrue(condition.contains("private static final String DOC"), condition)
+    }
+
+    @Test
+    fun `loot type registry codec migration ignores commented and string serializer constructors`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExistingCondition.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.MapCodec;
+
+            public class ExistingCondition {
+                public static final MapCodec<ExistingCondition> CODEC = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("TestLoot.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemConditionType;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class TestLoot {
+                public static final DeferredRegister<LootItemConditionType> CONDITIONS = DeferredRegister.create(Registries.LOOT_CONDITION_TYPE, "example");
+                private static final String DOC = "new LootItemConditionType(new ExistingCondition.Serializer())";
+
+                // CONDITIONS.register("commented", () -> new LootItemConditionType(new ExistingCondition.Serializer()));
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(tempDir)
+
+        val registry = srcDir.resolve("TestLoot.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(registry.contains("new LootItemConditionType(ExistingCondition.CODEC)"), registry)
+        assertTrue(registry.contains("private static final String DOC = \"new LootItemConditionType(new ExistingCondition.Serializer())\";"), registry)
+        assertTrue(registry.contains("// CONDITIONS.register(\"commented\", () -> new LootItemConditionType(new ExistingCondition.Serializer()));"), registry)
+    }
+
+    @Test
+    fun `loot function entity and int codec migration rejects local variable member fallbacks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AmbiguousSpawnFunction.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonDeserializationContext;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSerializationContext;
+            import com.google.gson.JsonSyntaxException;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.functions.LootItemConditionalFunction;
+            import net.minecraft.world.level.storage.loot.functions.LootItemFunctionType;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+
+            public class AmbiguousSpawnFunction extends LootItemConditionalFunction {
+                private final EntityType<?> targetType;
+                private final int amount;
+
+                protected AmbiguousSpawnFunction(LootItemCondition[] conditions, EntityType<?> targetType, int amount) {
+                    super(conditions);
+                    this.targetType = targetType;
+                    this.amount = amount;
+                }
+
+                public LootItemFunctionType getType() {
+                    return null;
+                }
+
+                public ItemStack run(ItemStack stack, LootContext context) {
+                    return stack;
+                }
+
+                public static class Serializer extends LootItemConditionalFunction.Serializer<AmbiguousSpawnFunction> {
+                    public void serialize(JsonObject json, AmbiguousSpawnFunction instance, JsonSerializationContext context) {
+                        json.addProperty("marker", instance.amount);
+                    }
+
+                    public AmbiguousSpawnFunction deserialize(JsonObject json, JsonDeserializationContext context, LootItemCondition[] conditions) {
+                        EntityType<?> entityType = EntityType.byString(GsonHelper.getAsString(json, "entity")).orElseThrow(() -> new JsonSyntaxException("No value present!"));
+                        int count = GsonHelper.getAsInt(json, "count");
+                        return new AmbiguousSpawnFunction(conditions, entityType, count);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(tempDir)
+
+        val ambiguous = srcDir.resolve("AmbiguousSpawnFunction.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(ambiguous.contains("MapCodec<AmbiguousSpawnFunction>"), ambiguous)
+        assertTrue(ambiguous.contains("LootItemConditionalFunction.Serializer<AmbiguousSpawnFunction>"), ambiguous)
+        assertTrue(ambiguous.contains("EntityType.byString(GsonHelper.getAsString(json, \"entity\"))"), ambiguous)
+        assertTrue(ambiguous.contains("GsonHelper.getAsInt(json, \"count\")"), ambiguous)
+    }
+
+    @Test
+    fun `legacy neoforge recipe condition serializers migrate to condition codecs`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.resources.ResourceLocation;
+            import net.neoforged.neoforge.common.conditions.ICondition;
+            import net.neoforged.neoforge.common.conditions.IConditionSerializer;
+
+            public class TestMod implements ICondition {
+                private static final ResourceLocation ID = ResourceLocation.fromNamespaceAndPath("example", "enabled");
+                public static final TestMod INSTANCE = new TestMod();
+
+                private TestMod() {
+                }
+
+                @Override
+                public ResourceLocation getID() {
+                    return ID;
+                }
+
+                @Override
+                public boolean test(IContext context) {
+                    return true;
+                }
+
+                public static class Serializer implements IConditionSerializer<TestMod> {
+                    public static final Serializer INSTANCE = new Serializer();
+
+                    @Override
+                    public ResourceLocation getID() {
+                        return ID;
+                    }
+
+                    @Override
+                    public TestMod read(JsonObject json) {
+                        return new TestMod();
+                    }
+
+                    @Override
+                    public void write(JsonObject json, TestMod value) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "neoforge-condition-serializer-mapcodec" })
+        assertTrue(transformed.contains("import com.mojang.serialization.MapCodec;"))
+        assertTrue(transformed.contains("public static final String CONDITION_ID = \"enabled\";"))
+        assertTrue(transformed.contains("public static final MapCodec<TestMod> CODEC = MapCodec.unit(INSTANCE);"))
+        assertTrue(transformed.contains("public MapCodec<? extends ICondition> codec()"))
+        assertTrue(transformed.contains("return CODEC;"))
+        assertFalse(transformed.contains("IConditionSerializer"))
+        assertFalse(transformed.contains("ResourceLocation"))
+        assertFalse(transformed.contains("JsonObject"))
+        assertFalse(transformed.contains("getID()"))
+        assertFalse(transformed.contains("class Serializer"))
+    }
+
+    @Test
+    fun `condition serializer migration ignores braces inside Java text blocks`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.resources.ResourceLocation;
+            import net.neoforged.neoforge.common.conditions.ICondition;
+            import net.neoforged.neoforge.common.conditions.IConditionSerializer;
+
+            public class TestMod implements ICondition {
+                private static final ResourceLocation ID = ResourceLocation.fromNamespaceAndPath("example", "enabled");
+                public static final TestMod INSTANCE = new TestMod();
+
+                @Override
+                public ResourceLocation getID() {
+                    return ID;
+                }
+
+                @Override
+                public boolean test(IContext context) {
+                    return true;
+                }
+
+                public static class Serializer implements IConditionSerializer<TestMod> {
+                    public static final Serializer INSTANCE = new Serializer();
+
+                    private static final String DOC = ${"\"\"\""}
+                        "quoted text"
+                        }
+                        ${"\"\"\""};
+
+                    @Override
+                    public ResourceLocation getID() {
+                        return ID;
+                    }
+
+                    @Override
+                    public TestMod read(JsonObject json) {
+                        return new TestMod();
+                    }
+
+                    @Override
+                    public void write(JsonObject json, TestMod value) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "neoforge-condition-serializer-mapcodec" })
+        assertTrue(transformed.contains("public static final MapCodec<TestMod> CODEC = MapCodec.unit(INSTANCE);"), transformed)
+        assertTrue(transformed.contains("public MapCodec<? extends ICondition> codec()"), transformed)
+        assertFalse(transformed.contains("class Serializer"), transformed)
+        assertFalse(transformed.contains("\"quoted text\""), transformed)
+        assertFalse(transformed.contains("IConditionSerializer"), transformed)
+    }
+
+    @Test
+    fun `condition serializer migration ignores comments and text blocks when deriving codec shape`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.resources.ResourceLocation;
+            import net.neoforged.neoforge.common.conditions.ICondition;
+            import net.neoforged.neoforge.common.conditions.IConditionSerializer;
+
+            public class TestMod implements ICondition {
+                private static final ResourceLocation ID = ResourceLocation.fromNamespaceAndPath("example", "enabled");
+                private static final String DOC = ${"\"\"\""}
+                    public static final TestMod INSTANCE = new TestMod();
+                    public MapCodec<? extends ICondition> codec()
+                    ${"\"\"\""};
+
+                @Override
+                public ResourceLocation getID() {
+                    return ID;
+                }
+
+                @Override
+                public boolean test(IContext context) {
+                    return true;
+                }
+
+                public static class Serializer implements IConditionSerializer<TestMod> {
+                    @Override
+                    public ResourceLocation getID() {
+                        return ID;
+                    }
+
+                    @Override
+                    public TestMod read(JsonObject json) {
+                        return new TestMod();
+                    }
+
+                    @Override
+                    public void write(JsonObject json, TestMod value) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "neoforge-condition-serializer-mapcodec" })
+        assertTrue(transformed.contains("public static final MapCodec<TestMod> CODEC = MapCodec.unit(new TestMod());"), transformed)
+        assertFalse(transformed.contains("MapCodec.unit(INSTANCE)"), transformed)
+        assertEquals(2, Regex("""MapCodec<\? extends ICondition>\s+codec\(\)""").findAll(transformed).count(), transformed)
+        assertTrue(transformed.contains("public static final TestMod INSTANCE = new TestMod();"), transformed)
+        assertFalse(transformed.contains("IConditionSerializer"), transformed)
+        assertFalse(transformed.contains("class Serializer"), transformed)
+    }
+
+    @Test
+    fun `condition serializer method cleanup ignores Java methods inside text blocks`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.resources.ResourceLocation;
+            import net.neoforged.neoforge.common.conditions.ICondition;
+            import net.neoforged.neoforge.common.conditions.IConditionSerializer;
+
+            public class TestMod implements ICondition {
+                private static final ResourceLocation ID = ResourceLocation.fromNamespaceAndPath("example", "enabled");
+                public static final TestMod INSTANCE = new TestMod();
+                private static final String DOC = ${"\"\"\""}
+                    public String getID() {
+                        return "documentation";
+                    }
+                    ${"\"\"\""};
+
+                @Override
+                public ResourceLocation getID() {
+                    return ID;
+                }
+
+                @Override
+                public boolean test(IContext context) {
+                    return true;
+                }
+
+                public static class Serializer implements IConditionSerializer<TestMod> {
+                    @Override
+                    public ResourceLocation getID() {
+                        return ID;
+                    }
+
+                    @Override
+                    public TestMod read(JsonObject json) {
+                        return new TestMod();
+                    }
+
+                    @Override
+                    public void write(JsonObject json, TestMod value) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "neoforge-condition-serializer-mapcodec" })
+        assertTrue(transformed.contains("public String getID()"), transformed)
+        assertTrue(transformed.contains("return \"documentation\";"), transformed)
+        assertFalse(transformed.contains("public ResourceLocation getID()"), transformed)
+        assertFalse(transformed.contains("class Serializer"), transformed)
+    }
+
+    @Test
+    fun `partial nbt ingredient helpers migrate to data component ingredients`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.Util;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.alchemy.Potion;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.neoforged.neoforge.common.crafting.PartialNBTIngredient;
+            import net.minecraft.core.registries.BuiltInRegistries;
+
+            public class TestMod {
+                public final PartialNBTIngredient damagedItem(Item item) {
+                    return PartialNBTIngredient.of(item, Util.make(() -> {
+                        CompoundTag nbt = new CompoundTag();
+                        nbt.putInt(ItemStack.TAG_DAMAGE, item.getMaxDamage());
+                        return nbt;
+                    }));
+                }
+
+                public final PartialNBTIngredient potionIngredient(Potion potion) {
+                    return PartialNBTIngredient.of(Items.POTION, Util.make(() -> {
+                        CompoundTag nbt = new CompoundTag();
+                        nbt.putString("Potion", BuiltInRegistries.POTION.getKey(potion).toString());
+                        return nbt;
+                    }));
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.core.Holder;"))
+        assertTrue(transformed.contains("import net.minecraft.core.component.DataComponents;"))
+        assertTrue(transformed.contains("import net.minecraft.world.item.alchemy.PotionContents;"))
+        assertTrue(transformed.contains("import net.neoforged.neoforge.common.crafting.DataComponentIngredient;"))
+        assertTrue(transformed.contains("public final Ingredient damagedItem(Item item)"))
+        assertTrue(transformed.contains("DataComponentIngredient.of(false, DataComponents.DAMAGE, item.getMaxDamage(), item)"))
+        assertTrue(transformed.contains("public final Ingredient potionIngredient(Holder<Potion> potion)"))
+        assertTrue(transformed.contains("DataComponentIngredient.of(false, DataComponents.POTION_CONTENTS, new PotionContents(potion), Items.POTION)"))
+        assertFalse(transformed.contains("PartialNBTIngredient"))
+        assertFalse(transformed.contains("CompoundTag"))
+        assertFalse(transformed.contains("Util.make"))
+        assertFalse(transformed.contains("ItemStack.TAG_DAMAGE"))
+    }
+
+    @Test
+    fun `partial nbt ingredient migration ignores comments and string literals`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.Util;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.neoforged.neoforge.common.crafting.PartialNBTIngredient;
+
+            public class TestMod {
+                /*
+                 public final PartialNBTIngredient commented(Item item) {
+                     return PartialNBTIngredient.of(item, Util.make(() -> {
+                         CompoundTag nbt = new CompoundTag();
+                         nbt.putInt(ItemStack.TAG_DAMAGE, item.getMaxDamage());
+                         return nbt;
+                     }));
+                 }
+                 */
+                private static final String DOC = "PartialNBTIngredient.of(item, Util.make(() -> nbt))";
+
+                public final PartialNBTIngredient damagedItem(Item item) {
+                    return PartialNBTIngredient.of(item, Util.make(() -> {
+                        CompoundTag nbt = new CompoundTag();
+                        nbt.putInt(ItemStack.TAG_DAMAGE, item.getMaxDamage());
+                        return nbt;
+                    }));
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("public final Ingredient damagedItem(Item item)"), transformed)
+        assertTrue(
+            transformed.contains("DataComponentIngredient.of(false, DataComponents.DAMAGE, item.getMaxDamage(), item)"),
+            transformed
+        )
+        assertTrue(transformed.contains("public final PartialNBTIngredient commented(Item item)"), transformed)
+        assertTrue(transformed.contains("private static final String DOC = \"PartialNBTIngredient.of(item, Util.make(() -> nbt))\";"), transformed)
+        assertFalse(transformed.contains("public final Ingredient commented(Item item)"), transformed)
+        assertFalse(transformed.contains("DOC = \"DataComponentIngredient.of"), transformed)
+    }
+
+    @Test
+    fun `unsupported partial nbt ingredient helpers are not half migrated`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.Util;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.Item;
+            import net.neoforged.neoforge.common.crafting.PartialNBTIngredient;
+
+            public class TestMod {
+                public final PartialNBTIngredient custom(Item item) {
+                    return PartialNBTIngredient.of(item, Util.make(() -> {
+                        CompoundTag nbt = new CompoundTag();
+                        nbt.putString("Custom", "value");
+                        return nbt;
+                    }));
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.neoforged.neoforge.common.crafting.PartialNBTIngredient;"))
+        assertTrue(transformed.contains("public final PartialNBTIngredient custom(Item item)"))
+        assertTrue(transformed.contains("PartialNBTIngredient.of(item"))
+        assertFalse(transformed.contains("DataComponentIngredient.of"))
+    }
+
+    @Test
+    fun `single item recipe result wrappers migrate to recipe output save calls`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.data.recipes.SingleItemRecipeBuilder;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.level.ItemLike;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import org.jetbrains.annotations.Nullable;
+
+            import java.util.function.Consumer;
+
+            public class TestMod {
+                protected static void buildRecipes(RecipeOutput consumer) {
+                    consumer.accept(stonecutting(Blocks.STONE, ModBlocks.CUT_STONE.get()));
+                    consumer.accept(stonecutting(Blocks.STONE, ModBlocks.TILE.get(), 2));
+                }
+
+                private static Wrapper stonecutting(ItemLike input, ItemLike output) {
+                    return stonecutting(input, output, 1);
+                }
+
+                private static Wrapper stonecutting(ItemLike input, ItemLike output, int count) {
+                    return new Wrapper(getIdFor(input.asItem(), output.asItem()), Ingredient.of(input), output.asItem(), count);
+                }
+
+                private static ResourceLocation getIdFor(Item input, Item output) {
+                    String path = String.format("stonecutting/%s/%s", BuiltInRegistries.ITEM.getKey(input).getPath(), BuiltInRegistries.ITEM.getKey(output).getPath());
+                    return prefix(path);
+                }
+
+                // Wrapper that allows you to not have an advancement
+                public static class Wrapper extends SingleItemRecipeBuilder.Result {
+                    public Wrapper(ResourceLocation id, Ingredient input, Item output, int count) {
+                        super(id, RecipeSerializer.STONECUTTER, "", input, output, count, null, null);
+                    }
+
+                    @Nullable
+                    @Override
+                    public JsonObject serializeAdvancement() {
+                        return null;
+                    }
+
+                    @Nullable
+                    @Override
+                    public ResourceLocation getAdvancementId() {
+                        return null;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.data.recipes.RecipeCategory;"))
+        assertTrue(transformed.contains("stonecutting(consumer, Blocks.STONE, ModBlocks.CUT_STONE.get());"))
+        assertTrue(transformed.contains("stonecutting(consumer, Blocks.STONE, ModBlocks.TILE.get(), 2);"))
+        assertTrue(transformed.contains("private static void stonecutting(RecipeOutput recipe, ItemLike input, ItemLike output)"))
+        assertTrue(transformed.contains("SingleItemRecipeBuilder.stonecutting(Ingredient.of(input), RecipeCategory.BUILDING_BLOCKS, output.asItem(), count).unlockedBy(\"has_block\", has(input)).save(recipe, getIdFor(input, output));"))
+        assertTrue(transformed.contains("private static ResourceLocation getIdFor(ItemLike input, ItemLike output)"))
+        assertTrue(transformed.contains("BuiltInRegistries.ITEM.getKey(input.asItem()).getPath()"))
+        assertTrue(transformed.contains("CriteriaTriggers.INVENTORY_CHANGED.createCriterion"))
+        assertFalse(transformed.contains("SingleItemRecipeBuilder.Result"))
+        assertFalse(transformed.contains("consumer.accept(stonecutting"))
+        assertFalse(transformed.contains("serializeAdvancement"))
+        assertFalse(transformed.contains("RecipeSerializer.STONECUTTER"))
+    }

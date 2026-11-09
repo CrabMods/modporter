@@ -1,0 +1,546 @@
+package @PACKAGE@;
+
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import javax.annotation.Nullable;
+import net.minecraft.BlockUtil;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.TicketType;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityDimensions;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.border.WorldBorder;
+import net.minecraft.world.level.dimension.DimensionType;
+import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.portal.DimensionTransition;
+import net.minecraft.world.level.portal.PortalForcer;
+import net.minecraft.world.level.portal.PortalShape;
+import net.minecraft.world.phys.Vec3;
+
+/**
+ * The removed 1.20.1 Entity portal probe algorithm and its Function-shaped teleporter boundary.
+ *
+ * <p>This helper searches existing portals only. It retains the old radius-three portal ticket
+ * side effect and never creates a portal or supplies a post-transition callback.</p>
+ */
+public final class LegacyPortalProbe {
+    private LegacyPortalProbe() {
+    }
+
+    @FunctionalInterface
+    public interface Teleporter {
+        @Nullable
+        PortalInfo getPortalInfo(
+            Entity entity,
+            ServerLevel destination,
+            Function<ServerLevel, PortalInfo> defaultPortalInfo
+        );
+    }
+
+    /**
+     * Evaluates the original ServerLevel getter and admits only its exact vanilla PortalForcer.
+     * A target subclass could have supplied custom old ITeleporter behavior, which this lane does
+     * not guess.
+     */
+    public static Teleporter vanilla(ServerLevel level) {
+        PortalForcer portalForcer = level.getPortalForcer();
+        return adapt(portalForcer);
+    }
+
+    /**
+     * Preserves the erased public Function boundary. Generated adapters pass through, the exact
+     * vanilla PortalForcer receives the old default calculation, and a foreign value is admitted
+     * only when reflection proves the complete legacy getPortalInfo callback contract.
+     */
+    public static Teleporter adapt(Object target) {
+        if (target == null) {
+            throw new IllegalArgumentException("Legacy teleporter Function returned null");
+        }
+        if (target instanceof Teleporter teleporter) {
+            return teleporter;
+        }
+        if (target.getClass() == PortalForcer.class) {
+            return (entity, destination, defaultPortalInfo) ->
+                defaultPortalInfo.apply(destination);
+        }
+        if (target instanceof PortalForcer) {
+            throw new IllegalArgumentException(
+                "A PortalForcer subclass may retain custom placement behavior: "
+                    + target.getClass().getName()
+            );
+        }
+        try {
+            return reflective(target);
+        } catch (ReflectiveOperationException exception) {
+            throw new IllegalArgumentException(
+                "Unsupported legacy teleporter Function result: " + target.getClass().getName(),
+                exception
+            );
+        }
+    }
+
+    /**
+     * Admits an external old ITeleporter only when both directions of its value boundary are
+     * proven: its return can be read and the supplied default Function can construct that exact
+     * four-field return class. DimensionTransition is rejected by every adapter because reducing
+     * it would discard destination and callback state.
+     *
+     * <p>This factory is called inside the source's existing try/catch so lookup and shape
+     * failures use that source's original logging and PortalForcer fallback.</p>
+     */
+    public static Teleporter reflective(Object target) throws ReflectiveOperationException {
+        Method method;
+        try {
+            method = target.getClass().getMethod(
+                "getPortalInfo",
+                Entity.class,
+                ServerLevel.class,
+                Function.class
+            );
+        } catch (LinkageError error) {
+            throw new ClassNotFoundException(
+                "Cannot link the reflected legacy getPortalInfo signature",
+                error
+            );
+        }
+        if (Modifier.isStatic(method.getModifiers())) {
+            throw new NoSuchMethodException("Expected an instance getPortalInfo method: " + method);
+        }
+        if (!method.canAccess(target) && !method.trySetAccessible()) {
+            throw new IllegalAccessException("Cannot access " + method);
+        }
+        Type callbackType;
+        try {
+            callbackType = method.getGenericParameterTypes()[2];
+        } catch (LinkageError error) {
+            throw new ClassNotFoundException(
+                "Cannot link the reflected getPortalInfo callback signature",
+                error
+            );
+        }
+        if (!(callbackType instanceof ParameterizedType parameterized)
+            || parameterized.getRawType() != Function.class
+            || parameterized.getActualTypeArguments().length != 2
+            || parameterized.getActualTypeArguments()[0] != ServerLevel.class
+            || parameterized.getActualTypeArguments()[1] != method.getReturnType()) {
+            throw new NoSuchMethodException(
+                "getPortalInfo does not retain Function<ServerLevel, returnType>: " + method
+            );
+        }
+        ReturnAdapter adapter = returnAdapter(method.getReturnType());
+        if (adapter.writer == null) {
+            throw new NoSuchMethodException(
+                "Cannot supply the old default Function for " + method.getReturnType().getName()
+            );
+        }
+
+        return (entity, destination, defaultPortalInfo) -> {
+            Function<ServerLevel, Object> externalDefault = level -> {
+                try {
+                    return adapter.writer.write(defaultPortalInfo.apply(level));
+                } catch (ReflectiveOperationException exception) {
+                    throw new IllegalStateException(exception);
+                }
+            };
+            try {
+                return adapter.reader.read(
+                    method.invoke(target, entity, destination, externalDefault)
+                );
+            } catch (InvocationTargetException exception) {
+                Throwable cause = exception.getCause();
+                if (cause instanceof RuntimeException runtimeException) {
+                    throw runtimeException;
+                }
+                if (cause instanceof Error error) {
+                    throw error;
+                }
+                throw new RuntimeException(cause);
+            } catch (ReflectiveOperationException exception) {
+                throw new IllegalStateException(exception);
+            }
+        };
+    }
+
+    /**
+     * Resolves a virtual method by exact name and parameter classes while discovering its actual
+     * return class. The supplied Lookup performs the real access check. The returned handle keeps
+     * its original receiver and parameters but returns the generated four-field PortalInfo value.
+     */
+    public static MethodHandle findVirtual(
+        MethodHandles.Lookup lookup,
+        Class<?> owner,
+        String name,
+        Class<?>... parameterTypes
+    ) throws ReflectiveOperationException {
+        Method[] candidates;
+        try {
+            candidates = Arrays.stream(owner.getDeclaredMethods())
+                .filter(method -> method.getName().equals(name))
+                .filter(method -> !Modifier.isStatic(method.getModifiers()))
+                .filter(method -> !method.isBridge() && !method.isSynthetic())
+                .filter(method -> Arrays.equals(method.getParameterTypes(), parameterTypes))
+                .toArray(Method[]::new);
+        } catch (LinkageError error) {
+            throw new ClassNotFoundException(
+                "Cannot link reflected virtual method " + owner.getName() + "#" + name,
+                error
+            );
+        }
+        if (candidates.length != 1) {
+            throw new NoSuchMethodException(
+                "Expected one declared virtual method " + owner.getName() + "#" + name
+                    + Arrays.toString(parameterTypes) + ", found " + candidates.length
+            );
+        }
+
+        Method method = candidates[0];
+        ReturnAdapter adapter = returnAdapter(method.getReturnType());
+        MethodHandle target = lookup.findVirtual(
+            owner,
+            name,
+            MethodType.methodType(method.getReturnType(), parameterTypes)
+        );
+        MethodHandle filter = MethodHandles.lookup()
+            .findStatic(
+                LegacyPortalProbe.class,
+                "readReturn",
+                MethodType.methodType(PortalInfo.class, ReturnReader.class, Object.class)
+            )
+            .bindTo(adapter.reader)
+            .asType(MethodType.methodType(PortalInfo.class, method.getReturnType()));
+        return MethodHandles.filterReturnValue(target, filter);
+    }
+
+    @Nullable
+    private static PortalInfo readReturn(ReturnReader reader, @Nullable Object value)
+        throws ReflectiveOperationException {
+        return reader.read(value);
+    }
+
+    /**
+     * Adapts a public BiFunction result without narrowing its generic return declaration. Only the
+     * generated value and the exact old four-public-final-field value contract are accepted.
+     */
+    @Nullable
+    public static PortalInfo portalInfo(@Nullable Object value) {
+        if (value == null || value instanceof PortalInfo) {
+            return (PortalInfo) value;
+        }
+        try {
+            return returnAdapter(value.getClass()).reader.read(value);
+        } catch (ReflectiveOperationException exception) {
+            throw new IllegalArgumentException(
+                "Unsupported legacy portal value result: " + value.getClass().getName(),
+                exception
+            );
+        }
+    }
+
+    private static ReturnAdapter returnAdapter(Class<?> returnType)
+        throws ReflectiveOperationException {
+        if (DimensionTransition.class.isAssignableFrom(returnType)) {
+            throw new NoSuchMethodException(
+                "DimensionTransition cannot be reduced to PortalInfo without validating its "
+                    + "destination, missingRespawnBlock state, and post-transition callback"
+            );
+        }
+
+        List<Field> publicInstanceFields;
+        Field pos;
+        Field speed;
+        Field yRot;
+        Field xRot;
+        try {
+            publicInstanceFields = Arrays.stream(returnType.getFields())
+                .filter(field -> Modifier.isPublic(field.getModifiers()))
+                .filter(field -> !Modifier.isStatic(field.getModifiers()))
+                .collect(Collectors.toList());
+            pos = returnType.getField("pos");
+            speed = returnType.getField("speed");
+            yRot = returnType.getField("yRot");
+            xRot = returnType.getField("xRot");
+        } catch (LinkageError error) {
+            throw new ClassNotFoundException(
+                "Cannot link reflected portal value " + returnType.getName(),
+                error
+            );
+        }
+        Set<String> publicFieldNames = publicInstanceFields.stream()
+            .map(Field::getName)
+            .collect(Collectors.toSet());
+        if (publicInstanceFields.size() != 4
+            || !publicFieldNames.equals(Set.of("pos", "speed", "yRot", "xRot"))
+            || pos.getType() != Vec3.class
+            || speed.getType() != Vec3.class
+            || yRot.getType() != float.class
+            || xRot.getType() != float.class
+            || !Modifier.isFinal(pos.getModifiers())
+            || !Modifier.isFinal(speed.getModifiers())
+            || !Modifier.isFinal(yRot.getModifiers())
+            || !Modifier.isFinal(xRot.getModifiers())) {
+            throw new NoSuchFieldException(
+                returnType.getName() + " does not expose the exact PortalInfo value shape"
+            );
+        }
+        for (Field field : publicInstanceFields) {
+            if (!field.trySetAccessible()) {
+                throw new IllegalAccessException("Cannot access " + field);
+            }
+        }
+
+        ReturnReader reader = value -> {
+            if (value == null) {
+                return null;
+            }
+            return new PortalInfo(
+                (Vec3) pos.get(value),
+                (Vec3) speed.get(value),
+                yRot.getFloat(value),
+                xRot.getFloat(value)
+            );
+        };
+
+        ReturnWriter writer = null;
+        try {
+            Constructor<?> constructor = returnType.getConstructor(
+                Vec3.class,
+                Vec3.class,
+                float.class,
+                float.class
+            );
+            if (constructor.trySetAccessible()) {
+                writer = value -> {
+                    if (value == null) {
+                        return null;
+                    }
+                    try {
+                        return constructor.newInstance(
+                            value.pos,
+                            value.speed,
+                            value.yRot,
+                            value.xRot
+                        );
+                    } catch (InvocationTargetException exception) {
+                        Throwable cause = exception.getCause();
+                        if (cause instanceof RuntimeException runtimeException) {
+                            throw runtimeException;
+                        }
+                        if (cause instanceof Error error) {
+                            throw error;
+                        }
+                        throw exception;
+                    }
+                };
+            }
+        } catch (NoSuchMethodException ignored) {
+            // Reading a reflected value does not require a constructor. The ITeleporter bridge
+            // checks writer separately because its supplied default Function does.
+        }
+        return new ReturnAdapter(reader, writer);
+    }
+
+    /**
+     * Exact mapped 1.20.1 Entity#findDimensionEntryPoint behavior for a non-player probe.
+     */
+    @Nullable
+    public static PortalInfo findDimensionEntryPoint(
+        Entity entity,
+        @Nullable BlockPos portalEntrancePos,
+        ServerLevel destination
+    ) {
+        boolean fromEndToOverworld =
+            entity.level().dimension() == Level.END && destination.dimension() == Level.OVERWORLD;
+        boolean toEnd = destination.dimension() == Level.END;
+        if (!fromEndToOverworld && !toEnd) {
+            boolean toNether = destination.dimension() == Level.NETHER;
+            if (entity.level().dimension() != Level.NETHER && !toNether) {
+                return null;
+            }
+
+            WorldBorder worldBorder = destination.getWorldBorder();
+            double scale = DimensionType.getTeleportationScale(
+                entity.level().dimensionType(),
+                destination.dimensionType()
+            );
+            BlockPos exitPos = worldBorder.clampToBounds(
+                entity.getX() * scale,
+                entity.getY(),
+                entity.getZ() * scale
+            );
+            return findExitPortal(destination, exitPos, toNether, worldBorder)
+                .map(rectangle -> createPortalInfo(
+                    destination,
+                    rectangle,
+                    entity,
+                    portalEntrancePos
+                ))
+                .orElse(null);
+        }
+
+        BlockPos destinationPos = toEnd
+            ? ServerLevel.END_SPAWN_POINT
+            : destination.getHeightmapPos(
+                Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                destination.getSharedSpawnPos()
+            );
+        return new PortalInfo(
+            new Vec3(
+                destinationPos.getX() + 0.5,
+                destinationPos.getY(),
+                destinationPos.getZ() + 0.5
+            ),
+            entity.getDeltaMovement(),
+            entity.getYRot(),
+            entity.getXRot()
+        );
+    }
+
+    private static Optional<BlockUtil.FoundRectangle> findExitPortal(
+        ServerLevel destination,
+        BlockPos exitPos,
+        boolean isNether,
+        WorldBorder worldBorder
+    ) {
+        return destination.getPortalForcer()
+            .findClosestPortalPosition(exitPos, isNether, worldBorder)
+            .map(portalPos -> {
+                destination.getChunkSource().addRegionTicket(
+                    TicketType.PORTAL,
+                    new ChunkPos(portalPos),
+                    PortalForcer.TICKET_RADIUS,
+                    portalPos
+                );
+                BlockState portalState = destination.getBlockState(portalPos);
+                return BlockUtil.getLargestRectangleAround(
+                    portalPos,
+                    portalState.getValue(BlockStateProperties.HORIZONTAL_AXIS),
+                    21,
+                    Direction.Axis.Y,
+                    21,
+                    candidate -> destination.getBlockState(candidate) == portalState
+                );
+            });
+    }
+
+    private static PortalInfo createPortalInfo(
+        ServerLevel destination,
+        BlockUtil.FoundRectangle destinationRectangle,
+        Entity entity,
+        BlockPos portalEntrancePos
+    ) {
+        BlockState entranceState = entity.level().getBlockState(portalEntrancePos);
+        Direction.Axis entranceAxis;
+        Vec3 relativePosition;
+        if (entranceState.hasProperty(BlockStateProperties.HORIZONTAL_AXIS)) {
+            entranceAxis = entranceState.getValue(BlockStateProperties.HORIZONTAL_AXIS);
+            BlockUtil.FoundRectangle entranceRectangle = BlockUtil.getLargestRectangleAround(
+                portalEntrancePos,
+                entranceAxis,
+                21,
+                Direction.Axis.Y,
+                21,
+                candidate -> entity.level().getBlockState(candidate) == entranceState
+            );
+            relativePosition = entity.getRelativePortalPosition(entranceAxis, entranceRectangle);
+        } else {
+            entranceAxis = Direction.Axis.X;
+            relativePosition = new Vec3(0.5, 0.0, 0.0);
+        }
+        return createPortalInfo(
+            destination,
+            destinationRectangle,
+            entranceAxis,
+            relativePosition,
+            entity,
+            entity.getDeltaMovement(),
+            entity.getYRot(),
+            entity.getXRot()
+        );
+    }
+
+    /**
+     * Exact old PortalShape#createPortalInfo calculation, using target public APIs.
+     */
+    private static PortalInfo createPortalInfo(
+        ServerLevel destination,
+        BlockUtil.FoundRectangle rectangle,
+        Direction.Axis entranceAxis,
+        Vec3 offset,
+        Entity entity,
+        Vec3 speed,
+        float yRot,
+        float xRot
+    ) {
+        BlockPos minCorner = rectangle.minCorner;
+        BlockState destinationState = destination.getBlockState(minCorner);
+        Direction.Axis destinationAxis = destinationState
+            .getOptionalValue(BlockStateProperties.HORIZONTAL_AXIS)
+            .orElse(Direction.Axis.X);
+        double width = rectangle.axis1Size;
+        double height = rectangle.axis2Size;
+        EntityDimensions dimensions = entity.getDimensions(entity.getPose());
+        int rotation = entranceAxis == destinationAxis ? 0 : 90;
+        Vec3 rotatedSpeed = entranceAxis == destinationAxis
+            ? speed
+            : new Vec3(speed.z, speed.y, -speed.x);
+        double horizontal = dimensions.width() / 2.0
+            + (width - dimensions.width()) * offset.x();
+        double vertical = (height - dimensions.height()) * offset.y();
+        double depth = 0.5 + offset.z();
+        boolean destinationIsX = destinationAxis == Direction.Axis.X;
+        Vec3 position = new Vec3(
+            minCorner.getX() + (destinationIsX ? horizontal : depth),
+            minCorner.getY() + vertical,
+            minCorner.getZ() + (destinationIsX ? depth : horizontal)
+        );
+        Vec3 collisionFree = PortalShape.findCollisionFreePosition(
+            position,
+            destination,
+            entity,
+            dimensions
+        );
+        return new PortalInfo(collisionFree, rotatedSpeed, yRot + rotation, xRot);
+    }
+
+    private static final class ReturnAdapter {
+        private final ReturnReader reader;
+        @Nullable
+        private final ReturnWriter writer;
+
+        private ReturnAdapter(ReturnReader reader, @Nullable ReturnWriter writer) {
+            this.reader = reader;
+            this.writer = writer;
+        }
+    }
+
+    @FunctionalInterface
+    private interface ReturnReader {
+        @Nullable
+        PortalInfo read(@Nullable Object value) throws ReflectiveOperationException;
+    }
+
+    @FunctionalInterface
+    private interface ReturnWriter {
+        @Nullable
+        Object write(@Nullable PortalInfo value) throws ReflectiveOperationException;
+    }
+}

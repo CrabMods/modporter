@@ -1,0 +1,1153 @@
+
+    @Test
+    fun `migrates singleton registered item SimpleCriterionTrigger without hardcoded factory names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val advancementDir = srcDir.resolve("advancement")
+        advancementDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.advancement.ExampleAdvancementTriggers;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                }
+
+                public void commonSetup() {
+                    ExampleAdvancementTriggers.init();
+                }
+            }
+        """.trimIndent())
+
+        advancementDir.resolve("ExampleAdvancementTriggers.java").writeText("""
+            package com.example.advancement;
+
+            import net.minecraft.advancements.CriteriaTriggers;
+
+            public class ExampleAdvancementTriggers {
+                public static void init() {
+                    CriteriaTriggers.register(IncubationTrigger.INSTANCE);
+                }
+            }
+        """.trimIndent())
+
+        advancementDir.resolve("IncubationTrigger.java").writeText("""
+            package com.example.advancement;
+
+            import com.example.ExampleMod;
+            import com.google.gson.JsonObject;
+            import net.minecraft.advancements.critereon.*;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.item.ItemStack;
+
+            public class IncubationTrigger extends SimpleCriterionTrigger<IncubationTrigger.Instance> {
+                private static final ResourceLocation ID = ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, "incubation_trigger");
+                public static final IncubationTrigger INSTANCE = new IncubationTrigger();
+
+                @Override
+                public ResourceLocation getId() {
+                    return ID;
+                }
+
+                @Override
+                public IncubationTrigger.Instance createInstance(JsonObject json, ContextAwarePredicate predicate, DeserializationContext context) {
+                    ItemPredicate itemPredicate = ItemPredicate.fromJson(json.get("item"));
+                    return new IncubationTrigger.Instance(predicate, itemPredicate);
+                }
+
+                public void trigger(ServerPlayer player, ItemStack stack) {
+                    this.trigger(player, instance -> instance.test(stack));
+                }
+
+                public static class Instance extends SimpleCriterionTrigger.SimpleInstance {
+                    private final ItemPredicate item;
+
+                    public Instance(ContextAwarePredicate predicate, ItemPredicate item) {
+                        super(IncubationTrigger.ID, predicate);
+                        this.item = item;
+                    }
+
+                    public static IncubationTrigger.Instance forItem(ItemPredicate item) {
+                        return new IncubationTrigger.Instance(ContextAwarePredicate.ANY, item);
+                    }
+
+                    public static IncubationTrigger.Instance forAny() {
+                        return forItem(ItemPredicate.ANY);
+                    }
+
+                    public boolean test(ItemStack stack) {
+                        return this.item.test(stack);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val registry = advancementDir.resolve("ExampleAdvancementTriggers.java").readText()
+        val trigger = advancementDir.resolve("IncubationTrigger.java").readText()
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-criterion-trigger-deferred-register" })
+        assertTrue(result.changes.any { it.ruleId == "struct-simple-criterion-trigger-codec" })
+        assertTrue(registry.contains("DeferredRegister<CriterionTrigger<?>> TRIGGERS"), registry)
+        assertTrue(registry.contains("DeferredHolder<CriterionTrigger<?>, IncubationTrigger> INCUBATION_TRIGGER"), registry)
+        assertTrue(registry.contains("TRIGGERS.register(\"incubation_trigger\", IncubationTrigger::new)"), registry)
+        assertTrue(!registry.contains("CriteriaTriggers"), registry)
+        assertTrue(!registry.contains("public static void init"), registry)
+        assertTrue(trigger.contains("public static Criterion<IncubationTrigger.Instance> forItem(ItemPredicate item)"), trigger)
+        assertTrue(trigger.contains("public static Criterion<IncubationTrigger.Instance> forAny()"), trigger)
+        assertTrue(trigger.contains("this.item.get().test(stack)"), trigger)
+        assertTrue(!trigger.contains("uncraftedItem"), trigger)
+        assertTrue(!trigger.contains("ItemPredicate.fromJson"), trigger)
+        assertTrue(mod.contains("ExampleAdvancementTriggers.TRIGGERS.register(modEventBus);"), mod)
+        assertTrue(!mod.contains("ExampleAdvancementTriggers.init();"), mod)
+    }
+
+    @Test
+    fun `migrates additional Minecraft 121 executable API surfaces`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+
+        srcDir.resolve("LegacyVanillaSurface.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.HashMultimap;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.core.Holder;
+            import net.minecraft.core.component.DataComponents;
+            import net.minecraft.nbt.NbtOps;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.InteractionResult;
+            import net.minecraft.world.InteractionHand;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectCategory;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.effect.MobEffects;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.MobType;
+            import net.minecraft.world.entity.item.ItemEntity;
+            import net.minecraft.world.entity.npc.VillagerData;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.component.CustomData;
+            import net.minecraft.world.item.component.ResolvableProfile;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.BucketPickup;
+            import net.minecraft.world.level.block.LiquidBlockContainer;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.level.material.Fluid;
+            import net.minecraft.world.level.material.Fluids;
+            import net.neoforged.neoforge.common.NeoForgeMod;
+            import net.neoforged.neoforge.common.util.TriState;
+            import net.neoforged.neoforge.event.entity.player.CanPlayerSleepEvent;
+            import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
+
+            public class LegacyVanillaSurface {
+                public int level(VillagerData data) {
+                    return data.level();
+                }
+
+                public void turtle(Item held) {
+                    if (held == Items.SCUTE || held == Items.SEAGRASS) {
+                    }
+                }
+
+                public void breakSlot(ItemStack stack, LivingEntity entity, EquipmentSlot equipmentSlot) {
+                    stack.hurtAndBreak(1, entity, LivingEntity.getSlotForHand(equipmentSlot));
+                }
+
+                public void skull(ItemStack head, Player target) {
+                    head.getOrDefault(DataComponents.CUSTOM_DATA, CustomData.EMPTY).copyTag().put("SkullOwner", ResolvableProfile.CODEC.encodeStart(NbtOps.INSTANCE, target.getGameProfile()).getOrThrow());
+                }
+
+                public void bucket(Player player, BucketPickup pickup, Level level, BlockPos pos, BlockState state, LiquidBlockContainer container, Fluid fluid) {
+                    pickup.pickupBlock(level, pos, state);
+                    container.canPlaceLiquid(level, pos, state, fluid);
+                }
+
+                public boolean canContainWater(Level level, BlockPos pos, BlockState state, LiquidBlockContainer container, Fluid fluid) {
+                    return container.canPlaceLiquid(level, pos, state, fluid);
+                }
+
+                public boolean canContainWaterCast(Level level, BlockPos pos, BlockState state, Block block) {
+                    return block instanceof LiquidBlockContainer && ((LiquidBlockContainer)block).canPlaceLiquid(level, pos, state, Fluids.WATER);
+                }
+
+                public boolean canContainWaterPattern(Level level, BlockPos pos, BlockState state) {
+                    return state.getBlock() instanceof LiquidBlockContainer lbc && lbc.canPlaceLiquid(level, pos, state, Fluids.WATER);
+                }
+
+                public void thrower(ItemEntity itemEntity, LivingEntity entity) {
+                    itemEntity.setThrower(entity.getUUID());
+                }
+
+                public boolean arthropod(LivingEntity target) {
+                    return target.getMobType() == MobType.ARTHROPOD && target.getMobType() != MobType.UNDEAD;
+                }
+
+                public void rightClick(PlayerInteractEvent.RightClickBlock event) {
+                    event.setResult(TriState.TRUE);
+                }
+
+                public static void staticRightClick(PlayerInteractEvent.RightClickBlock event) {
+                    event.setResult(TriState.FALSE);
+                }
+
+                public void sleep(CanPlayerSleepEvent event) {
+                    if (event.getPos().isPresent() && event.getEntity().level().getBlockState(event.getPos().getValue()).getBlock() == null) {
+                        event.setResult(TriState.TRUE);
+                    }
+                }
+
+                public void entityState(Player player) {
+                    Multimap<Holder<Attribute>, AttributeModifier> map = HashMultimap.create();
+                    map.put(NeoForgeMod.SWIM_SPEED.get(), null);
+                    if (player.isAddedToWorld()) {
+                        player.isAlive();
+                    }
+                }
+
+                public LegacyEffectType customEffect() {
+                    return new LegacyEffectType(ExampleEffects.CUSTOM.get());
+                }
+            }
+
+            class LegacyEffectType {
+                private final MobEffect effect;
+
+                LegacyEffectType(MobEffect effect) {
+                    this.effect = effect;
+                }
+
+                public net.minecraft.network.chat.Component name() {
+                    return effect.getDisplayName();
+                }
+
+                public void apply(LivingEntity target, int duration, int amplifier) {
+                    amplifier = effect == MobEffects.DAMAGE_RESISTANCE ? Math.min(3, amplifier) : amplifier;
+                    target.addEffect(new MobEffectInstance(BuiltInRegistries.MOB_EFFECT.wrapAsHolder(effect), duration, amplifier));
+                }
+            }
+
+            class LegacyTickEffect extends MobEffect {
+                LegacyTickEffect() {
+                    super(MobEffectCategory.HARMFUL, 0);
+                }
+
+                @Override
+                public boolean applyEffectTick(LivingEntity entity, int amplifier) {
+                    if (entity.level().isClientSide) {
+                        return;
+                    }
+                    return true;
+                }
+            }
+        """.trimIndent())
+
+        srcDir.resolve("ExampleEffects.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.effect.MobEffect;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ExampleEffects {
+                public static final DeferredRegister<MobEffect> EFFECTS = DeferredRegister.create(Registries.MOB_EFFECT, "example");
+                public static final DeferredHolder<MobEffect, MobEffect> CUSTOM = EFFECTS.register("custom", () -> null);
+            }
+        """.trimIndent())
+
+        srcDir.resolve("DeepChestBE.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.RandomizableContainerBlockEntity;
+
+            public abstract class DeepChestBE extends RandomizableContainerBlockEntity {
+            }
+        """.trimIndent())
+
+        srcDir.resolve("LootPiece.java").writeText("""
+            package com.example;
+
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.util.RandomSource;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+
+            public class LootPiece {
+                public void place(BlockEntity blockEntity, RandomSource random) {
+                    if (blockEntity instanceof DeepChestBE be) {
+                        be.setLootTable(ResourceLocation.fromNamespaceAndPath("example", "deep_city_altar"), random.nextLong());
+                    }
+                }
+            }
+        """.trimIndent())
+
+        srcDir.resolve("LegacyProjectile.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.projectile.AbstractHurtingProjectile;
+            import net.minecraft.world.level.Level;
+
+            public class LegacyProjectile extends AbstractHurtingProjectile {
+                public LegacyProjectile(EntityType<? extends AbstractHurtingProjectile> type, double x, double y, double z, double xa, double ya, double za, Level level) {
+                    super(type, x, y, z, xa, ya, za, level);
+                }
+            }
+        """.trimIndent())
+
+        srcDir.resolve("LegacyToast.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.components.toasts.Toast;
+            import net.minecraft.client.gui.components.toasts.ToastComponent;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class LegacyToast implements Toast {
+                private static final Component TITLE_TEXT = Component.literal("title");
+                private static final ResourceLocation TEXTURE = ResourceLocation.withDefaultNamespace("toast/legacy");
+
+                @Override
+                public Visibility render(GuiGraphics pGuiGraphics, ToastComponent toastComponent, long time) {
+                    pGuiGraphics.blit(TEXTURE, 0, 0, 0, 32, this.width(), this.height());
+                    return Visibility.SHOW;
+                }
+            }
+        """.trimIndent())
+
+        srcDir.resolve("LegacyTierClass.java").writeText("""
+            package com.example;
+
+            import net.minecraft.tags.BlockTags;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.item.Tier;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.level.block.Block;
+            import org.jetbrains.annotations.Nullable;
+
+            public class LegacyTierClass implements Tier {
+                @Override
+                public int getUses() { return 300; }
+                @Override
+                public float getSpeed() { return 8.0F; }
+                @Override
+                public float getAttackDamageBonus() { return 3.0F; }
+                @Override
+                public int getLevel() { return 3; }
+                @Override
+                public int getEnchantmentValue() { return 10; }
+                @Override
+                public Ingredient getRepairIngredient() { return Ingredient.EMPTY; }
+                @Override
+                public @Nullable TagKey<Block> getTag() { return BlockTags.NEEDS_IRON_TOOL; }
+            }
+        """.trimIndent())
+
+        srcDir.resolve("LegacyStepEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.monster.Monster;
+            import net.minecraft.world.level.Level;
+
+            public class LegacyStepEntity extends Monster {
+                public LegacyStepEntity(EntityType<? extends Monster> type, Level level) {
+                    super(type, level);
+                    this.setMaxUpStep(1.0F);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("NeoForgeRegistrySurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.material.Fluid;
+            import net.neoforged.neoforge.registries.NeoForgeRegistries;
+
+            public class NeoForgeRegistrySurface {
+                public String fluidPath(Fluid fluid) {
+                    return NeoForgeRegistries.FLUID_TYPES.get().getKey(fluid.getFluidType()).getPath();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val surface = srcDir.resolve("LegacyVanillaSurface.java").readText()
+        val projectile = srcDir.resolve("LegacyProjectile.java").readText()
+        val toast = srcDir.resolve("LegacyToast.java").readText()
+        val tier = srcDir.resolve("LegacyTierClass.java").readText()
+        val stepEntity = srcDir.resolve("LegacyStepEntity.java").readText()
+        val lootPiece = srcDir.resolve("LootPiece.java").readText()
+        val neoForgeRegistrySurface = srcDir.resolve("NeoForgeRegistrySurface.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(surface.contains("return data.getLevel();"), surface)
+        assertTrue(surface.contains("held == Items.TURTLE_SCUTE"), surface)
+        assertTrue(surface.contains("stack.hurtAndBreak(1, entity, equipmentSlot);"), surface)
+        assertTrue(surface.contains("head.set(DataComponents.PROFILE, new ResolvableProfile(target.getGameProfile()))"), surface)
+        assertTrue(surface.contains("pickup.pickupBlock(player, level, pos, state);"), surface)
+        assertTrue(surface.contains("container.canPlaceLiquid(player, level, pos, state, fluid);"), surface)
+        assertTrue(surface.contains("return container.canPlaceLiquid(null, level, pos, state, fluid);"), surface)
+        assertTrue(surface.contains("((LiquidBlockContainer)block).canPlaceLiquid(null, level, pos, state, Fluids.WATER)"), surface)
+        assertTrue(surface.contains("lbc.canPlaceLiquid(null, level, pos, state, Fluids.WATER)"), surface)
+        assertTrue(surface.contains("itemEntity.setThrower(entity);"), surface)
+        assertTrue(surface.contains("target.getType().is(EntityTypeTags.ARTHROPOD)"), surface)
+        assertTrue(surface.contains("!target.getType().is(EntityTypeTags.UNDEAD)"), surface)
+        assertTrue(surface.contains("event.setCancellationResult(InteractionResult.SUCCESS);"), surface)
+        assertTrue(surface.contains("event.setCancellationResult(InteractionResult.FAIL);"), surface)
+        assertTrue(surface.contains("event.setCanceled(true);"), surface)
+        assertFalse(surface.contains("event.setResult(TriState"), surface)
+        assertTrue(surface.contains("event.setProblem(null);"), surface)
+        assertTrue(surface.contains("event.getEntity().level().getBlockState(event.getPos())"), surface)
+        assertFalse(surface.contains("event.getPos().isPresent()"), surface)
+        assertFalse(surface.contains("event.getPos().getValue()"), surface)
+        assertTrue(surface.contains("map.put(NeoForgeMod.SWIM_SPEED, null);"), surface)
+        assertTrue(surface.contains("player.isAddedToLevel()"), surface)
+        assertTrue(surface.contains("new LegacyEffectType(ExampleEffects.CUSTOM);"), surface)
+        assertTrue(surface.contains("private final Holder<MobEffect> effect;"), surface)
+        assertTrue(surface.contains("LegacyEffectType(Holder<MobEffect> effect)"), surface)
+        assertTrue(surface.contains("return effect.value().getDisplayName();"), surface)
+        assertTrue(surface.contains("effect.is(MobEffects.DAMAGE_RESISTANCE)"), surface)
+        assertTrue(surface.contains("new MobEffectInstance(effect, duration, amplifier)"), surface)
+        assertTrue(surface.contains("return true;"), surface)
+        assertFalse(surface.contains("BuiltInRegistries.MOB_EFFECT.wrapAsHolder(effect)"), surface)
+        assertTrue(projectile.contains("super(type, x, y, z, new Vec3(xa, ya, za), level);"), projectile)
+        assertTrue(toast.contains("pGuiGraphics.blitSprite(BACKGROUND_SPRITE, 0, 0, this.width(), this.height());"), toast)
+        assertTrue(toast.contains("ResourceLocation.withDefaultNamespace(\"toast/advancement\")"), toast)
+        assertTrue(tier.contains("public TagKey<Block> getIncorrectBlocksForDrops()"), tier)
+        assertTrue(tier.contains("return BlockTags.NEEDS_IRON_TOOL;"), tier)
+        assertFalse(tier.contains("getLevel()"), tier)
+        assertFalse(tier.contains("getTag()"), tier)
+        assertFalse(tier.contains("@Nullable"), tier)
+        assertTrue(stepEntity.contains("public float maxUpStep()"), stepEntity)
+        assertTrue(stepEntity.contains("return 1.0F;"), stepEntity)
+        assertFalse(stepEntity.contains("setMaxUpStep"), stepEntity)
+        assertTrue(neoForgeRegistrySurface.contains("return NeoForgeRegistries.FLUID_TYPES.getKey(fluid.getFluidType()).getPath();"), neoForgeRegistrySurface)
+        assertFalse(neoForgeRegistrySurface.contains("FLUID_TYPES.get().getKey"), neoForgeRegistrySurface)
+        assertTrue(lootPiece.contains("be.setLootTable(ResourceKey.create(Registries.LOOT_TABLE, ResourceLocation.fromNamespaceAndPath(\"example\", \"deep_city_altar\")));"), lootPiece)
+        assertTrue(lootPiece.contains("            be.setLootTableSeed(random.nextLong());"), lootPiece)
+        assertTrue(lootPiece.contains("import net.minecraft.resources.ResourceKey;"), lootPiece)
+        assertTrue(lootPiece.contains("import net.minecraft.core.registries.Registries;"), lootPiece)
+    }
+
+    @Test
+    fun `migrates legacy vanilla advancement criterion constructors without trigger fallback`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+
+        srcDir.resolve("LegacyAdvancementData.java").writeText("""
+            package com.example;
+
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.advancements.CriteriaTriggers;
+            import net.minecraft.advancements.critereon.BlockPredicate;
+            import net.minecraft.advancements.critereon.ContextAwarePredicate;
+            import net.minecraft.advancements.critereon.EntityPredicate;
+            import net.minecraft.advancements.critereon.ImpossibleTrigger;
+            import net.minecraft.advancements.critereon.InventoryChangeTrigger;
+            import net.minecraft.advancements.critereon.ItemPredicate;
+            import net.minecraft.advancements.critereon.ItemUsedOnLocationTrigger;
+            import net.minecraft.advancements.critereon.LocationPredicate;
+            import net.minecraft.advancements.critereon.MatchTool;
+            import net.minecraft.advancements.critereon.MinMaxBounds;
+            import net.minecraft.advancements.critereon.NbtPredicate;
+            import net.minecraft.advancements.critereon.PlayerTrigger;
+            import net.minecraft.advancements.critereon.StartRidingTrigger;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.ItemLike;
+            import net.minecraft.world.level.storage.loot.predicates.LocationCheck;
+
+            public class LegacyAdvancementData {
+                public void generate() {
+                    CompoundTag moaTag = new CompoundTag();
+                    Advancement.Builder.advancement()
+                        .addCriterion("ride", StartRidingTrigger.TriggerInstance.playerStartsRiding(EntityPredicate.Builder.entity().vehicle(EntityPredicate.Builder.entity().of(ExampleTypes.MOA).nbt(new NbtPredicate(moaTag)).build())))
+                        .addCriterion("sleep", new PlayerTrigger.TriggerInstance(CriteriaTriggers.SLEPT_IN_BED.getId(), EntityPredicate.wrap(EntityPredicate.Builder.entity().located(LocationPredicate.Builder.location()).build())))
+                        .addCriterion("custom", itemUsedOnLocationCheckAbove(LocationPredicate.Builder.location().setBlock(BlockPredicate.Builder.block().of(ExampleBlocks.GRASS)), LocationPredicate.Builder.location(), ItemPredicate.Builder.item()))
+                        .addCriterion("stack_components", ItemUsedOnLocationTrigger.TriggerInstance.itemUsedOnBlock(LocationPredicate.Builder.location(), ItemPredicate.Builder.item().hasNbt(ExampleItems.banner().getTag())))
+                        .addCriterion("helper", has(ExampleItems.banner()))
+                        .addCriterion("impossible", new ImpossibleTrigger.TriggerInstance());
+
+                    Advancement.Builder.advancement()
+                        .addCriterion("many_items", new InventoryChangeTrigger.TriggerInstance(ContextAwarePredicate.ANY, MinMaxBounds.Ints.atLeast(10), MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY, new ItemPredicate[0]));
+                }
+
+                private static ItemUsedOnLocationTrigger.TriggerInstance itemUsedOnLocationCheckAbove(LocationPredicate.Builder location, LocationPredicate.Builder above, ItemPredicate.Builder item) {
+                    ContextAwarePredicate contextawarepredicate = ContextAwarePredicate.create(LocationCheck.checkLocation(location).build(), LocationCheck.checkLocation(above, BlockPos.ZERO.above()).build(), MatchTool.toolMatches(item).build());
+                    return new ItemUsedOnLocationTrigger.TriggerInstance(CriteriaTriggers.ITEM_USED_ON_BLOCK.getId(), ContextAwarePredicate.ANY, contextawarepredicate);
+                }
+
+                private InventoryChangeTrigger.TriggerInstance has(ItemLike item) {
+                    return new InventoryChangeTrigger.TriggerInstance(ContextAwarePredicate.ANY, MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY, new ItemPredicate[]{ItemPredicate.Builder.item().of(item).build()});
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LegacyRecipeUnlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.advancements.critereon.ContextAwarePredicate;
+            import net.minecraft.advancements.critereon.InventoryChangeTrigger;
+            import net.minecraft.advancements.critereon.ItemPredicate;
+            import net.minecraft.advancements.critereon.MinMaxBounds;
+
+            public class LegacyRecipeUnlock {
+                public void build() {
+                    Advancement.Builder.advancement()
+                        .addCriterion("many_items", new InventoryChangeTrigger.TriggerInstance(ContextAwarePredicate.ANY, MinMaxBounds.Ints.atLeast(10), MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY, new ItemPredicate[0]));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("LegacyAdvancementData.java").readText()
+        val recipeUnlock = srcDir.resolve("LegacyRecipeUnlock.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("EntityPredicate.Builder.entity().vehicle(EntityPredicate.Builder.entity().of(ExampleTypes.MOA).nbt(new NbtPredicate(moaTag)))"), migrated)
+        assertTrue(migrated.contains("CriteriaTriggers.SLEPT_IN_BED.createCriterion(new PlayerTrigger.TriggerInstance(java.util.Optional.of(EntityPredicate.wrap(EntityPredicate.Builder.entity().located(LocationPredicate.Builder.location()).build()))))"), migrated)
+        assertTrue(migrated.contains("private static Criterion<ItemUsedOnLocationTrigger.TriggerInstance> itemUsedOnLocationCheckAbove"), migrated)
+        assertTrue(migrated.contains("return CriteriaTriggers.ITEM_USED_ON_BLOCK.createCriterion(new ItemUsedOnLocationTrigger.TriggerInstance(java.util.Optional.empty(), java.util.Optional.of(contextawarepredicate)));"), migrated)
+        assertTrue(migrated.contains(".addCriterion(\"impossible\", CriteriaTriggers.IMPOSSIBLE.createCriterion(new ImpossibleTrigger.TriggerInstance()))"), migrated)
+        assertTrue(migrated.contains("private Criterion<InventoryChangeTrigger.TriggerInstance> has(ItemLike item)"), migrated)
+        assertTrue(migrated.contains("return CriteriaTriggers.INVENTORY_CHANGED.createCriterion(new InventoryChangeTrigger.TriggerInstance(java.util.Optional.empty(), new InventoryChangeTrigger.TriggerInstance.Slots(MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY), java.util.List.of(ItemPredicate.Builder.item().of(item).build())));"), migrated)
+        assertTrue(migrated.contains("DataComponentPredicate.allOf(ExampleItems.banner().getComponents())"), migrated)
+        assertTrue(migrated.contains("CriteriaTriggers.INVENTORY_CHANGED.createCriterion(new InventoryChangeTrigger.TriggerInstance(java.util.Optional.empty(), new InventoryChangeTrigger.TriggerInstance.Slots(MinMaxBounds.Ints.atLeast(10), MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY), java.util.List.of()))"), migrated)
+        assertFalse(migrated.contains("ContextAwarePredicate.ANY"), migrated)
+        assertFalse(migrated.contains("CriteriaTriggers.ITEM_USED_ON_BLOCK.getId()"), migrated)
+        assertFalse(migrated.contains("new PlayerTrigger.TriggerInstance(CriteriaTriggers.SLEPT_IN_BED.getId()"), migrated)
+        assertFalse(migrated.contains("ExampleItems.banner().getTag()"), migrated)
+        assertFalse(migrated.contains("CriteriaTriggers.TICK.createCriterion"), migrated)
+        assertTrue(recipeUnlock.contains("import net.minecraft.advancements.CriteriaTriggers;"), recipeUnlock)
+        assertTrue(recipeUnlock.contains("CriteriaTriggers.INVENTORY_CHANGED.createCriterion(new InventoryChangeTrigger.TriggerInstance(java.util.Optional.empty(), new InventoryChangeTrigger.TriggerInstance.Slots(MinMaxBounds.Ints.atLeast(10), MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY), java.util.List.of()))"), recipeUnlock)
+    }
+
+    @Test
+    fun `legacy vanilla advancement criterion constructor migration ignores comments and string literals`() {
+        val sourceFile = createFile("AdvancementCriterionDocs.java", """
+            package com.example;
+
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.advancements.CriteriaTriggers;
+            import net.minecraft.advancements.critereon.ContextAwarePredicate;
+            import net.minecraft.advancements.critereon.InventoryChangeTrigger;
+            import net.minecraft.advancements.critereon.ItemPredicate;
+            import net.minecraft.advancements.critereon.ItemUsedOnLocationTrigger;
+            import net.minecraft.advancements.critereon.MinMaxBounds;
+            import net.minecraft.advancements.critereon.PlayerTrigger;
+
+            public class AdvancementCriterionDocs {
+                /*
+                private static ItemUsedOnLocationTrigger.TriggerInstance ignored(ContextAwarePredicate contextawarepredicate) {
+                    return new ItemUsedOnLocationTrigger.TriggerInstance(CriteriaTriggers.ITEM_USED_ON_BLOCK.getId(), ContextAwarePredicate.ANY, contextawarepredicate);
+                }
+                */
+                private static final String PLAYER_DOC = "new PlayerTrigger.TriggerInstance(CriteriaTriggers.SLEPT_IN_BED.getId(), ContextAwarePredicate.ANY)";
+                private static final String INVENTORY_DOC = "new InventoryChangeTrigger.TriggerInstance(ContextAwarePredicate.ANY, MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY, new ItemPredicate[0])";
+                private static final String SINGLE_DOC = "new ExampleTrigger.Instance(ContextAwarePredicate.ANY)";
+
+                public Advancement keep(Advancement advancement) {
+                    // new ExampleTrigger.Instance(ContextAwarePredicate.ANY)
+                    return advancement;
+                }
+            }
+        """.trimIndent()).resolve("src/main/java/com/example/AdvancementCriterionDocs.java")
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = sourceFile.readText()
+
+        assertEquals(original, migrated)
+        assertEquals(0, result.changeCount)
+        assertFalse(migrated.contains("createCriterion(new PlayerTrigger.TriggerInstance"), migrated)
+        assertFalse(migrated.contains("CriteriaTriggers.INVENTORY_CHANGED.createCriterion"), migrated)
+        assertFalse(migrated.contains("Criterion<ItemUsedOnLocationTrigger.TriggerInstance> ignored"), migrated)
+    }
+
+    @Test
+    fun `legacy advancement datagen empty criterion factories use executable source evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("FactoryTrigger.java").writeText("""
+            package com.example;
+
+            import java.util.Optional;
+            import net.minecraft.advancements.Criterion;
+            import net.minecraft.advancements.critereon.ContextAwarePredicate;
+
+            public class FactoryTrigger {
+                public record Instance(Optional<ContextAwarePredicate> player) {
+                    public static Criterion<FactoryTrigger.Instance> any() {
+                        return new Instance(Optional.empty());
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CommentOnlyTrigger.java").writeText("""
+            package com.example;
+
+            import java.util.Optional;
+            import net.minecraft.advancements.Criterion;
+            import net.minecraft.advancements.critereon.ContextAwarePredicate;
+
+            public class CommentOnlyTrigger {
+                public record Instance(Optional<ContextAwarePredicate> player) {
+                    /*
+                    public static Criterion<CommentOnlyTrigger.Instance> any() {
+                        return new Instance(Optional.empty());
+                    }
+                    */
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("FactoryUsage.java").writeText("""
+            package com.example;
+
+            import net.minecraft.advancements.critereon.ContextAwarePredicate;
+
+            public class FactoryUsage {
+                private static final String DOC = "new FactoryTrigger.Instance(ContextAwarePredicate.ANY); new CommentOnlyTrigger.Instance(java.util.Optional.empty())";
+
+                public Object realFactory() {
+                    return new FactoryTrigger.Instance(ContextAwarePredicate.ANY);
+                }
+
+                public Object commentOnlyFactory() {
+                    // new FactoryTrigger.Instance(ContextAwarePredicate.ANY)
+                    return new CommentOnlyTrigger.Instance(ContextAwarePredicate.ANY);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val usage = srcDir.resolve("FactoryUsage.java").readText()
+        val commentOnly = srcDir.resolve("CommentOnlyTrigger.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(usage.contains("return FactoryTrigger.Instance.any();"), usage)
+        assertTrue(usage.contains("return new CommentOnlyTrigger.Instance(java.util.Optional.empty());"), usage)
+        assertFalse(usage.contains("CommentOnlyTrigger.Instance.any()"), usage)
+        assertTrue(usage.contains("""private static final String DOC = "new FactoryTrigger.Instance(ContextAwarePredicate.ANY); new CommentOnlyTrigger.Instance(java.util.Optional.empty())";"""), usage)
+        assertTrue(usage.contains("// new FactoryTrigger.Instance(ContextAwarePredicate.ANY)"), usage)
+        assertTrue(commentOnly.contains("public static Criterion<CommentOnlyTrigger.Instance> any()"), commentOnly)
+    }
+
+    @Test
+    fun `legacy advancement datagen location predicates use executable provider evidence`() {
+        val sourceFile = createFile("AdvancementLocationPredicates.java", """
+            package com.example;
+
+            import net.minecraft.advancements.critereon.LocationPredicate;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.biome.Biome;
+            import net.minecraft.world.level.levelgen.structure.Structure;
+
+            public class AdvancementLocationPredicates {
+                private static final String DOC = "LocationPredicate.inDimension(dimension); LocationPredicate.inBiome(biome); LocationPredicate.inStructure(structure);";
+
+                public void build(HolderLookup.Provider registries, ResourceKey<Level> dimension, ResourceKey<Biome> biome, ResourceKey<Structure> structure) {
+                    // LocationPredicate.inBiome(biome);
+                    LocationPredicate.inDimension(dimension);
+                    LocationPredicate.inBiome(biome);
+                    LocationPredicate.inStructure(structure);
+                }
+            }
+        """.trimIndent()).resolve("src/main/java/com/example/AdvancementLocationPredicates.java")
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = sourceFile.readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("LocationPredicate.Builder.inDimension(dimension);"), migrated)
+        assertTrue(migrated.contains("LocationPredicate.Builder.inBiome(registries.lookupOrThrow(Registries.BIOME).getOrThrow(biome));"), migrated)
+        assertTrue(migrated.contains("LocationPredicate.Builder.inStructure(registries.lookupOrThrow(Registries.STRUCTURE).getOrThrow(structure));"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "LocationPredicate.inDimension(dimension); LocationPredicate.inBiome(biome); LocationPredicate.inStructure(structure);";"""), migrated)
+        assertTrue(migrated.contains("// LocationPredicate.inBiome(biome);"), migrated)
+    }
+
+    @Test
+    fun `legacy advancement datagen holder migration preserves string literal arguments`() {
+        val sourceFile = createFile("AdvancementLiteralArguments.java", """
+            package com.example;
+
+            import java.util.function.Consumer;
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.advancements.FrameType;
+            import net.minecraft.advancements.RequirementsStrategy;
+            import net.minecraft.advancements.critereon.LocationPredicate;
+            import net.minecraft.advancements.critereon.PlayerTrigger;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.Level;
+
+            public class AdvancementLiteralArguments {
+                public void generate(HolderLookup.Provider registries, Consumer<Advancement> consumer) {
+                    Advancement root = Advancement.Builder.advancement()
+                        .display(
+                            null,
+                            Component.translatable("advancement.example.root"),
+                            Component.translatable("advancement.example.root.desc"),
+                            new ResourceLocation("example", "textures/gui/root.png"),
+                            FrameType.TASK,
+                            true,
+                            false,
+                            false)
+                        .requirements(RequirementsStrategy.OR)
+                        .addCriterion("in_tf", PlayerTrigger.TriggerInstance.located(LocationPredicate.inDimension(Level.OVERWORLD)))
+                        .save(consumer, "example:root");
+                }
+            }
+        """.trimIndent()).resolve("src/main/java/com/example/AdvancementLiteralArguments.java")
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = sourceFile.readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("AdvancementHolder root = Advancement.Builder.advancement()"), migrated)
+        assertTrue(migrated.contains("""Component.translatable("advancement.example.root")"""), migrated)
+        assertTrue(migrated.contains("""Component.translatable("advancement.example.root.desc")"""), migrated)
+        assertTrue(migrated.contains("""ResourceLocation.fromNamespaceAndPath("example", "textures/gui/root.png")"""), migrated)
+        assertTrue(migrated.contains("""addCriterion("in_tf", PlayerTrigger.TriggerInstance.located(LocationPredicate.Builder.inDimension(Level.OVERWORLD)))"""), migrated)
+        assertTrue(migrated.contains(""".save(consumer, "example:root")"""), migrated)
+        assertFalse(migrated.contains("Component.translatable(                        )"), migrated)
+        assertFalse(migrated.contains("addCriterion(       ,"), migrated)
+    }
+
+    @Test
+    fun `legacy advancement datagen location predicates do not use commented provider fallback`() {
+        val sourceFile = createFile("AdvancementLocationPredicateNoProvider.java", """
+            package com.example;
+
+            import net.minecraft.advancements.critereon.LocationPredicate;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.world.level.biome.Biome;
+
+            public class AdvancementLocationPredicateNoProvider {
+                private static final String DOC = "HolderLookup.Provider registries";
+                // public void build(HolderLookup.Provider registries) {}
+
+                public void build(ResourceKey<Biome> biome) {
+                    LocationPredicate.inBiome(biome);
+                }
+            }
+        """.trimIndent()).resolve("src/main/java/com/example/AdvancementLocationPredicateNoProvider.java")
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = sourceFile.readText()
+
+        assertEquals(original, migrated)
+        assertEquals(0, result.changeCount)
+        assertTrue(migrated.contains("LocationPredicate.inBiome(biome);"), migrated)
+    }
+
+    @Test
+    fun `legacy advancement datagen imports use executable migration evidence`() {
+        val sourceFile = createFile("AdvancementDatagenImportDocs.java", """
+            package com.example;
+
+            import net.minecraft.advancements.critereon.LocationPredicate;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.world.level.Level;
+
+            public class AdvancementDatagenImportDocs {
+                private static final String DOC = "ItemPredicate.Builder.item().hasNbt(tag); ResourceKey.create(Registries.CUSTOM_STAT, id); CriteriaTriggers.SLEPT_IN_BED; Criterion<Example>; AdvancementHolder holder";
+
+                public void build(ResourceKey<Level> dimension) {
+                    // CriteriaTriggers.SLEPT_IN_BED;
+                    LocationPredicate.inDimension(dimension);
+                }
+            }
+        """.trimIndent()).resolve("src/main/java/com/example/AdvancementDatagenImportDocs.java")
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = sourceFile.readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("LocationPredicate.Builder.inDimension(dimension);"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.core.component.DataComponentPredicate;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.core.component.DataComponents;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.world.item.component.CustomData;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.core.registries.BuiltInRegistries;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.core.registries.Registries;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.advancements.Criterion;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.advancements.CriteriaTriggers;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.advancements.AdvancementHolder;"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "ItemPredicate.Builder.item().hasNbt(tag); ResourceKey.create(Registries.CUSTOM_STAT, id); CriteriaTriggers.SLEPT_IN_BED; Criterion<Example>; AdvancementHolder holder";"""), migrated)
+        assertTrue(migrated.contains("// CriteriaTriggers.SLEPT_IN_BED;"), migrated)
+    }
+
+    @Test
+    fun `migrates transparent block beacon color and legacy plant APIs`() {
+        val blockDir = tempDir.resolve("src/main/java/com/example/block")
+        blockDir.createDirectories()
+
+        blockDir.resolve("AuroralizedGlassBlock.java").writeText("""
+            package com.example.block;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.LevelReader;
+            import net.minecraft.world.level.block.AbstractGlassBlock;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class AuroralizedGlassBlock extends AbstractGlassBlock {
+                public AuroralizedGlassBlock(Properties properties) {
+                    super(properties);
+                }
+
+                @Override
+                public float[] getBeaconColorMultiplier(BlockState state, LevelReader level, BlockPos pos, BlockPos beaconPos) {
+                    int color = ColorUtil.hsvToRGB(Noise.sample(pos), 1.0f, 1.0f);
+                    int red = (color & 16711680) >> 16;
+                    int green = (color & 65280) >> 8;
+                    int blue = (color & 255);
+                    return new float[] {red / 255.0F, green / 255.0F, blue / 255.0F};
+                }
+            }
+        """.trimIndent())
+
+        blockDir.resolve("UberousSoilBlock.java").writeText("""
+            package com.example.block;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.tags.BlockTags;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.common.IPlantable;
+            import net.neoforged.neoforge.common.PlantType;
+
+            public class UberousSoilBlock extends Block {
+                public UberousSoilBlock(Properties properties) {
+                    super(properties);
+                }
+
+                @Override
+                public PlantType getPlantType(BlockGetter getter, BlockPos pos) {
+                    return PlantType.PLAINS;
+                }
+
+                @Override
+                public boolean canSustainPlant(BlockState state, BlockGetter getter, BlockPos pos, Direction direction, IPlantable plantable) {
+                    if (direction != Direction.UP) return false;
+                    PlantType plantType = plantable.getPlantType(getter, pos.relative(direction));
+                    return plantType == PlantType.CROP || plantType == PlantType.PLAINS;
+                }
+
+                public boolean convert(BlockState above, Object bonemealableBlock, net.minecraft.world.level.Level level, BlockPos fromPos) {
+                    return bonemealableBlock instanceof IPlantable iPlantable && iPlantable.getPlantType(level, fromPos) == PlantType.CROP;
+                }
+            }
+        """.trimIndent())
+        blockDir.resolve("FarmCopyBlock.java").writeText("""
+            package com.example.block;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.block.FarmBlock;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.common.IPlantable;
+
+            public class FarmCopyBlock extends FarmBlock {
+                public FarmCopyBlock(Properties properties) {
+                    super(properties);
+                }
+
+                private static boolean shouldMaintainFarmland(BlockGetter level, BlockPos pos) {
+                    BlockState plant = level.getBlockState(pos.above());
+                    BlockState state = level.getBlockState(pos);
+                    return plant.getBlock() instanceof IPlantable plantable && state.canSustainPlant(level, pos, Direction.UP, plantable);
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(tempDir)
+        val glass = blockDir.resolve("AuroralizedGlassBlock.java").readText()
+        val soil = blockDir.resolve("UberousSoilBlock.java").readText()
+        val farm = blockDir.resolve("FarmCopyBlock.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-transparent-block-beacon-color" })
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-plant-api" })
+        assertTrue(glass.contains("import net.minecraft.world.level.block.TransparentBlock;"))
+        assertTrue(glass.contains("extends TransparentBlock"))
+        assertTrue(glass.contains("public Integer getBeaconColorMultiplier"))
+        assertTrue(glass.contains("return ColorUtil.hsvToRGB(Noise.sample(pos), 1.0f, 1.0f);"))
+        assertTrue(!glass.contains("float[] getBeaconColorMultiplier"))
+        assertTrue(soil.contains("public TriState canSustainPlant(BlockState state, BlockGetter level, BlockPos soilPosition, Direction facing, BlockState plant)"))
+        assertTrue(soil.contains("if (plant.is(BlockTags.CROPS)) return TriState.TRUE;"))
+        assertTrue(soil.contains("above.is(BlockTags.CROPS)"))
+        assertTrue(!soil.contains("getPlantType("))
+        assertTrue(!soil.contains("IPlantable"))
+        assertTrue(!soil.contains("PlantType"))
+        assertTrue(farm.contains("return level.getBlockState(pos.above()).is(BlockTags.MAINTAINS_FARMLAND);"), farm)
+        assertTrue(!farm.contains("!plant.getBlock() instanceof"), farm)
+        assertTrue(!farm.contains("IPlantable"), farm)
+    }
+
+    @Test
+    fun `migrates DistExecutor block body to FMLLoader guard`() {
+        val projectDir = createFile("ClientPacket.java", """
+            package com.example;
+
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.fml.DistExecutor;
+
+            public class ClientPacket {
+                static void handle(ClientPacket packet, Context context) {
+                    context.enqueueWork(() -> {
+                        DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> () -> {
+                            ClientHooks.sync(packet);
+                            Logger.debug("synced");
+                        });
+                    });
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = projectDir
+            .resolve("src/main/java/com/example/ClientPacket.java")
+            .readText()
+        val distChange = result.changes.single { it.ruleId == "struct-dist-executor-dist-guard" }
+
+        assertEquals(Confidence.HIGH, distChange.confidence)
+        assertTrue(migrated.contains("import net.neoforged.fml.loading.FMLLoader;"))
+        assertTrue(migrated.contains("if (FMLLoader.getDist() == Dist.CLIENT) {"))
+        assertTrue(migrated.contains("ClientHooks.sync(packet);"))
+        assertTrue(!migrated.contains("DistExecutor"))
+        assertTrue(result.changes.none { it.ruleId == "struct-dist-executor" })
+    }
+
+    @Test
+    fun `migrates DistExecutor expression body enqueueWork to block guard`() {
+        val projectDir = createFile("MenuPacket.java", """
+            package com.example;
+
+            import net.neoforged.api.distmarker.Dist;
+            // [forge2neo] import net.neoforged.fml.DistExecutor;
+            // DistExecutor removed in NeoForge
+
+            public class MenuPacket {
+                static void handle(MenuPacket packet, Context context) {
+                    context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(
+                            Dist.CLIENT,
+                            () -> () -> ClientMenu.open(packet)
+                    ));
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = projectDir
+            .resolve("src/main/java/com/example/MenuPacket.java")
+            .readText()
+        val distChange = result.changes.single { it.ruleId == "struct-dist-executor-dist-guard" }
+
+        assertEquals(Confidence.HIGH, distChange.confidence)
+        assertTrue(migrated.contains("context.enqueueWork(() -> {"))
+        assertTrue(migrated.contains("if (FMLLoader.getDist() == Dist.CLIENT) {"))
+        assertTrue(migrated.contains("ClientMenu.open(packet);"))
+        assertTrue(!migrated.contains("DistExecutor"))
+        assertTrue(!migrated.contains("DistExecutor removed in NeoForge"))
+        assertTrue(result.changes.none { it.ruleId == "struct-dist-executor" })
+    }
+
+    @Test
+    fun `migrates DistExecutor safe call method references to dist expression`() {
+        val projectDir = createFile("DistExecutorSafeCall.java", """
+            package com.example;
+
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.fml.DistExecutor;
+
+            public class DistExecutorSafeCall {
+                public String label() {
+                    return DistExecutor.safeCallWhenOn(Dist.CLIENT, () -> ClientHooks::label);
+                }
+            }
+
+            class ClientHooks {
+                static String label() {
+                    return "client";
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+        val migrated = projectDir
+            .resolve("src/main/java/com/example/DistExecutorSafeCall.java")
+            .readText()
+
+        assertTrue(migrated.contains("return (FMLLoader.getDist() == Dist.CLIENT ? ClientHooks.label() : null);"), migrated)
+        assertTrue(migrated.contains("import net.neoforged.fml.loading.FMLLoader;"), migrated)
+        assertFalse(migrated.contains("import net.neoforged.fml.DistExecutor;"), migrated)
+        assertFalse(migrated.contains("DistExecutor."), migrated)
+    }
+
+    @Test
+    fun `DistExecutor import cleanup preserves text block documentation`() {
+        val textBlockDelimiter = "\"\"\""
+        val projectDir = createFile("MenuPacket.java", """
+            package com.example;
+
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.fml.DistExecutor;
+            // [forge2neo] import net.neoforged.fml.DistExecutor;
+            // DistExecutor removed in NeoForge
+
+            public class MenuPacket {
+                private static final String DOC = $textBlockDelimiter
+                    import net.neoforged.fml.DistExecutor;
+                    // [forge2neo] import net.neoforged.fml.DistExecutor;
+                    // DistExecutor removed in NeoForge
+                    $textBlockDelimiter;
+
+                static void handle(MenuPacket packet, Context context) {
+                    context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(
+                            Dist.CLIENT,
+                            () -> () -> ClientMenu.open(packet)
+                    ));
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+        val migrated = projectDir
+            .resolve("src/main/java/com/example/MenuPacket.java")
+            .readText()
+
+        assertFalse(Regex("""(?m)^import net\.neoforged\.fml\.DistExecutor;$""").containsMatchIn(migrated), migrated)
+        assertEquals(2, Regex("""import net\.neoforged\.fml\.DistExecutor;""").findAll(migrated).count(), migrated)
+        assertEquals(1, Regex("""DistExecutor removed in NeoForge""").findAll(migrated).count(), migrated)
+        assertTrue(migrated.contains("private static final String DOC = \"\"\""), migrated)
+        assertTrue(migrated.contains("context.enqueueWork(() -> {"), migrated)
+        assertTrue(migrated.contains("if (FMLLoader.getDist() == Dist.CLIENT) {"), migrated)
+        assertTrue(migrated.contains("ClientMenu.open(packet);"), migrated)
+        assertFalse(migrated.contains("DistExecutor.unsafeRunWhenOn"), migrated)
+    }
+
+    @Test
+    fun `migrates DistExecutor runForDist client block statement to dist guard`() {
+        val projectDir = createFile("ClientRegistration.java", """
+            package com.example;
+
+            import net.neoforged.fml.DistExecutor;
+
+            public class ClientRegistration {
+                public ClientRegistration(EventBus bus) {
+                    DistExecutor.unsafeRunForDist(() -> () -> {
+                        ClientMenus.register(bus);
+                        ClientTabs.register(bus);
+                        return true;
+                    }, () -> () -> false);
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = projectDir
+            .resolve("src/main/java/com/example/ClientRegistration.java")
+            .readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-dist-executor-dist-guard" })
+        assertTrue(migrated.contains("import net.neoforged.api.distmarker.Dist;"))
+        assertTrue(migrated.contains("import net.neoforged.fml.loading.FMLLoader;"))
+        assertTrue(migrated.contains("if (FMLLoader.getDist() == Dist.CLIENT) {"))
+        assertTrue(migrated.contains("ClientMenus.register(bus);"))
+        assertTrue(migrated.contains("ClientTabs.register(bus);"))
+        assertTrue(!migrated.contains("DistExecutor"))
+        assertTrue(!migrated.contains("return true;"))
+    }
+
+    @Test
+    fun `DistExecutor guard import insertion ignores text block fake imports`() {
+        val textBlockDelimiter = "\"\"\""
+        val projectDir = createFile("ClientRegistration.java", """
+            package com.example;
+
+            import net.neoforged.fml.DistExecutor;
+
+            public class ClientRegistration {
+                private static final String DOC = $textBlockDelimiter
+                    import net.neoforged.api.distmarker.Dist;
+                    import net.neoforged.fml.loading.FMLLoader;
+                    $textBlockDelimiter;
+
+                public ClientRegistration(EventBus bus) {
+                    DistExecutor.unsafeRunForDist(() -> () -> {
+                        ClientMenus.register(bus);
+                        return true;
+                    }, () -> () -> false);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+        val migrated = projectDir
+            .resolve("src/main/java/com/example/ClientRegistration.java")
+            .readText()
+
+        assertTrue(Regex("""(?m)^import net\.neoforged\.api\.distmarker\.Dist;$""").containsMatchIn(migrated), migrated)
+        assertTrue(Regex("""(?m)^import net\.neoforged\.fml\.loading\.FMLLoader;$""").containsMatchIn(migrated), migrated)
+        assertEquals(2, Regex("""import net\.neoforged\.api\.distmarker\.Dist;""").findAll(migrated).count(), migrated)
+        assertEquals(2, Regex("""import net\.neoforged\.fml\.loading\.FMLLoader;""").findAll(migrated).count(), migrated)
+        assertTrue(migrated.contains("private static final String DOC = \"\"\""), migrated)
+        assertTrue(migrated.contains("if (FMLLoader.getDist() == Dist.CLIENT) {"), migrated)
+        assertFalse(migrated.contains("import net.neoforged.fml.DistExecutor;"), migrated)
+        assertFalse(migrated.contains("DistExecutor.unsafeRunForDist"), migrated)
+    }
+
+    @Test
+    fun `BaseEntityBlock codec is high confidence with Properties constructor`() {
+        val projectDir = createFile("LightBlock.java", """
+            package com.example;
+
+            import net.minecraft.world.level.block.BaseEntityBlock;
+
+            public class LightBlock extends BaseEntityBlock {
+                public LightBlock(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = projectDir
+            .resolve("src/main/java/com/example/LightBlock.java")
+            .readText()
+        val codecChange = result.changes.single { it.ruleId == "struct-base-entity-block-codec" }
+
+        assertEquals(Confidence.HIGH, codecChange.confidence)
+        assertTrue(migrated.contains("MapCodec<LightBlock> CODEC = simpleCodec(LightBlock::new);"))
+        assertTrue(migrated.contains("protected com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.block.BaseEntityBlock> codec()"))
+    }

@@ -56,7 +56,7 @@ class BlockEntityProviderBindingMigrationTest {
         ).find(migrated)?.groupValues?.get(1)
         assertTrue(readProvider != null, migrated)
         assertTrue(writeProvider != null, migrated)
-        assertTrue(migrated.contains("loadAdditional(tag, $readProvider);"), migrated)
+        assertTrue(migrated.contains("loadWithComponents(tag, $readProvider);"), migrated)
         assertTrue(migrated.contains("saveAdditional(tag, $writeProvider);"), migrated)
     }
 
@@ -136,8 +136,8 @@ class BlockEntityProviderBindingMigrationTest {
         assertTrue(migrated.contains("public final void saveAdditional(CompoundTag tag, HolderLookup.Provider registries)"), migrated)
         assertTrue(migrated.contains("super.loadAdditional(tag, registries);"), migrated)
         assertTrue(migrated.contains("super.saveAdditional(tag, registries);"), migrated)
-        assertTrue(migrated.contains("read(tag, registries, false);"), migrated)
-        assertTrue(migrated.contains("write(tag, registries, false);"), migrated)
+        assertTrue(migrated.contains("read(tag, false, registries);"), migrated)
+        assertTrue(migrated.contains("write(tag, false, registries);"), migrated)
     }
 
     @Test
@@ -191,12 +191,12 @@ class BlockEntityProviderBindingMigrationTest {
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
         assertTrue(migrated.contains("protected final void loadAdditional(CompoundTag tag, HolderLookup.Provider registries)"), migrated)
         assertTrue(
-            Regex("""protected void read\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+), boolean clientPacket\)""")
+            Regex("""protected void read\(CompoundTag tag, boolean clientPacket, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)""")
                 .containsMatchIn(migrated),
             migrated
         )
         assertTrue(
-            Regex("""public void read\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider \w+, boolean clientPacket\)""")
+            Regex("""public void read\(CompoundTag tag, boolean clientPacket, (?:net\.minecraft\.core\.)?HolderLookup\.Provider \w+\)""")
                 .findAll(migrated).count() == 2,
             migrated
         )
@@ -204,8 +204,8 @@ class BlockEntityProviderBindingMigrationTest {
         assertFalse(migrated.contains("behaviour.read(tag, clientPacket)"), migrated)
         assertFalse(migrated.contains("super.read(tag, clientPacket)"), migrated)
         assertTrue(Regex("""super\.loadAdditional\(tag, \w+\);""").containsMatchIn(migrated), migrated)
-        assertTrue(Regex("""behaviour\.read\(tag, \w+, clientPacket\)""").containsMatchIn(migrated), migrated)
-        assertTrue(Regex("""super\.read\(tag, \w+, clientPacket\)""").containsMatchIn(migrated), migrated)
+        assertTrue(Regex("""behaviour\.read\(tag, clientPacket, \w+\)""").containsMatchIn(migrated), migrated)
+        assertTrue(Regex("""super\.read\(tag, clientPacket, \w+\)""").containsMatchIn(migrated), migrated)
     }
 
     @Test
@@ -308,7 +308,7 @@ class BlockEntityProviderBindingMigrationTest {
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
         assertFalse(migrated.contains("Minecraft.getInstance().level.registryAccess()"), migrated)
         assertFalse(migrated.contains("Minecraft.getInstance().modporterRegistries"), migrated)
-        assertTrue(migrated.contains("void encode(CompoundTag tag, HolderLookup.Provider registries, ItemStack stack)"), migrated)
+        assertTrue(migrated.contains("void encode(CompoundTag tag, ItemStack stack, HolderLookup.Provider registries)"), migrated)
         assertTrue(migrated.contains("stack.saveOptional(registries)"), migrated)
         assertFalse(migrated.contains("void render(HolderLookup.Provider"), migrated)
     }
@@ -370,7 +370,7 @@ class BlockEntityProviderBindingMigrationTest {
         val migrated = file.readText()
 
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
-        assertTrue(migrated.contains("write(CompoundTag tag, HolderLookup.Provider registries, boolean clientPacket)"), migrated)
+        assertTrue(migrated.contains("write(CompoundTag tag, boolean clientPacket, HolderLookup.Provider registries)"), migrated)
         assertTrue(migrated.contains("stored.saveOptional(registries)"), migrated)
         assertTrue(migrated.contains("inventory.serializeNBT(registries)"), migrated)
         assertTrue(migrated.contains("inventory.deserializeNBT(registries, tag.getCompound(\"Inventory\"))"), migrated)
@@ -378,7 +378,7 @@ class BlockEntityProviderBindingMigrationTest {
     }
 
     @Test
-    fun `method parameters shadow same named item stack fields during receiver typing`() {
+    fun `method parameters shadow same named item stack fields while retaining entity provider migration`() {
         val file = javaFile(
             "LexicalReceiverShadow.java",
             """
@@ -399,7 +399,7 @@ class BlockEntityProviderBindingMigrationTest {
         val migrated = file.readText()
 
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
-        assertTrue(migrated.contains("value.serializeNBT();"), migrated)
+        assertTrue(migrated.contains("value.serializeNBT(value.registryAccess());"), migrated)
         assertFalse(migrated.contains("value.saveOptional("), migrated)
     }
 
@@ -437,7 +437,10 @@ class BlockEntityProviderBindingMigrationTest {
 
         assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
         assertTrue(transformed.contains("inventory.serializeNBT(provider)"), transformed)
-        assertTrue(transformed.contains("inventory.serializeNBT();"), transformed)
+        assertTrue(
+            transformed.contains("inventory.serializeNBT(inventory.registryAccess());"),
+            transformed
+        )
     }
 
     private fun javaFile(name: String, source: String): Path {

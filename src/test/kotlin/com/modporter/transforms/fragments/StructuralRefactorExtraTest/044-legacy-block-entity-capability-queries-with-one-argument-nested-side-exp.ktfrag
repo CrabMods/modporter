@@ -1,0 +1,1178 @@
+
+    @Test
+    fun `legacy block entity capability queries with one argument nested side expressions and capability variables keep their shape`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("TankBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.fluids.capability.IFluidHandler;
+
+            public class TankBlockEntity extends BlockEntity {
+                protected LazyOptional<IFluidHandler> fluidCapability = LazyOptional.empty();
+
+                public TankBlockEntity(BlockPos pos, BlockState state) {
+                    super(null, pos, state);
+                }
+
+                @Override
+                public <T> LazyOptional<T> getCapability(Capability<T> cap, Direction side) {
+                    if (cap == Capabilities.FluidHandler.BLOCK)
+                        return fluidCapability.cast();
+                    return super.getCapability(cap, side);
+                }
+
+                public LazyOptional<IFluidHandler> controllerFluids(TankBlockEntity controller, Direction face) {
+                    controller.getCapability(Capabilities.FluidHandler.BLOCK, face.getOpposite());
+                    return controller.getCapability(Capabilities.FluidHandler.BLOCK);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TankScenes.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.fluids.capability.IFluidHandler;
+
+            public class TankScenes {
+                public static void fill(TankBlockEntity be) {
+                    Capability<IFluidHandler> fhc = Capabilities.FluidHandler.BLOCK;
+                    be.getCapability(fhc).ifPresent(handler -> handler.getTanks());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val tank = srcDir.resolve("TankBlockEntity.java").readText()
+        val scenes = srcDir.resolve("TankScenes.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(tank.contains("controller.getCapability(LegacyCapabilities.FLUID_HANDLER, face.getOpposite());"), tank)
+        assertTrue(tank.contains("return controller.getCapability(LegacyCapabilities.FLUID_HANDLER, null);"), tank)
+        assertTrue(scenes.contains("Capability<IFluidHandler> fhc = LegacyCapabilities.FLUID_HANDLER;"), scenes)
+        assertTrue(scenes.contains("be.getCapability(fhc, null).ifPresent(handler -> handler.getTanks());"), scenes)
+    }
+
+    @Test
+    fun `item stack handler subclasses widen their nbt overrides and pass the provider to the library implementation`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("ProcessingInventory.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.neoforged.neoforge.items.ItemStackHandler;
+
+            public class ProcessingInventory extends ItemStackHandler {
+                public float remainingTime;
+
+                public ProcessingInventory() {
+                    super(10);
+                }
+
+                @Override
+                public CompoundTag serializeNBT() {
+                    CompoundTag nbt = super.serializeNBT();
+                    nbt.putFloat("ProcessingTime", remainingTime);
+                    return nbt;
+                }
+
+                @Override
+                public void deserializeNBT(CompoundTag nbt) {
+                    remainingTime = nbt.getFloat("ProcessingTime");
+                    super.deserializeNBT(nbt);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val inventory = srcDir.resolve("ProcessingInventory.java").readText()
+
+        assertTrue(inventory.contains("public CompoundTag serializeNBT(HolderLookup.Provider registries) {"), inventory)
+        assertTrue(inventory.contains("CompoundTag nbt = super.serializeNBT(registries);"), inventory)
+        assertTrue(inventory.contains("public void deserializeNBT(HolderLookup.Provider registries, CompoundTag nbt) {"), inventory)
+        assertTrue(inventory.contains("super.deserializeNBT(registries, nbt);"), inventory)
+    }
+
+    @Test
+    fun `registry buffers flow through menu constructors and override families`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("MenuBase.java").writeText("""
+            package com.example;
+
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.world.entity.player.Inventory;
+            import net.minecraft.world.inventory.AbstractContainerMenu;
+            import net.minecraft.world.inventory.MenuType;
+
+            public abstract class MenuBase<T> extends AbstractContainerMenu {
+                protected T contentHolder;
+
+                protected MenuBase(MenuType<?> type, int id, Inventory inv, FriendlyByteBuf extraData) {
+                    super(type, id);
+                    contentHolder = createOnClient(extraData);
+                }
+
+                protected abstract T createOnClient(FriendlyByteBuf extraData);
+            }
+        """.trimIndent())
+        srcDir.resolve("HeldItemMenu.java").writeText("""
+            package com.example;
+
+            import net.minecraft.network.RegistryFriendlyByteBuf;
+            import net.minecraft.world.entity.player.Inventory;
+            import net.minecraft.world.inventory.MenuType;
+            import net.minecraft.world.item.ItemStack;
+
+            public abstract class HeldItemMenu extends MenuBase<ItemStack> {
+                protected HeldItemMenu(MenuType<?> type, int id, Inventory inv, RegistryFriendlyByteBuf extraData) {
+                    super(type, id, inv, extraData);
+                }
+
+                @Override
+                protected ItemStack createOnClient(RegistryFriendlyByteBuf extraData) {
+                    return ItemStack.STREAM_CODEC.decode(extraData);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("FilterMenu.java").writeText("""
+            package com.example;
+
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.world.entity.player.Inventory;
+            import net.minecraft.world.inventory.MenuType;
+
+            public class FilterMenu extends HeldItemMenu {
+                public FilterMenu(MenuType<?> type, int id, Inventory inv, FriendlyByteBuf extraData) {
+                    super(type, id, inv, extraData);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val base = srcDir.resolve("MenuBase.java").readText()
+        val filter = srcDir.resolve("FilterMenu.java").readText()
+
+        assertTrue(filter.contains("public FilterMenu(MenuType<?> type, int id, Inventory inv, RegistryFriendlyByteBuf extraData)"), filter)
+        assertTrue(filter.contains("import net.minecraft.network.RegistryFriendlyByteBuf;"), filter)
+        assertFalse(filter.contains("import net.minecraft.network.FriendlyByteBuf;"), filter)
+        assertTrue(base.contains("protected abstract T createOnClient(RegistryFriendlyByteBuf extraData);"), base)
+        assertTrue(base.contains("protected MenuBase(MenuType<?> type, int id, Inventory inv, RegistryFriendlyByteBuf extraData)"), base)
+    }
+
+    @Test
+    fun `registry buffers flow through class qualified, field typed and collection element calls`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("Output.java").writeText("""
+            package com.example;
+
+            import net.minecraft.network.RegistryFriendlyByteBuf;
+            import net.minecraft.world.item.ItemStack;
+
+            public class Output {
+                ItemStack stack;
+
+                public void write(RegistryFriendlyByteBuf buffer) {
+                    ItemStack.STREAM_CODEC.encode(buffer, stack);
+                }
+
+                public static Output read(RegistryFriendlyByteBuf buffer) {
+                    return new Output();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Serializer.java").writeText("""
+            package com.example;
+
+            import java.util.List;
+            import net.minecraft.network.FriendlyByteBuf;
+
+            public class Serializer {
+                Output primary;
+                List<Output> pool;
+
+                public Output read(FriendlyByteBuf buffer) {
+                    return Output.read(buffer);
+                }
+
+                public void write(FriendlyByteBuf buffer) {
+                    primary.write(buffer);
+                }
+
+                public void writePool(FriendlyByteBuf buffer) {
+                    pool.forEach(primary -> primary.write(buffer));
+                }
+
+                public void writeChained(Serializer other, FriendlyByteBuf buffer) {
+                    other.primary.write(buffer);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val serializer = srcDir.resolve("Serializer.java").readText()
+
+        assertTrue(serializer.contains("public Output read(RegistryFriendlyByteBuf buffer)"), serializer)
+        assertTrue(serializer.contains("public void write(RegistryFriendlyByteBuf buffer)"), serializer)
+        assertTrue(serializer.contains("public void writePool(RegistryFriendlyByteBuf buffer)"), serializer)
+        assertTrue(serializer.contains("public void writeChained(Serializer other, RegistryFriendlyByteBuf buffer)"), serializer)
+    }
+
+    @Test
+    fun `legacy capability queries on statically vanilla receivers preserve runtime provider optionals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("PumpBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.HopperBlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.fluids.capability.IFluidHandler;
+            import net.neoforged.neoforge.items.IItemHandler;
+
+            public class PumpBlockEntity extends BlockEntity {
+                protected LazyOptional<IFluidHandler> fluids = LazyOptional.empty();
+
+                public PumpBlockEntity(BlockPos pos, BlockState state) {
+                    super(null, pos, state);
+                }
+
+                @Override
+                public <T> LazyOptional<T> getCapability(Capability<T> cap, Direction side) {
+                    if (cap == Capabilities.FluidHandler.BLOCK)
+                        return fluids.cast();
+                    return super.getCapability(cap, side);
+                }
+
+                public LazyOptional<IFluidHandler> neighbourFluids(Direction face) {
+                    BlockEntity blockEntity = level.getBlockEntity(worldPosition.relative(face));
+                    if (blockEntity instanceof PumpBlockEntity pump)
+                        return pump.getCapability(Capabilities.FluidHandler.BLOCK, face.getOpposite());
+                    if (blockEntity instanceof HopperBlockEntity hopper)
+                        hopper.getCapability(Capabilities.ItemHandler.BLOCK).orElse(null);
+                    return blockEntity.getCapability(Capabilities.FluidHandler.BLOCK, face.getOpposite());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val pump = srcDir.resolve("PumpBlockEntity.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(pump.contains("return pump.getCapability(LegacyCapabilities.FLUID_HANDLER, face.getOpposite());"), pump)
+        assertTrue(pump.contains("LegacyBlockEntityCapabilityQueries.get(hopper, LegacyCapabilities.ITEM_HANDLER, null).orElse(null);"), pump)
+        assertTrue(pump.contains("return LegacyBlockEntityCapabilityQueries.get(blockEntity, LegacyCapabilities.FLUID_HANDLER, face.getOpposite());"), pump)
+    }
+
+    @Test
+    fun `level lookups resolve receivers in scope and capability variables kept constant`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("PumpBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.fluids.capability.IFluidHandler;
+
+            public class PumpBlockEntity extends BlockEntity {
+                protected LazyOptional<IFluidHandler> fluids = LazyOptional.empty();
+
+                public PumpBlockEntity(BlockPos pos, BlockState state) {
+                    super(null, pos, state);
+                }
+
+                @Override
+                public <T> LazyOptional<T> getCapability(Capability<T> cap, Direction side) {
+                    if (cap == Capabilities.FluidHandler.BLOCK)
+                        return fluids.cast();
+                    return super.getCapability(cap, side);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("SwitchBlock.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import java.util.Optional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.items.IItemHandler;
+
+            public class SwitchBlock {
+                protected void display(PumpBlockEntity be) {
+                }
+
+                public boolean hasInventory(Level level, BlockPos pos) {
+                    Capability<IItemHandler> itemCap = Capabilities.ItemHandler.BLOCK;
+                    BlockEntity be = level.getBlockEntity(pos);
+                    return be != null && be.getCapability(itemCap).isPresent();
+                }
+
+                public boolean changing(Level level, BlockPos pos) {
+                    Capability<IItemHandler> cap = Capabilities.ItemHandler.BLOCK;
+                    cap = null;
+                    BlockEntity be = level.getBlockEntity(pos);
+                    return be.getCapability(cap).isPresent();
+                }
+
+                public boolean untyped(Optional<BlockEntity> found) {
+                    return found.map(be -> be.getCapability(Capabilities.ItemHandler.BLOCK).isPresent()).orElse(false);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val block = srcDir.resolve("SwitchBlock.java").readText()
+
+        assertTrue(block.contains("return be != null && LegacyBlockEntityCapabilityQueries.get(be, LegacyCapabilities.ITEM_HANDLER, null).isPresent();"), block)
+        assertTrue(block.contains("return be.getCapability(cap, null).isPresent();"), block)
+        assertTrue(block.contains("found.map(be -> LegacyBlockEntityCapabilityQueries.get(be, LegacyCapabilities.ITEM_HANDLER, null).isPresent())"), block)
+    }
+
+    @Test
+    fun `recipe wrapper subclasses that still act as containers carry the container contract themselves`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("SandPaperInv.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.items.ItemStackHandler;
+            import net.neoforged.neoforge.items.wrapper.RecipeWrapper;
+
+            public class SandPaperInv extends RecipeWrapper {
+                public SandPaperInv(ItemStack stack) {
+                    super(new ItemStackHandler(1));
+                    inv.setStackInSlot(0, stack);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("StorageWrapper.java").writeText("""
+            package com.example;
+
+            import java.util.function.Predicate;
+            import net.minecraft.world.entity.player.Player;
+            import net.neoforged.neoforge.items.IItemHandlerModifiable;
+            import net.neoforged.neoforge.items.wrapper.RecipeWrapper;
+
+            public class StorageWrapper extends RecipeWrapper {
+                private final Predicate<Player> stillValid;
+
+                public StorageWrapper(IItemHandlerModifiable inv, Predicate<Player> stillValid) {
+                    super(inv);
+                    this.stillValid = stillValid;
+                }
+
+                @Override
+                public boolean stillValid(Player player) {
+                    return stillValid.test(player);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("SmartInventory.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.items.IItemHandlerModifiable;
+            import net.neoforged.neoforge.items.ItemStackHandler;
+            import net.neoforged.neoforge.items.wrapper.RecipeWrapper;
+
+            public class SmartInventory extends RecipeWrapper implements IItemHandlerModifiable {
+                public SmartInventory(int slots) {
+                    this(new SyncedStackHandler(slots));
+                }
+
+                public SmartInventory(IItemHandlerModifiable inv) {
+                    super(inv);
+                }
+
+                @Override
+                public void setStackInSlot(int slot, ItemStack stack) {
+                    ((IItemHandlerModifiable) inv).setStackInSlot(slot, stack);
+                }
+
+                public boolean peek(ItemStack extractItem) {
+                    return !extractItem.isEmpty();
+                }
+
+                private static class SyncedStackHandler extends ItemStackHandler {
+                    public SyncedStackHandler(int slots) {
+                        super(slots);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("UnknownWrapper.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.items.IItemHandler;
+            import net.neoforged.neoforge.items.wrapper.RecipeWrapper;
+
+            public class UnknownWrapper extends RecipeWrapper {
+                public UnknownWrapper(IItemHandler inv) {
+                    super(inv);
+                }
+
+                @Override
+                public int getMaxStackSize() {
+                    return 1;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val sandPaper = srcDir.resolve("SandPaperInv.java").readText()
+        val storage = srcDir.resolve("StorageWrapper.java").readText()
+        val unknown = srcDir.resolve("UnknownWrapper.java").readText()
+
+        assertTrue(sandPaper.contains("public class SandPaperInv extends RecipeWrapper implements Container {"), sandPaper)
+        assertTrue(sandPaper.contains("((IItemHandlerModifiable) inv).setStackInSlot(0, stack);"), sandPaper)
+        assertTrue(sandPaper.contains("public void setItem(int slot, ItemStack stack) {"), sandPaper)
+        assertTrue(sandPaper.contains("public boolean stillValid(Player player) {"), sandPaper)
+        assertTrue(storage.contains("public class StorageWrapper extends RecipeWrapper implements Container {"), storage)
+        assertTrue(storage.contains("public int getContainerSize() {"), storage)
+        assertTrue(storage.split("stillValid(Player player)").size == 2, storage)
+        val smart = srcDir.resolve("SmartInventory.java").readText()
+        assertFalse(smart.contains("implements Container"), smart)
+        assertTrue(result.errors.none { it.contains("SmartInventory") }, result.errors.joinToString("\\n"))
+        assertFalse(unknown.contains("implements Container"), unknown)
+        assertTrue(result.errors.any { it.contains("Cannot keep RecipeWrapper subclass UnknownWrapper as a Container") }, result.errors.joinToString("\n"))
+    }
+
+    @Test
+    fun `fluid stack tags on declared fluid stacks map to components only where the tag is read`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("FluidHelper.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.neoforged.neoforge.fluids.FluidStack;
+
+            public class FluidHelper {
+                public static JsonObject serialize(FluidStack stack) {
+                    JsonObject json = new JsonObject();
+                    if (stack.hasTag())
+                        json.addProperty("nbt", stack.getTag().toString());
+                    return json;
+                }
+
+                public static FluidStack grow(FluidStack drained, FluidStack total, int amount) {
+                    return new FluidStack(drained.getFluid(), amount + total.getAmount(), drained.getTag());
+                }
+
+                public static FluidStack resize(FluidStack drained, int amount) {
+                    FluidStack copy = new FluidStack(drained.getFluid(), amount, drained.getTag());
+                    drained.getTag().putInt("Amount", amount);
+                    return copy;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val helper = srcDir.resolve("FluidHelper.java").readText()
+
+        assertTrue(helper.contains("if (stack.has(net.minecraft.core.component.DataComponents.CUSTOM_DATA))"), helper)
+        assertTrue(helper.contains("json.addProperty(\"nbt\", stack.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag().toString());"), helper)
+        assertTrue(helper.contains("FluidStack copy = drained.copyWithAmount(amount);"), helper)
+        assertTrue(helper.contains("return drained.copyWithAmount(amount + total.getAmount());"), helper)
+        assertTrue(helper.contains("drained.getTag().putInt(\"Amount\", amount);"), helper)
+    }
+
+    @Test
+    fun `final block entity hooks screen background overrides and item depletion overrides follow the 1 21 signatures`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("SmartBlockEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public abstract class SmartBlockEntity extends BlockEntity {
+                public SmartBlockEntity(BlockPos pos, BlockState state) {
+                    super(null, pos, state);
+                }
+
+                @Override
+                public final void load(CompoundTag tag) {
+                    super.load(tag);
+                    read(tag, false);
+                }
+
+                @Override
+                public final void saveAdditional(CompoundTag tag) {
+                    super.saveAdditional(tag);
+                    write(tag, false);
+                }
+
+                protected void read(CompoundTag tag, boolean clientPacket) {
+                }
+
+                public void write(CompoundTag tag, boolean clientPacket) {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("RequestScreen.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.screens.Screen;
+            import net.minecraft.network.chat.Component;
+
+            public class RequestScreen extends Screen {
+                public RequestScreen() {
+                    super(Component.empty());
+                }
+
+                @Override
+                public void renderBackground(GuiGraphics graphics) {
+                    super.renderBackground(graphics);
+                    graphics.fill(0, 0, 1, 1, 0);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("GlueItem.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.Item;
+
+            public class GlueItem extends Item {
+                public GlueItem(Properties properties) {
+                    super(properties);
+                }
+
+                @Override
+                public boolean canBeDepleted() {
+                    return true;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BacktankItem.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ArmorItem;
+
+            public class BacktankItem extends ArmorItem {
+                public BacktankItem(Properties properties) {
+                    super(null, null, properties);
+                }
+
+                @Override
+                public boolean canBeDepleted() {
+                    return false;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val blockEntity = srcDir.resolve("SmartBlockEntity.java").readText()
+        val screen = srcDir.resolve("RequestScreen.java").readText()
+        val item = srcDir.resolve("BacktankItem.java").readText()
+
+        assertTrue(blockEntity.contains("protected final void loadAdditional(CompoundTag tag, HolderLookup.Provider registries) {"), blockEntity)
+        assertTrue(blockEntity.contains("super.loadAdditional(tag, registries);"), blockEntity)
+        assertTrue(blockEntity.contains("public final void saveAdditional(CompoundTag tag, HolderLookup.Provider registries) {"), blockEntity)
+        assertTrue(blockEntity.contains("super.saveAdditional(tag, registries);"), blockEntity)
+        assertTrue(screen.contains("public void renderBackground(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {"), screen)
+        assertTrue(screen.contains("super.renderBackground(graphics, mouseX, mouseY, partialTick);"), screen)
+        assertTrue(item.contains("public boolean isDamageable(ItemStack stack) {"), item)
+        val glue = srcDir.resolve("GlueItem.java").readText()
+        assertTrue(glue.contains("public boolean isDamageable(ItemStack stack) {"), glue)
+    }
+
+    @Test
+    fun `gui overlay method references become layered draw layers keyed by resource location`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("GoggleOverlayRenderer.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.client.gui.Gui;
+            import net.minecraft.client.gui.GuiGraphics;
+
+            public class GoggleOverlayRenderer {
+                public static final IGuiOverlay OVERLAY = GoggleOverlayRenderer::renderOverlay;
+
+                public static void renderOverlay(Gui gui, GuiGraphics graphics, float partialTicks, int width, int height) {
+                    Minecraft mc = Minecraft.getInstance();
+                    graphics.fill(0, 0, width, height, 0);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ClientEvents.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.client.event.RegisterGuiLayersEvent;
+            import net.neoforged.neoforge.client.gui.VanillaGuiLayers;
+
+            public class ClientEvents {
+                @SubscribeEvent
+                public static void registerGuiOverlays(RegisterGuiLayersEvent event) {
+                    event.registerAbove(VanillaGuiLayers.HOTBAR, "goggle_info", GoggleOverlayRenderer.OVERLAY);
+                    event.registerAboveAll("blueprint", GoggleOverlayRenderer.OVERLAY);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val renderer = srcDir.resolve("GoggleOverlayRenderer.java").readText()
+        val events = srcDir.resolve("ClientEvents.java").readText()
+        val compactRenderer = renderer.replace(Regex("""\s+"""), "")
+
+        assertTrue(
+            compactRenderer.contains(
+                "publicstaticfinalLayeredDraw.LayerOVERLAY=" +
+                    "(modporterGraphics,modporterDelta)->" +
+                    "GoggleOverlayRenderer.renderOverlay(" +
+                    "net.minecraft.client.Minecraft.getInstance().gui," +
+                    "modporterGraphics," +
+                    "modporterDelta.getGameTimeDeltaPartialTick(false)," +
+                    "modporterGraphics.guiWidth()," +
+                    "modporterGraphics.guiHeight());"
+            ),
+            renderer
+        )
+        assertTrue(
+            renderer.contains(
+                "public static void renderOverlay(Gui gui, GuiGraphics graphics, " +
+                    "float partialTicks, int width, int height)"
+            ),
+            renderer
+        )
+        assertTrue(renderer.contains("graphics.fill(0, 0, width, height, 0);"), renderer)
+        assertFalse(renderer.contains("IGuiOverlay"), renderer)
+        assertTrue(events.contains("event.registerAbove(VanillaGuiLayers.HOTBAR, ResourceLocation.fromNamespaceAndPath(\"example\", \"goggle_info\"), GoggleOverlayRenderer.OVERLAY);"), events)
+        assertTrue(events.contains("event.registerAboveAll(ResourceLocation.fromNamespaceAndPath(\"example\", \"blueprint\"), GoggleOverlayRenderer.OVERLAY);"), events)
+    }
+
+    @Test
+    fun `creative tab outputs unwrap deferred holders but leave item likes and other accept calls alone`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("ModItems.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.Item;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredItem;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ModItems {
+                public static final DeferredRegister<Item> ITEMS = DeferredRegister.create(Registries.ITEM, "example");
+                public static final DeferredHolder<Item, Item> GEAR = ITEMS.register("gear", () -> new Item(new Item.Properties()));
+                public static final DeferredItem<Item> WRENCH = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("Tabs.java").writeText("""
+            package com.example;
+
+            import static com.example.ModItems.GEAR;
+
+            import java.util.function.Consumer;
+            import net.minecraft.world.item.CreativeModeTab;
+            import net.minecraft.world.phys.shapes.Shapes;
+            import net.minecraft.world.phys.shapes.VoxelShape;
+            import net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent;
+
+            public class Tabs {
+                private static final VoxelShape LONG_ORTHO = Shapes.block();
+
+                public static void fill(BuildCreativeModeTabContentsEvent event) {
+                    event.accept(GEAR);
+                    event.accept(ModItems.GEAR);
+                    event.accept(ModItems.WRENCH);
+                }
+
+                public static void outline(Consumer<VoxelShape> renderer) {
+                    renderer.accept(LONG_ORTHO);
+                }
+
+                public static CreativeModeTab.Builder tab(CreativeModeTab.Builder builder) {
+                    return builder.displayItems((parameters, output) -> output.accept(GEAR));
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val tabs = srcDir.resolve("Tabs.java").readText()
+
+        assertTrue(tabs.contains("event.accept(GEAR.get());"), tabs)
+        assertTrue(tabs.contains("event.accept(ModItems.GEAR.get());"), tabs)
+        assertTrue(tabs.contains("event.accept(ModItems.WRENCH);"), tabs)
+        assertTrue(tabs.contains("renderer.accept(LONG_ORTHO);"), tabs)
+        assertTrue(tabs.contains("output.accept(GEAR.get())"), tabs)
+    }
+
+    @Test
+    fun `food properties effects are renamed only on proven food property receivers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("Effects.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.food.FoodProperties;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.alchemy.Potion;
+
+            public class Effects {
+                public static int count(FoodProperties food, Potion potion, ItemStack stack) {
+                    int total = food.getEffects().size() + potion.getEffects().size();
+                    return total + stack.getItem().getFoodProperties(stack, null).getEffects().size();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val effects = srcDir.resolve("Effects.java").readText()
+
+        assertTrue(effects.contains("food.effects().size()"), effects)
+        assertTrue(effects.contains("potion.getEffects().size()"), effects)
+        assertTrue(effects.contains("getFoodProperties(stack, null).effects().size()"), effects)
+    }
+
+    @Test
+    fun `fire resistance fluid tags multi line stack tags and the infinite render box follow 1 21 apis`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("Diving.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ArmorItem;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.context.UseOnContext;
+            import net.neoforged.neoforge.fluids.FluidStack;
+
+            public class Diving {
+                public static boolean lava(ItemStack helmet, ItemStack boots) {
+                    if (!helmet.getItem()
+                        .isFireResistant())
+                        return false;
+                    return boots.getItem() instanceof ArmorItem armorItem && armorItem.isFireResistant();
+                }
+
+                public static void store(FluidStack stack, CompoundTag tag, UseOnContext context) {
+                    stack.setTag(tag);
+                    context.getItemInHand()
+                        .setTag(tag);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CannonBlockEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.phys.AABB;
+
+            public class CannonBlockEntity extends BlockEntity {
+                public CannonBlockEntity(BlockPos pos, BlockState state) {
+                    super(null, pos, state);
+                }
+
+                public AABB getRenderBoundingBox() {
+                    return INFINITE_EXTENT_AABB;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val diving = srcDir.resolve("Diving.java").readText()
+        val cannon = srcDir.resolve("CannonBlockEntity.java").readText()
+
+        assertTrue(diving.contains("if (!helmet.has(net.minecraft.core.component.DataComponents.FIRE_RESISTANT))"), diving)
+        assertTrue(diving.contains("armorItem.components().has(net.minecraft.core.component.DataComponents.FIRE_RESISTANT)"), diving)
+        assertTrue(diving.contains("net.minecraft.Util.make(stack,"), diving)
+        assertTrue(diving.contains("net.minecraft.Util.make(context.getItemInHand(),"), diving)
+        assertEquals(
+            2,
+            Regex("""\.remove\(net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA\);""")
+                .findAll(diving).count(),
+            diving
+        )
+        assertEquals(
+            2,
+            Regex("""\.set\(net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA, net\.minecraft\.world\.item\.component\.CustomData\.of\(modPorterCustomDataValue\d*\)\);""")
+                .findAll(diving).count(),
+            diving
+        )
+        assertFalse(diving.contains(".setTag(tag)"), diving)
+        assertTrue(cannon.contains("return AABB.INFINITE;"), cannon)
+    }
+
+    @Test
+    fun `item stack nbt helpers without any project caller take the provider as a parameter`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("PackagingRequest.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            public record PackagingRequest(ItemStack item, String address) {
+                public CompoundTag toNBT() {
+                    CompoundTag tag = new CompoundTag();
+                    tag.put("Item", item.serializeNBT());
+                    tag.putString("Address", address);
+                    return tag;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val request = srcDir.resolve("PackagingRequest.java").readText()
+
+        assertTrue(request.contains("public CompoundTag toNBT(HolderLookup.Provider registries) {"), request)
+        assertTrue(request.contains("tag.put(\"Item\", item.saveOptional(registries));"), request)
+    }
+
+    @Test
+    fun `generic trigger base classes with project subclasses are not replaced by the trigger template`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        val base = """
+            package com.example;
+
+            import net.minecraft.advancements.CriterionTrigger;
+            import net.minecraft.resources.ResourceLocation;
+
+            public abstract class CriterionTriggerBase<T extends CriterionTriggerBase.Instance> implements CriterionTrigger<T> {
+                private final ResourceLocation id;
+
+                public CriterionTriggerBase(String id) {
+                    this.id = ResourceLocation.fromNamespaceAndPath("example", id);
+                }
+
+                public ResourceLocation getId() {
+                    return id;
+                }
+
+                public abstract static class Instance {
+                }
+            }
+        """.trimIndent()
+        srcDir.resolve("CriterionTriggerBase.java").writeText(base)
+        srcDir.resolve("SimpleTrigger.java").writeText("""
+            package com.example;
+
+            public class SimpleTrigger extends CriterionTriggerBase<SimpleTrigger.Instance> {
+                public SimpleTrigger(String id) {
+                    super(id);
+                }
+
+                public static class Instance extends CriterionTriggerBase.Instance {
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("CriterionTriggerBase.java").readText()
+
+        assertTrue(migrated.contains("public abstract class CriterionTriggerBase<T extends CriterionTriggerBase.Instance> implements CriterionTrigger<T> {"), migrated)
+        assertTrue(migrated.contains("public CriterionTriggerBase(String id) {"), migrated)
+        assertFalse(migrated.contains("String modName, String advancementName"), migrated)
+    }
+
+    @Test
+    fun `forge criterion instances carrying only the id become simple instances read by codec`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("CriterionTriggerBase.java").writeText("""
+            package com.example;
+
+            import java.util.HashSet;
+            import java.util.List;
+            import java.util.Map;
+            import java.util.Set;
+            import java.util.function.Supplier;
+            import com.google.common.collect.Maps;
+            import net.minecraft.advancements.CriterionTrigger;
+            import net.minecraft.advancements.critereon.AbstractCriterionTriggerInstance;
+            import net.minecraft.advancements.critereon.ContextAwarePredicate;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.server.PlayerAdvancements;
+            import net.minecraft.server.level.ServerPlayer;
+
+            public abstract class CriterionTriggerBase<T extends CriterionTriggerBase.Instance> implements CriterionTrigger<T> {
+                private final ResourceLocation id;
+                protected final Map<PlayerAdvancements, Set<Listener<T>>> listeners = Maps.newHashMap();
+
+                public CriterionTriggerBase(String id) {
+                    this.id = ResourceLocation.fromNamespaceAndPath("example", id);
+                }
+
+                @Override
+                public ResourceLocation getId() {
+                    return id;
+                }
+
+                protected void trigger(ServerPlayer player, List<Supplier<Object>> suppliers) {
+                    Set<Listener<T>> playerListeners = this.listeners.get(player.getAdvancements());
+                    if (playerListeners != null) {
+                        for (Listener<T> listener : playerListeners) {
+                            if (listener.getTriggerInstance().test(suppliers)) {
+                                listener.run(player.getAdvancements());
+                            }
+                        }
+                    }
+                }
+
+                public abstract static class Instance extends AbstractCriterionTriggerInstance {
+                    public Instance(ResourceLocation idIn, ContextAwarePredicate predicate) {
+                        super(idIn, predicate);
+                    }
+
+                    protected abstract boolean test(List<Supplier<Object>> suppliers);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("SimpleTrigger.java").writeText("""
+            package com.example;
+
+            import java.util.List;
+            import java.util.function.Supplier;
+            import com.google.gson.JsonObject;
+            import net.minecraft.advancements.critereon.ContextAwarePredicate;
+            import net.minecraft.advancements.critereon.DeserializationContext;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class SimpleTrigger extends CriterionTriggerBase<SimpleTrigger.Instance> {
+                public SimpleTrigger(String id) {
+                    super(id);
+                }
+
+                @Override
+                public Instance createInstance(JsonObject json, DeserializationContext context) {
+                    return new Instance(getId());
+                }
+
+                public Instance instance() {
+                    return new Instance(getId());
+                }
+
+                public static class Instance extends CriterionTriggerBase.Instance {
+                    public Instance(ResourceLocation idIn) {
+                        super(idIn, ContextAwarePredicate.ANY);
+                    }
+
+                    @Override
+                    protected boolean test(List<Supplier<Object>> suppliers) {
+                        return true;
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("StatefulTrigger.java").writeText("""
+            package com.example;
+
+            import net.minecraft.advancements.critereon.AbstractCriterionTriggerInstance;
+            import net.minecraft.advancements.critereon.ContextAwarePredicate;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class StatefulTrigger {
+                public static class Instance extends AbstractCriterionTriggerInstance {
+                    private final int level;
+
+                    public Instance(ResourceLocation idIn, int level) {
+                        super(idIn, ContextAwarePredicate.ANY);
+                        this.level = level;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val base = srcDir.resolve("CriterionTriggerBase.java").readText()
+        val simple = srcDir.resolve("SimpleTrigger.java").readText()
+        val stateful = srcDir.resolve("StatefulTrigger.java").readText()
+
+        assertTrue(base.contains("import net.minecraft.advancements.critereon.SimpleCriterionTrigger.SimpleInstance;"), base)
+        assertTrue(base.contains("public abstract static class Instance implements SimpleInstance {"), base)
+        assertFalse(base.contains("super(idIn, predicate);"), base)
+        assertTrue(base.contains("if (listener.trigger().test(suppliers)) {"), base)
+        assertTrue(base.contains("public ResourceLocation getId() {") && !base.contains("@Override\n    public ResourceLocation getId()"), base)
+        assertTrue(simple.contains("public Codec<Instance> codec() {"), simple)
+        assertTrue(simple.contains("return Instance.CODEC;"), simple)
+        assertFalse(simple.contains("createInstance"), simple)
+        assertTrue(simple.contains("return new Instance();"), simple)
+        assertTrue(simple.contains("EntityPredicate.ADVANCEMENT_CODEC.optionalFieldOf(\"player\").forGetter(Instance::player)"), simple)
+        assertTrue(simple.contains("public Optional<ContextAwarePredicate> player() {"), simple)
+        assertTrue(stateful.contains("extends AbstractCriterionTriggerInstance"), stateful)
+        assertTrue(result.errors.any { it.contains("Cannot migrate criterion instance StatefulTrigger.Instance: it declares fields") }, result.errors.joinToString("\n"))
+    }

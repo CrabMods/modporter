@@ -1,0 +1,1178 @@
+
+    @Test
+    fun `migrates Curios initCapabilities providers to RegisterCapabilitiesEvent item registration`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val itemDir = srcDir.resolve("item")
+        val compatDir = srcDir.resolve("compat/curios")
+        val registerDir = srcDir.resolve("init")
+        itemDir.createDirectories()
+        compatDir.createDirectories()
+        registerDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.compat.curios.WearableBridge;
+            import com.example.init.ItemRegister;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.ModList;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modbus = modContainer.getEventBus();
+                    ItemRegister.ITEMS.register(modbus);
+                    if (ModList.get().isLoaded("curios")) {
+                        ExampleEvents.register();
+                    }
+                }
+            }
+        """.trimIndent())
+
+        registerDir.resolve("ItemRegister.java").writeText("""
+            package com.example.init;
+
+            import com.example.item.CharmItem;
+            import com.example.item.HeadItem;
+            import net.minecraft.world.item.Item;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ItemRegister {
+                public static final DeferredRegister<Item> ITEMS = null;
+                public static final DeferredHolder<Item, Item> CHARM =
+                        ITEMS.register("charm", () -> new CharmItem(new Item.Properties()));
+                public static final DeferredHolder<Item, Item> HEAD =
+                        ITEMS.register("head", () -> new HeadItem(new Item.Properties()));
+            }
+        """.trimIndent())
+
+        compatDir.resolve("WearableBridge.java").writeText("""
+            package com.example.compat.curios;
+
+            import net.minecraft.sounds.SoundEvents;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import net.neoforged.neoforge.network.PacketDistributor;
+            import top.theillusivec4.curios.api.SlotContext;
+            import top.theillusivec4.curios.api.type.capability.ICurio;
+            import top.theillusivec4.curios.common.capability.CurioItemCapability;
+            import com.example.network.ExamplePacket;
+            import com.example.network.ExamplePacketHandler;
+            import javax.annotation.Nonnull;
+
+            public class WearableBridge {
+                public static ICapabilityProvider makeLegacyProvider(ItemStack stack) {
+                    return CurioItemCapability.createProvider(new ICurio() {
+                        @Override
+                        public ItemStack getStack() {
+                            return stack;
+                        }
+
+                        @Nonnull
+                        @Override
+                        public SoundInfo getEquipSound(SlotContext slotContext) {
+                            return new SoundInfo(SoundEvents.ARMOR_EQUIP_GENERIC, 1.0F, 1.0F);
+                        }
+
+                        @Override
+                        public void onEquip(SlotContext context, ItemStack prevStack) {
+                            ExamplePacketHandler.CHANNEL.send(PacketDistributor.TRACKING_ENTITY_AND_SELF.with(context::entity), new ExamplePacket(context.entity().getId()));
+                        }
+                    });
+                }
+            }
+        """.trimIndent())
+
+        itemDir.resolve("CurioItem.java").writeText("""
+            package com.example.item;
+
+            import com.example.compat.curios.WearableBridge;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.fml.ModList;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import org.jetbrains.annotations.Nullable;
+
+            public interface CurioItem {
+                @Nullable
+                default ICapabilityProvider bridgeWearableCapability(ItemStack stack, @Nullable ICapabilityProvider provider) {
+                    if (ModList.get().isLoaded("curios")) {
+                        return WearableBridge.makeLegacyProvider(stack);
+                    }
+                    return provider;
+                }
+            }
+        """.trimIndent())
+
+        itemDir.resolve("CharmItem.java").writeText("""
+            package com.example.item;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import org.jetbrains.annotations.Nullable;
+
+            public class CharmItem extends Item implements CurioItem {
+                public CharmItem(Properties properties) { super(properties); }
+
+                @Nullable
+                @Override
+                public ICapabilityProvider initCapabilities(ItemStack stack, @Nullable CompoundTag nbt) {
+                    return this.bridgeWearableCapability(stack, super.initCapabilities(stack, nbt));
+                }
+            }
+        """.trimIndent())
+
+        itemDir.resolve("HeadItem.java").writeText("""
+            package com.example.item;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import org.jetbrains.annotations.Nullable;
+
+            public class HeadItem extends Item implements CurioItem {
+                public HeadItem(Properties properties) { super(properties); }
+
+                @Nullable
+                @Override
+                public ICapabilityProvider initCapabilities(ItemStack stack, @Nullable CompoundTag nbt) {
+                    return this.bridgeWearableCapability(stack, super.initCapabilities(stack, nbt));
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(tempDir)
+        val compat = compatDir.resolve("WearableBridge.java").readText()
+        val marker = itemDir.resolve("CurioItem.java").readText()
+        val charm = itemDir.resolve("CharmItem.java").readText()
+        val head = itemDir.resolve("HeadItem.java").readText()
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-curios-item-capability" })
+        assertTrue(result.changes.any { it.ruleId == "struct-curios-item-initcapabilities" })
+        assertTrue(result.changes.any { it.ruleId == "struct-curios-item-capability-listener" })
+        assertTrue(compat.contains("public static void registerCuriosCapabilities(RegisterCapabilitiesEvent event, ItemLike... items)"))
+        assertTrue(compat.contains("event.registerItem(CuriosCapability.ITEM, (stack, context) -> new ICurio()"))
+        assertTrue(compat.contains("new SoundInfo(SoundEvents.ARMOR_EQUIP_GENERIC.value(), 1.0F, 1.0F)"))
+        assertTrue(compat.contains("PacketDistributor.sendToPlayersTrackingEntityAndSelf(context.entity(), new ExamplePacket(context.entity().getId()));"))
+        assertTrue(!compat.contains("CurioItemCapability"))
+        assertTrue(!compat.contains("ICapabilityProvider makeLegacyProvider"))
+        assertTrue(!compat.contains("CHANNEL.send"))
+        assertTrue(!marker.contains("bridgeWearableCapability"))
+        assertTrue(!marker.contains("ModList"))
+        assertTrue(!charm.contains("initCapabilities"))
+        assertTrue(!charm.contains("ICapabilityProvider"))
+        assertTrue(!head.contains("initCapabilities"))
+        assertTrue(!head.contains("ICapabilityProvider"))
+        assertTrue(mod.contains("modbus.addListener((RegisterCapabilitiesEvent event) -> WearableBridge.registerCuriosCapabilities(event,"))
+        assertTrue(mod.contains("ItemRegister.CHARM.get()"))
+        assertTrue(mod.contains("ItemRegister.HEAD.get()"))
+    }
+
+    @Test
+    fun `migrates direct Curios providers and MobEffect holder collections from project evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val itemDir = srcDir.resolve("item")
+        val effectDir = srcDir.resolve("effect")
+        val eventDir = srcDir.resolve("event")
+        itemDir.createDirectories()
+        effectDir.createDirectories()
+        eventDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.init.Registration;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+                public ExampleMod(IEventBus modEventBus) {
+                    Registration.init(modEventBus);
+                }
+            }
+        """.trimIndent())
+
+        srcDir.resolve("init/Registration.java").also { it.parent.createDirectories() }.writeText("""
+            package com.example.init;
+
+            import com.example.item.BoneTiaraItem;
+            import net.minecraft.world.item.Item;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+            import net.neoforged.bus.api.IEventBus;
+
+            public class Registration {
+                public static final DeferredRegister<Item> ITEMS = null;
+                public static final DeferredHolder<Item, Item> BONE_TIARA =
+                        ITEMS.register("bone_tiara", BoneTiaraItem::new);
+
+                public static void init(IEventBus bus) {
+                    ITEMS.register(bus);
+                    ModEffects.EFFECTS.register(bus);
+                }
+            }
+        """.trimIndent())
+
+        srcDir.resolve("init/ModEffects.java").writeText("""
+            package com.example.init;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.effect.MobEffect;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ModEffects {
+                public static final DeferredRegister<MobEffect> EFFECTS = DeferredRegister.create(Registries.MOB_EFFECT, "example");
+                public static final DeferredHolder<MobEffect, MobEffect> FOLLY = EFFECTS.register("folly", () -> null);
+                public static final DeferredHolder<MobEffect, MobEffect> TERROR = EFFECTS.register("terror", () -> null);
+            }
+        """.trimIndent())
+
+        itemDir.resolve("BoneTiaraItem.java").writeText("""
+            package com.example.item;
+
+            import com.example.init.ModEffects;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffects;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import org.jetbrains.annotations.Nullable;
+            import top.theillusivec4.curios.api.CuriosApi;
+            import top.theillusivec4.curios.api.type.capability.ICurio;
+
+            import java.util.Set;
+
+            public class BoneTiaraItem extends Item {
+                public BoneTiaraItem() {
+                    super(new Properties());
+                }
+
+                @Override
+                public @Nullable ICapabilityProvider initCapabilities(ItemStack stack, @Nullable CompoundTag nbt) {
+                    return CuriosApi.createCurioProvider(new ICurio() {
+                        @Override
+                        public ItemStack getStack() {
+                            return stack;
+                        }
+                    });
+                }
+
+                public final Set<MobEffect> EFFECTS = Set.of(MobEffects.WEAKNESS, ModEffects.FOLLY.get(), ModEffects.TERROR.get());
+            }
+        """.trimIndent())
+
+        effectDir.resolve("ImmunityEffect.java").writeText("""
+            package com.example.effect;
+
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffects;
+            import java.util.Set;
+
+            public class ImmunityEffect extends MobEffect {
+                public static final Set<MobEffect> CURABLE = Set.of(MobEffects.POISON, MobEffects.WITHER);
+            }
+        """.trimIndent())
+
+        eventDir.resolve("LivingTickEvents.java").writeText("""
+            package com.example.event;
+
+            import com.example.init.Registration;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.entity.player.Player;
+
+            public class LivingTickEvents {
+                public static void tick(Player player) {
+                    for (MobEffect effect : Registration.BONE_TIARA.get().EFFECTS) {
+                        player.removeEffect(effect);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        eventDir.resolve("PlayerEvents.java").writeText("""
+            package com.example.event;
+
+            import com.example.effect.ImmunityEffect;
+            import net.minecraft.world.effect.MobEffect;
+            import net.neoforged.neoforge.event.entity.living.MobEffectEvent;
+
+            public class PlayerEvents {
+                public static void onAdded(MobEffectEvent.Added event) {
+                    MobEffect effect = event.getEffectInstance().getEffect();
+                    if (ImmunityEffect.CURABLE.contains(effect)) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(tempDir)
+        val item = itemDir.resolve("BoneTiaraItem.java").readText()
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+        val immunity = effectDir.resolve("ImmunityEffect.java").readText()
+        val livingTick = eventDir.resolve("LivingTickEvents.java").readText()
+        val playerEvents = eventDir.resolve("PlayerEvents.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-curios-direct-item-capability" })
+        assertTrue(result.changes.any { it.ruleId == "struct-curios-item-capability-listener" })
+        assertTrue(result.changes.any { it.ruleId == "struct-mobeffect-holder-direct" })
+        assertTrue(item.contains("public static void registerCuriosCapabilities(RegisterCapabilitiesEvent event, ItemLike... items)"), item)
+        assertTrue(item.contains("event.registerItem(CuriosCapability.ITEM, (stack, context) -> new ICurio()"), item)
+        assertTrue(!item.contains("initCapabilities"), item)
+        assertTrue(!item.contains("CuriosApi.createCurioProvider"), item)
+        assertTrue(!item.contains("ICapabilityProvider"), item)
+        assertTrue(item.contains("Set<Holder<MobEffect>> EFFECTS = Set.of(MobEffects.WEAKNESS, ModEffects.FOLLY, ModEffects.TERROR);"), item)
+        assertTrue(mod.contains("modEventBus.addListener((RegisterCapabilitiesEvent event) -> BoneTiaraItem.registerCuriosCapabilities(event,"), mod)
+        assertTrue(mod.contains("Registration.BONE_TIARA.get()"), mod)
+        assertTrue(immunity.contains("Set<Holder<MobEffect>> CURABLE = Set.of(MobEffects.POISON, MobEffects.WITHER);"), immunity)
+        assertTrue(livingTick.contains("for (Holder<MobEffect> effect : Registration.BONE_TIARA.get().EFFECTS)"), livingTick)
+        assertTrue(playerEvents.contains("Holder<MobEffect> effect = event.getEffectInstance().getEffect();"), playerEvents)
+        assertTrue(playerEvents.contains("ImmunityEffect.CURABLE.contains(effect)"), playerEvents)
+    }
+
+    @Test
+    fun `makes project recipe container inputs implement RecipeInput from recipe generic evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("GearBenchRecipe.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.Level;
+
+            public class GearBenchRecipe implements Recipe<GearBenchBE> {
+                @Override
+                public boolean matches(GearBenchBE input, Level level) {
+                    return !input.getCraftItem(0).isEmpty();
+                }
+
+                private boolean shifted(GearBenchBE input) {
+                    return input.getItem(1).isEmpty();
+                }
+
+                @Override
+                public ItemStack assemble(GearBenchBE input, HolderLookup.Provider provider) {
+                    return input.getCraftItem(0).copy();
+                }
+
+                @Override
+                public boolean canCraftInDimensions(int width, int height) { return true; }
+
+                @Override
+                public ItemStack getResultItem(HolderLookup.Provider provider) { return ItemStack.EMPTY; }
+
+                @Override
+                public RecipeSerializer<?> getSerializer() { return null; }
+
+                @Override
+                public RecipeType<?> getType() { return null; }
+            }
+        """.trimIndent())
+        srcDir.resolve("GearBenchBE.java").writeText("""
+            package com.example;
+
+            import java.util.List;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.Container;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.entity.player.StackedContents;
+            import net.minecraft.world.inventory.CraftingContainer;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class GearBenchBE extends BlockEntity implements CraftingContainer {
+                public GearBenchBE(BlockPos pos, BlockState state) {
+                    super(null, pos, state);
+                }
+
+                public ItemStack getCraftItem(int slot) {
+                    return getItem(slot);
+                }
+
+                @Override
+                public int getContainerSize() {
+                    return 16;
+                }
+
+                @Override
+                public boolean isEmpty() { return false; }
+
+                @Override
+                public ItemStack getItem(int slot) { return ItemStack.EMPTY; }
+
+                @Override
+                public ItemStack removeItem(int slot, int amount) { return ItemStack.EMPTY; }
+
+                @Override
+                public ItemStack removeItemNoUpdate(int slot) { return ItemStack.EMPTY; }
+
+                @Override
+                public void setItem(int slot, ItemStack stack) {}
+
+                @Override
+                public boolean stillValid(Player player) { return Container.stillValidBlockEntity(this, player); }
+
+                @Override
+                public void clearContent() {}
+
+                @Override
+                public List<ItemStack> getItems() { return java.util.List.of(); }
+
+                @Override
+                public void fillStackedContents(StackedContents contents) {}
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(tempDir)
+        val input = srcDir.resolve("GearBenchBE.java").readText()
+        val recipe = srcDir.resolve("GearBenchRecipe.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-custom-recipe-input-type" })
+        assertTrue(input.contains("import net.minecraft.world.item.crafting.RecipeInput;"), input)
+        assertTrue(input.contains("public class GearBenchBE extends BlockEntity implements CraftingContainer, RecipeInput"), input)
+        assertTrue(input.contains("public int size() {\n        return this.getContainerSize();\n    }"), input)
+        assertTrue(recipe.contains("implements Recipe<GearBenchBE>"), recipe)
+    }
+
+    @Test
+    fun `registers legacy recipe condition codecs through deferred register`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.Registry;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.core.registries.Registries;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.common.crafting.CraftingHelper;
+            import net.neoforged.neoforge.registries.RegisterEvent;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modbus = modContainer.getEventBus();
+                    ExampleLoot.CONDITIONS.register(modbus);
+                    modbus.addListener(this::registerExtraStuff);
+                }
+
+                public void registerExtraStuff(RegisterEvent evt) {
+                    if (evt.getRegistryKey().equals(Registries.BIOME_SOURCE)) {
+                        Registry.register(BuiltInRegistries.BIOME_SOURCE, net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(MOD_ID, "example"), null);
+                    } else if (evt.getRegistryKey().equals(Registries.RECIPE_SERIALIZER)) {
+                        CraftingHelper.register(ExampleCondition.Serializer.INSTANCE);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleLoot.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemConditionType;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ExampleLoot {
+                public static final DeferredRegister<LootItemConditionType> CONDITIONS =
+                        DeferredRegister.create(Registries.LOOT_CONDITION_TYPE, ExampleMod.MOD_ID);
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleCondition.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.MapCodec;
+            import net.neoforged.neoforge.common.conditions.ICondition;
+
+            public class ExampleCondition implements ICondition {
+                public static final String CONDITION_ID = "example_enabled";
+                public static final ExampleCondition INSTANCE = new ExampleCondition();
+                public static final MapCodec<ExampleCondition> CODEC = MapCodec.unit(INSTANCE);
+
+                @Override
+                public MapCodec<? extends ICondition> codec() {
+                    return CODEC;
+                }
+
+                @Override
+                public boolean test(IContext context) {
+                    return true;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+        val registry = srcDir.resolve("ExampleLoot.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-condition-codec-deferred-register" })
+        assertTrue(result.changes.any { it.ruleId == "struct-condition-codec-main-register" })
+        assertTrue(result.changes.any { it.ruleId == "struct-condition-codec-remove-craftinghelper-register" })
+        assertTrue(registry.contains("import com.mojang.serialization.MapCodec;"))
+        assertTrue(registry.contains("import net.neoforged.neoforge.common.conditions.ICondition;"))
+        assertTrue(registry.contains("import net.neoforged.neoforge.registries.NeoForgeRegistries;"))
+        assertTrue(registry.contains("DeferredRegister<MapCodec<? extends ICondition>> CONDITION_CODECS"))
+        assertTrue(registry.contains("DeferredHolder<MapCodec<? extends ICondition>, MapCodec<ExampleCondition>> EXAMPLE_CONDITION"))
+        assertTrue(registry.contains("CONDITION_CODECS.register(ExampleCondition.CONDITION_ID, () -> ExampleCondition.CODEC)"))
+        assertTrue(mod.contains("ExampleLoot.CONDITION_CODECS.register(modbus);"))
+        assertTrue(!mod.contains("CraftingHelper.register"))
+        assertTrue(!mod.contains("common.crafting.CraftingHelper"))
+        assertTrue(!mod.contains("Registries.RECIPE_SERIALIZER"))
+    }
+
+    @Test
+    fun `condition codec registration errors when mod event bus is not source-derived`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.common.crafting.CraftingHelper;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "example";
+
+                public ExampleMod() {
+                    CraftingHelper.register(ExampleCondition.Serializer.INSTANCE);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleLoot.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemConditionType;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ExampleLoot {
+                public static final DeferredRegister<LootItemConditionType> CONDITIONS =
+                        DeferredRegister.create(Registries.LOOT_CONDITION_TYPE, ExampleMod.MOD_ID);
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleCondition.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.MapCodec;
+            import net.neoforged.neoforge.common.conditions.ICondition;
+
+            public class ExampleCondition implements ICondition {
+                public static final String CONDITION_ID = "example_enabled";
+                public static final ExampleCondition INSTANCE = new ExampleCondition();
+                public static final MapCodec<ExampleCondition> CODEC = MapCodec.unit(INSTANCE);
+
+                @Override
+                public MapCodec<? extends ICondition> codec() {
+                    return CODEC;
+                }
+
+                @Override
+                public boolean test(IContext context) {
+                    return true;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().analyze(tempDir)
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(
+            result.errors.any {
+                it.contains("Condition codec registration migration error") &&
+                    it.contains("Cannot derive mod event bus variable")
+            },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(mod.contains("modEventBus"))
+        assertFalse(mod.contains("CONDITION_CODECS.register(modEventBus)"))
+    }
+
+    @Test
+    fun `migrates legacy item attribute modifier overrides to item attribute components`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("lib").createDirectories()
+        srcDir.resolve("lib/References.java").writeText("""
+            package com.example.lib;
+
+            public class References {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.lib.References;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(References.MODID)
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("GiantSwordItem.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import java.util.UUID;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.item.SwordItem;
+            import net.minecraft.world.item.Tier;
+            import net.neoforged.neoforge.common.NeoForgeMod;
+
+            public class GiantSwordItem extends SwordItem {
+                static final UUID REACH = UUID.fromString("00000000-0000-0000-0000-000000000001");
+                static final UUID RANGE = UUID.fromString("00000000-0000-0000-0000-000000000002");
+
+                public GiantSwordItem(Tier material, Properties properties) {
+                    super(material, 10, -3.5F, properties);
+                }
+
+                @Override
+                public Multimap<Attribute, AttributeModifier> getDefaultAttributeModifiers(EquipmentSlot slot) {
+                    ImmutableMultimap.Builder<Attribute, AttributeModifier> attributeBuilder = ImmutableMultimap.builder();
+                    attributeBuilder.putAll(super.getDefaultAttributeModifiers(slot));
+                    attributeBuilder.put(NeoForgeMod.BLOCK_REACH.get(), new AttributeModifier(REACH, "Reach modifier", 2.5, AttributeModifier.Operation.ADD_VALUE));
+                    attributeBuilder.put(NeoForgeMod.ENTITY_REACH.get(), new AttributeModifier(RANGE, "Range modifier", 2.5, AttributeModifier.Operation.ADD_VALUE));
+                    return slot == EquipmentSlot.MAINHAND ? attributeBuilder.build() : super.getDefaultAttributeModifiers(slot);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("GiantPickItem.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import java.util.UUID;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.item.PickaxeItem;
+            import net.minecraft.world.item.Tier;
+            import net.neoforged.neoforge.common.NeoForgeMod;
+
+            public class GiantPickItem extends PickaxeItem {
+                static final UUID REACH = UUID.fromString("00000000-0000-0000-0000-000000000001");
+                static final UUID RANGE = UUID.fromString("00000000-0000-0000-0000-000000000002");
+
+                public GiantPickItem(Tier material, Properties properties) {
+                    super(material, properties.attributes(net.minecraft.world.item.DiggerItem.createAttributes(material, 8, -3.5F)));
+                }
+
+                @Override
+                public Multimap<Attribute, AttributeModifier> getDefaultAttributeModifiers(EquipmentSlot slot) {
+                    ImmutableMultimap.Builder<Attribute, AttributeModifier> attributeBuilder = ImmutableMultimap.builder();
+                    attributeBuilder.putAll(super.getDefaultAttributeModifiers(slot));
+                    attributeBuilder.put(NeoForgeMod.BLOCK_REACH.get(), new AttributeModifier(REACH, "Reach modifier", 2.5, AttributeModifier.Operation.ADD_VALUE));
+                    attributeBuilder.put(NeoForgeMod.ENTITY_REACH.get(), new AttributeModifier(RANGE, "Range modifier", 2.5, AttributeModifier.Operation.ADD_VALUE));
+                    return slot == EquipmentSlot.MAINHAND ? attributeBuilder.build() : super.getDefaultAttributeModifiers(slot);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ReachTool.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+
+            public interface ReachTool {
+                ResourceLocation BLOCK_RANGE_ID = ResourceLocation.fromNamespaceAndPath("example", "block_range");
+                ResourceLocation ENTITY_RANGE_ID = ResourceLocation.fromNamespaceAndPath("example", "entity_range");
+                double RANGE = 2.5D;
+
+                default Multimap<Attribute, AttributeModifier> extendReach(Multimap<Attribute, AttributeModifier> base, EquipmentSlot slot) {
+                    ImmutableMultimap.Builder<Attribute, AttributeModifier> builder = ImmutableMultimap.builder();
+                    builder.putAll(base);
+                    builder.put(Attributes.BLOCK_INTERACTION_RANGE, new AttributeModifier(BLOCK_RANGE_ID, "Block range", this.getModifier(), AttributeModifier.Operation.ADD_VALUE));
+                    builder.put(Attributes.ENTITY_INTERACTION_RANGE, new AttributeModifier(ENTITY_RANGE_ID, "Entity range", this.getModifier(), AttributeModifier.Operation.ADD_VALUE));
+                    return slot == EquipmentSlot.MAINHAND ? builder.build() : base;
+                }
+
+                private double getModifier() {
+                    return RANGE;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("HolderReachTool.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+
+            public interface HolderReachTool {
+                net.minecraft.resources.ResourceLocation REACH_DISTANCE_MODIFIER_UUID = net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, "distance_modifier");
+                net.minecraft.resources.ResourceLocation ATTACK_RANGE_MODIFIER_UUID = net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, "range_modifier");
+
+                default Multimap<Holder<Attribute>, AttributeModifier> extendReachModifier(Multimap<Holder<Attribute>, AttributeModifier> map, EquipmentSlot slot) {
+                    if (slot == EquipmentSlot.MAINHAND) {
+                        ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier> attributeBuilder = ImmutableMultimap.builder();
+                        attributeBuilder.putAll(map);
+                        attributeBuilder.put(Attributes.BLOCK_INTERACTION_RANGE, new AttributeModifier(REACH_DISTANCE_MODIFIER_UUID, this.getModifier(), AttributeModifier.Operation.ADD_VALUE));
+                        attributeBuilder.put(Attributes.ENTITY_INTERACTION_RANGE, new AttributeModifier(ATTACK_RANGE_MODIFIER_UUID, this.getModifier(), AttributeModifier.Operation.ADD_VALUE));
+                        map = attributeBuilder.build();
+                    }
+                    return map;
+                }
+
+                /**
+                 * @return The default reach modifier value as a {@link Double}.
+                 */
+                private double getModifier() {
+                    return 3.5;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LongSwordItem.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.Multimap;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.SwordItem;
+            import net.minecraft.world.item.Tier;
+
+            public class LongSwordItem extends SwordItem implements ReachTool {
+                public LongSwordItem(Tier tier, Properties properties) {
+                    super(tier, properties.attributes(SwordItem.createAttributes(tier, 4, -2.6F)));
+                }
+
+                @Override
+                public Multimap<Holder<Attribute>, AttributeModifier> getAttributeModifiers(EquipmentSlot slot, ItemStack stack) {
+                    return this.extendReach(super.getAttributeModifiers(slot, stack), slot);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LegacyLongAxeItem.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.Multimap;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.item.AxeItem;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Tier;
+
+            public class LegacyLongAxeItem extends AxeItem implements ReachTool {
+                public LegacyLongAxeItem(Tier tier, Properties properties) {
+                    super(tier, 5.0F, -3.3F, properties);
+                }
+
+                @Override
+                public Multimap<Holder<Attribute>, AttributeModifier> getAttributeModifiers(EquipmentSlot slot, ItemStack stack) {
+                    return this.extendReach(super.getAttributeModifiers(slot, stack), slot);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("HolderReachPickaxeItem.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.Multimap;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.PickaxeItem;
+
+            public class HolderReachPickaxeItem extends PickaxeItem implements HolderReachTool {
+                public HolderReachPickaxeItem() {
+                    super(ExampleTiers.REACH, new Item.Properties().rarity(ExampleItems.LOOT).attributes(net.minecraft.world.item.DiggerItem.createAttributes(ExampleTiers.REACH, 1, -3.1F)));
+                }
+
+                @Override
+                public Multimap<Attribute, AttributeModifier> getAttributeModifiers(EquipmentSlot slot, ItemStack stack) {
+                    return this.extendReachModifier(super.getAttributeModifiers(slot, stack), slot);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("StackScaledWeapon.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import java.util.Iterator;
+            import java.util.UUID;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+            import net.minecraft.world.item.ItemStack;
+
+            public interface StackScaledWeapon {
+                UUID DAMAGE_MODIFIER_UUID = UUID.fromString("00000000-0000-0000-0000-000000000003");
+
+                default Multimap<Attribute, AttributeModifier> scaleDamage(Multimap<Attribute, AttributeModifier> map, ItemStack stack, EquipmentSlot slot) {
+                    if (slot == EquipmentSlot.MAINHAND) {
+                        ImmutableMultimap.Builder<Attribute, AttributeModifier> builder = ImmutableMultimap.builder();
+                        builder.putAll(map);
+                        builder.put(Attributes.ATTACK_DAMAGE, new AttributeModifier(DAMAGE_MODIFIER_UUID, "Damage modifier", this.calculateIncrease(map, stack), AttributeModifier.Operation.ADDITION));
+                        map = builder.build();
+                    }
+                    return map;
+                }
+
+                private int calculateIncrease(Multimap<Attribute, AttributeModifier> map, ItemStack stack) {
+                    double baseDamage = 0.0D;
+                    for (Iterator<AttributeModifier> it = map.get(Attributes.ATTACK_DAMAGE).stream().iterator(); it.hasNext();) {
+                        AttributeModifier modifier = it.next();
+                        baseDamage += modifier.getAmount();
+                    }
+                    return (int) Math.round(baseDamage + stack.getDamageValue());
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("StackScaledSwordItem.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.Multimap;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.SwordItem;
+            import net.minecraft.world.item.Tier;
+
+            public class StackScaledSwordItem extends SwordItem implements StackScaledWeapon {
+                public StackScaledSwordItem(Tier tier, Properties properties) {
+                    super(tier, 5, -2.4F, properties);
+                }
+
+                @Override
+                public Multimap<Attribute, AttributeModifier> getAttributeModifiers(EquipmentSlot slot, ItemStack stack) {
+                    return this.scaleDamage(super.getAttributeModifiers(slot, stack), stack, slot);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("GiantSwordItem.java").readText()
+        val migratedPick = srcDir.resolve("GiantPickItem.java").readText()
+        val migratedLongSword = srcDir.resolve("LongSwordItem.java").readText()
+        val migratedLegacyLongAxe = srcDir.resolve("LegacyLongAxeItem.java").readText()
+        val migratedReachTool = srcDir.resolve("ReachTool.java").readText()
+        val migratedHolderReachPickaxe = srcDir.resolve("HolderReachPickaxeItem.java").readText()
+        val migratedHolderReachTool = srcDir.resolve("HolderReachTool.java").readText()
+        val stackScaledSword = srcDir.resolve("StackScaledSwordItem.java").readText()
+        val stackScaledWeapon = srcDir.resolve("StackScaledWeapon.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-item-attribute-modifier-component" })
+        assertTrue(result.changes.any { it.ruleId == "struct-item-attribute-helper-component" })
+        assertTrue(result.changes.any { it.ruleId == "struct-item-attribute-helper-prune" })
+        assertTrue(result.changes.any { it.ruleId == "struct-item-dynamic-attribute-component" })
+        assertTrue(result.changes.any { it.ruleId == "struct-item-dynamic-attribute-helper" })
+        assertTrue(migrated.contains("import net.minecraft.world.entity.EquipmentSlotGroup;"))
+        assertTrue(migrated.contains("import net.minecraft.world.entity.ai.attributes.Attributes;"))
+        assertTrue(migrated.contains("import net.minecraft.world.item.component.ItemAttributeModifiers;"))
+        assertTrue(migrated.contains("super(material, properties.attributes(createGiantSwordItemAttributes(material, 10, -3.5F)));"))
+        assertTrue(migrated.contains("public static ItemAttributeModifiers createGiantSwordItemAttributes(Tier tier, int damage, float speed)"))
+        assertTrue(migrated.contains("SwordItem.createAttributes(tier, damage, speed)"))
+        assertTrue(migrated.contains("Attributes.BLOCK_INTERACTION_RANGE"))
+        assertTrue(migrated.contains("ResourceLocation.fromNamespaceAndPath(com.example.lib.References.MODID, \"reach_modifier\")"))
+        assertTrue(!migrated.contains("getDefaultAttributeModifiers"))
+        assertTrue(!migrated.contains("ImmutableMultimap"))
+        assertTrue(!migrated.contains("Multimap<Attribute"))
+        assertTrue(!migrated.contains("NeoForgeMod"))
+        assertTrue(migratedPick.contains("super(material, properties.attributes(createGiantPickItemAttributes(material, 8, -3.5F)));"))
+        assertTrue(migratedPick.contains("net.minecraft.world.item.DiggerItem.createAttributes(tier, damage, speed)"))
+        assertTrue(!migratedPick.contains("getDefaultAttributeModifiers"))
+        assertTrue(!migratedPick.contains("import net.minecraft.world.entity.ai.attributes.Attribute;"))
+        assertTrue(migratedLongSword.contains("import net.minecraft.world.entity.EquipmentSlotGroup;"), migratedLongSword)
+        assertTrue(migratedLongSword.contains("import net.minecraft.world.entity.ai.attributes.AttributeModifier;"), migratedLongSword)
+        assertTrue(migratedLongSword.contains("import net.minecraft.world.entity.ai.attributes.Attributes;"), migratedLongSword)
+        assertTrue(migratedLongSword.contains("SwordItem.createAttributes(tier, 4, -2.6F)"), migratedLongSword)
+        assertTrue(migratedLongSword.contains(".withModifierAdded(Attributes.BLOCK_INTERACTION_RANGE"), migratedLongSword)
+        assertTrue(migratedLongSword.contains(".withModifierAdded(Attributes.ENTITY_INTERACTION_RANGE"), migratedLongSword)
+        assertTrue(migratedLongSword.contains("RANGE, AttributeModifier.Operation.ADD_VALUE), EquipmentSlotGroup.MAINHAND"), migratedLongSword)
+        assertTrue(!migratedLongSword.contains("this.getModifier()"), migratedLongSword)
+        assertTrue(!migratedLongSword.contains("getAttributeModifiers"), migratedLongSword)
+        assertTrue(!migratedLongSword.contains("super.getAttributeModifiers"), migratedLongSword)
+        assertTrue(!migratedLongSword.contains("import com.google.common.collect.Multimap;"), migratedLongSword)
+        assertTrue(!migratedLongSword.contains("import net.minecraft.world.entity.EquipmentSlot;"), migratedLongSword)
+        assertTrue(!migratedLongSword.contains("import net.minecraft.core.Holder;"), migratedLongSword)
+        assertTrue(migratedLegacyLongAxe.contains("net.minecraft.world.item.DiggerItem.createAttributes(tier, 5.0F, -3.3F)"), migratedLegacyLongAxe)
+        assertTrue(migratedLegacyLongAxe.contains(".withModifierAdded(Attributes.BLOCK_INTERACTION_RANGE"), migratedLegacyLongAxe)
+        assertFalse(migratedLegacyLongAxe.contains("getAttributeModifiers"), migratedLegacyLongAxe)
+        assertFalse(migratedLegacyLongAxe.contains("super.getAttributeModifiers"), migratedLegacyLongAxe)
+        assertTrue(!migratedReachTool.contains("extendReach("), migratedReachTool)
+        assertTrue(!migratedReachTool.contains("getModifier()"), migratedReachTool)
+        assertTrue(!migratedReachTool.contains("ImmutableMultimap"), migratedReachTool)
+        assertTrue(!migratedReachTool.contains("Multimap<"), migratedReachTool)
+        assertTrue(migratedHolderReachPickaxe.contains(".attributes(net.minecraft.world.item.DiggerItem.createAttributes(ExampleTiers.REACH, 1, -3.1F)"), migratedHolderReachPickaxe)
+        assertTrue(migratedHolderReachPickaxe.contains(".withModifierAdded(Attributes.BLOCK_INTERACTION_RANGE"), migratedHolderReachPickaxe)
+        assertTrue(migratedHolderReachPickaxe.contains("REACH_DISTANCE_MODIFIER_UUID, 3.5, AttributeModifier.Operation.ADD_VALUE"), migratedHolderReachPickaxe)
+        assertFalse(migratedHolderReachPickaxe.contains("getAttributeModifiers"), migratedHolderReachPickaxe)
+        assertFalse(migratedHolderReachPickaxe.contains("super.getAttributeModifiers"), migratedHolderReachPickaxe)
+        assertTrue(!migratedHolderReachTool.contains("extendReachModifier("), migratedHolderReachTool)
+        assertTrue(!migratedHolderReachTool.contains("getModifier()"), migratedHolderReachTool)
+        assertTrue(!migratedHolderReachTool.contains("ImmutableMultimap"), migratedHolderReachTool)
+        assertTrue(!migratedHolderReachTool.contains("Multimap<"), migratedHolderReachTool)
+        assertTrue(stackScaledSword.contains("import net.minecraft.world.item.component.ItemAttributeModifiers;"), stackScaledSword)
+        assertTrue(stackScaledSword.contains("super(tier, properties.attributes(SwordItem.createAttributes(tier, 5, -2.4F)));"), stackScaledSword)
+        assertTrue(stackScaledSword.contains("public ItemAttributeModifiers getDefaultAttributeModifiers(ItemStack stack)"), stackScaledSword)
+        assertTrue(stackScaledSword.contains("return this.scaleDamage(super.getDefaultAttributeModifiers(stack), stack);"), stackScaledSword)
+        assertTrue(!stackScaledSword.contains("getAttributeModifiers(EquipmentSlot slot, ItemStack stack)"), stackScaledSword)
+        assertTrue(!stackScaledSword.contains("super.getAttributeModifiers"), stackScaledSword)
+        assertTrue(!stackScaledSword.contains("import com.google.common.collect.Multimap;"), stackScaledSword)
+        assertTrue(!stackScaledSword.contains("import net.minecraft.core.Holder;"), stackScaledSword)
+        assertTrue(stackScaledWeapon.contains("import net.minecraft.world.entity.EquipmentSlotGroup;"), stackScaledWeapon)
+        assertTrue(stackScaledWeapon.contains("import net.minecraft.world.item.component.ItemAttributeModifiers;"), stackScaledWeapon)
+        assertTrue(stackScaledWeapon.contains("default ItemAttributeModifiers scaleDamage(ItemAttributeModifiers modifiers, ItemStack stack)"), stackScaledWeapon)
+        assertTrue(stackScaledWeapon.contains(".withModifierAdded(Attributes.ATTACK_DAMAGE"), stackScaledWeapon)
+        assertTrue(stackScaledWeapon.contains("EquipmentSlotGroup.MAINHAND"), stackScaledWeapon)
+        assertTrue(stackScaledWeapon.contains("private int calculateIncrease(ItemAttributeModifiers modifiers, ItemStack stack)"), stackScaledWeapon)
+        assertTrue(stackScaledWeapon.contains("modifiers.modifiers().stream().filter"), stackScaledWeapon)
+        assertTrue(stackScaledWeapon.contains("modifier.amount()"), stackScaledWeapon)
+        assertTrue(stackScaledWeapon.contains("net.minecraft.resources.ResourceLocation DAMAGE_MODIFIER_UUID"), stackScaledWeapon)
+        assertTrue(!stackScaledWeapon.contains("ImmutableMultimap"), stackScaledWeapon)
+        assertTrue(!stackScaledWeapon.contains("Multimap<"), stackScaledWeapon)
+    }
+
+    @Test
+    fun `legacy hoe and shovel subclasses migrate constructor attributes structurally`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleHoeItem.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.HoeItem;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.Tier;
+
+            public class ExampleHoeItem extends HoeItem {
+                public ExampleHoeItem(Tier tier, Item.Properties properties) {
+                    super(tier, -3, 0.0F, properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleShovelItem.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ShovelItem;
+            import net.minecraft.world.item.Tier;
+
+            public class ExampleShovelItem extends ShovelItem {
+                public ExampleShovelItem(Tier tier) {
+                    super(tier, 1.5F, -3.0F, new Item.Properties().stacksTo(1));
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+
+        val migratedHoe = srcDir.resolve("ExampleHoeItem.java").readText()
+        val migratedShovel = srcDir.resolve("ExampleShovelItem.java").readText()
+
+        assertTrue(migratedHoe.contains("super(tier, properties.attributes(net.minecraft.world.item.DiggerItem.createAttributes(tier, -3, 0.0F)));"), migratedHoe)
+        assertTrue(migratedShovel.contains("super(tier, new Item.Properties().stacksTo(1).attributes(net.minecraft.world.item.DiggerItem.createAttributes(tier, 1.5F, -3.0F)));"), migratedShovel)
+    }
+
+    @Test
+    fun `aether shaped shared item attribute helpers migrate without project specific rules`() {
+        val root = tempDir.resolve("src/main/java/com/aetherteam/aether")
+        root.createDirectories()
+        root.resolve("Aether.java").writeText("""
+            package com.aetherteam.aether;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(Aether.MODID)
+            public class Aether {
+                public static final String MODID = "aether";
+            }
+        """.trimIndent())
+        root.resolve("item/tools/abilities").createDirectories()
+        root.resolve("item/tools/abilities/ValkyrieTool.java").writeText("""
+            package com.aetherteam.aether.item.tools.abilities;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+
+            public interface ValkyrieTool {
+                net.minecraft.resources.ResourceLocation REACH_DISTANCE_MODIFIER_UUID = net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(com.aetherteam.aether.Aether.MODID, "distance_modifier");
+                net.minecraft.resources.ResourceLocation ATTACK_RANGE_MODIFIER_UUID = net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(com.aetherteam.aether.Aether.MODID, "range_modifier");
+
+                /**
+                 * Sets up the attributes for the item if it is in the entity's main hand, adding attributes for the mining reach distance and the attack range distance alongside the default item attributes.<br><br>
+                 * @param map The item's default attributes ({@link Multimap Multimap&lt;Attribute, AttributeModifier&gt;}).
+                 * @param slot The {@link EquipmentSlot} the stack is in.
+                 * @return The new attributes ({@link Multimap Multimap&lt;Attribute, AttributeModifier&gt;}) made up of the old attributes and the reach attributes.
+                 * @see com.aetherteam.aether.item.tools.valkyrie
+                 * @see com.aetherteam.aether.item.combat.loot.ValkyrieLanceItem
+                 */
+                default Multimap<Holder<Attribute>, AttributeModifier> extendReachModifier(Multimap<Holder<Attribute>, AttributeModifier> map, EquipmentSlot slot) {
+                    if (slot == EquipmentSlot.MAINHAND) {
+                        ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier> attributeBuilder = ImmutableMultimap.builder();
+                        attributeBuilder.putAll(map);
+                        attributeBuilder.put(Attributes.BLOCK_INTERACTION_RANGE, new AttributeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(com.aetherteam.aether.Aether.MODID, "reach_distance_modifier"), this.getModifier(), AttributeModifier.Operation.ADD_VALUE));
+                        attributeBuilder.put(Attributes.ENTITY_INTERACTION_RANGE, new AttributeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(com.aetherteam.aether.Aether.MODID, "attack_range_modifier"), this.getModifier(), AttributeModifier.Operation.ADD_VALUE));
+                        map = attributeBuilder.build();
+                    }
+                    return map;
+                }
+
+                private double getModifier() {
+                    return 3.5;
+                }
+            }
+        """.trimIndent())
+        root.resolve("item/tools/valkyrie").createDirectories()
+        root.resolve("item/tools/valkyrie/ValkyriePickaxeItem.java").writeText("""
+            package com.aetherteam.aether.item.tools.valkyrie;
+
+            import com.aetherteam.aether.item.AetherItems;
+            import com.aetherteam.aether.item.combat.AetherItemTiers;
+            import com.aetherteam.aether.item.tools.abilities.ValkyrieTool;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.PickaxeItem;
+
+            public class ValkyriePickaxeItem extends PickaxeItem implements ValkyrieTool {
+                public ValkyriePickaxeItem() {
+                    super(AetherItemTiers.VALKYRIE, new Item.Properties().rarity(AetherItems.AETHER_LOOT).attributes(net.minecraft.world.item.DiggerItem.createAttributes(AetherItemTiers.VALKYRIE, 1, -3.1F)));
+                }
+
+                @Override
+                public Multimap<Attribute, AttributeModifier> getAttributeModifiers(EquipmentSlot slot, ItemStack stack) {
+                    return this.extendReachModifier(super.getAttributeModifiers(slot, stack), slot);
+                }
+            }
+        """.trimIndent())
+        root.resolve("item/combat/abilities/weapon").createDirectories()
+        root.resolve("item/combat/abilities/weapon/ZaniteWeapon.java").writeText("""
+            package com.aetherteam.aether.item.combat.abilities.weapon;
+
+            import com.aetherteam.aether.item.EquipmentUtil;
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import java.util.Iterator;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+            import net.minecraft.world.item.ItemStack;
+
+            public interface ZaniteWeapon {
+                net.minecraft.resources.ResourceLocation DAMAGE_MODIFIER_UUID = net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(com.aetherteam.aether.Aether.MODID, "damage_modifier");
+
+                default Multimap<Holder<Attribute>, AttributeModifier> increaseDamage(Multimap<Holder<Attribute>, AttributeModifier> map, ItemStack stack, EquipmentSlot slot) {
+                    if (slot == EquipmentSlot.MAINHAND) {
+                        ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier> attributeBuilder = ImmutableMultimap.builder();
+                        attributeBuilder.putAll(map);
+                        attributeBuilder.put(Attributes.ATTACK_DAMAGE, new AttributeModifier(DAMAGE_MODIFIER_UUID, this.calculateIncrease(map, stack), AttributeModifier.Operation.ADD_VALUE));
+                        map = attributeBuilder.build();
+                    }
+                    return map;
+                }
+
+                /**
+                 * @param map The item's default attributes ({@link Multimap Multimap&lt;Attribute, AttributeModifier&gt;}).
+                 * @param stack The {@link ItemStack} correlating to the item.
+                 * @return The damage bonus value for the zanite weapon, as an {@link Integer}.
+                 */
+                private int calculateIncrease(Multimap<Holder<Attribute>, AttributeModifier> map, ItemStack stack) {
+                    double baseDamage = 0.0;
+                    for (Iterator<AttributeModifier> it = map.get(Attributes.ATTACK_DAMAGE).stream().iterator(); it.hasNext();) {
+                        AttributeModifier modifier = it.next();
+                        baseDamage += modifier.amount();
+                    }
+                    double boostedDamage = EquipmentUtil.calculateZaniteBuff(stack, baseDamage);
+                    boostedDamage -= baseDamage;
+                    if (boostedDamage < 0.0) {
+                        boostedDamage = 0.0;
+                    }
+                    return (int) Math.round(boostedDamage);
+                }
+            }
+        """.trimIndent())
+        root.resolve("item/combat").createDirectories()
+        root.resolve("item/combat/ZaniteSwordItem.java").writeText("""
+            package com.aetherteam.aether.item.combat;
+
+            import com.aetherteam.aether.item.combat.abilities.weapon.ZaniteWeapon;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.SwordItem;
+
+            public class ZaniteSwordItem extends SwordItem implements ZaniteWeapon {
+                public ZaniteSwordItem() {
+                    super(AetherItemTiers.ZANITE, new Item.Properties().attributes(SwordItem.createAttributes(AetherItemTiers.ZANITE, 3, -2.4F)));
+                }
+
+                @Override
+                public Multimap<Attribute, AttributeModifier> getAttributeModifiers(EquipmentSlot slot, ItemStack stack) {
+                    return this.increaseDamage(super.getAttributeModifiers(slot, stack), stack, slot);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val valkyrieItem = root.resolve("item/tools/valkyrie/ValkyriePickaxeItem.java").readText()
+        val valkyrieHelper = root.resolve("item/tools/abilities/ValkyrieTool.java").readText()
+        val zaniteItem = root.resolve("item/combat/ZaniteSwordItem.java").readText()
+        val zaniteHelper = root.resolve("item/combat/abilities/weapon/ZaniteWeapon.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(
+            valkyrieItem.contains("getAttributeModifiers"),
+            valkyrieItem
+        )
+        assertTrue(valkyrieItem.contains(".withModifierAdded(Attributes.BLOCK_INTERACTION_RANGE"), valkyrieItem)
+        assertFalse(valkyrieHelper.contains("extendReachModifier("), valkyrieHelper)
+        assertTrue(zaniteItem.contains("public ItemAttributeModifiers getDefaultAttributeModifiers(ItemStack stack)"), zaniteItem)
+        assertTrue(zaniteItem.contains("return this.increaseDamage(super.getDefaultAttributeModifiers(stack), stack);"), zaniteItem)
+        assertTrue(zaniteHelper.contains("default ItemAttributeModifiers increaseDamage(ItemAttributeModifiers modifiers, ItemStack stack)"), zaniteHelper)
+    }

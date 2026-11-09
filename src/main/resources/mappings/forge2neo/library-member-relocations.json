@@ -1,0 +1,31 @@
+{
+  "description": "Static members of dependency classes that moved between the Forge 1.20.1 and NeoForge 1.21.1 builds (javap of both jars). Without targetMember the member was an instance helper whose methods became static methods of target (Owner.MEMBER.m(...) -> Target.m(...)); with targetMember the member itself moved (Owner.MEMBER -> Target.TARGET_MEMBER).",
+  "relocations": [
+    {
+      "owner": "net.createmod.catnip.platform.CatnipServices",
+      "member": "REGISTRIES",
+      "target": "net.createmod.catnip.registry.RegisteredObjectsHelper",
+      "notes": "Catnip (Ponder-Forge-1.20.1-1.0.91): CatnipServices.REGISTRIES is a platform.services.RegisteredObjectsHelper<?> instance; ponder-neoforge-1.0.87+mc1.21.1 replaced it with the static registry.RegisteredObjectsHelper (same getKeyOrThrow/getItem/getBlock/getItemOrBlock methods)."
+    },
+    {
+      "owner": "net.createmod.catnip.platform.ForgeCatnipServices",
+      "member": "REGISTRIES",
+      "target": "net.createmod.catnip.registry.RegisteredObjectsHelper",
+      "notes": "Forge-typed view of the same helper; the NeoForge build has no ForgeCatnipServices."
+    },
+    {
+      "owner": "net.createmod.catnip.platform.ForgeCatnipServices",
+      "member": "FLUID_RENDERER",
+      "target": "net.createmod.catnip.platform.NeoForgeCatnipServices",
+      "targetMember": "FLUID_RENDERER",
+      "notes": "ForgeCatnipServices.FLUID_RENDERER (FluidRenderHelper<FluidStack>) -> NeoForgeCatnipServices.FLUID_RENDERER, the FluidStack-typed helper (CatnipServices.FLUID_RENDERER is the wildcard-typed one and rejects FluidStack arguments); Create 6 calls the NeoForge one."
+    },
+    {
+      "owner": "net.createmod.catnip.platform.ForgeCatnipServices",
+      "member": "FLUID_HELPER",
+      "target": "net.createmod.catnip.platform.NeoForgeCatnipServices",
+      "targetMember": "FLUID_HELPER",
+      "notes": "Same move for the fluid helper."
+    }
+  ]
+}

@@ -25,6 +25,7 @@ import com.github.javaparser.ast.stmt.CatchClause
 import com.github.javaparser.ast.stmt.ExpressionStmt
 import com.github.javaparser.ast.stmt.ForStmt
 import com.github.javaparser.ast.stmt.TryStmt
+import com.github.javaparser.ast.type.ClassOrInterfaceType
 
 internal class ExactJavaSemantics(private val cu: CompilationUnit) {
     private data class VisibleDeclaration(val declaration: Node, val scope: Node)
@@ -114,8 +115,19 @@ internal class ExactJavaSemantics(private val cu: CompilationUnit) {
 
     fun declarationOf(name: NameExpr): Node? = valueDeclaration(name)
 
-    fun referencesTo(declaration: VariableDeclarator): List<NameExpr> =
-        referencesToDeclaration(declaration)
+    fun referencesTo(declaration: VariableDeclarator): List<NameExpr> {
+        val scope = variableLexicalScope(declaration) ?: return referencesToDeclaration(declaration)
+        val callable = declaration.findAncestor(CallableDeclaration::class.java).orElse(null)
+            ?: return emptyList()
+        // Java forbids a local declaration from being shadowed while its lexical scope is
+        // active. Scanning that exact scope avoids ambiguous whole-callable name matching
+        // when sibling blocks reuse the same identifier.
+        return scope.findAll(NameExpr::class.java).filter { name ->
+            name.nameAsString == declaration.nameAsString &&
+                name.findAncestor(CallableDeclaration::class.java).orElse(null) === callable &&
+                isStrictlyBefore(declaration, name)
+        }
+    }
 
     fun referencesTo(parameter: Parameter): List<NameExpr> =
         referencesToDeclaration(parameter)
@@ -132,7 +144,31 @@ internal class ExactJavaSemantics(private val cu: CompilationUnit) {
     private fun declarationType(declaration: Node?): String? = when (declaration) {
         is VariableDeclarator -> declaration.typeAsString
         is Parameter -> declaration.type.takeUnless { it.isUnknownType }?.asString()
+            ?: inferredLambdaParameterType(declaration)
         else -> null
+    }
+
+    private fun inferredLambdaParameterType(parameter: Parameter): String? {
+        val lambda = parameter.parentNode.orElse(null) as? LambdaExpr ?: return null
+        if (lambda.parameters.size != 1 || lambda.parameters.single() !== parameter) return null
+        val variable = lambda.parentNode.orElse(null) as? VariableDeclarator ?: return null
+        if (variable.initializer.orElse(null) !== lambda) return null
+        val target = variable.type as? ClassOrInterfaceType ?: return null
+
+        val supported = mapOf(
+            "Function" to ("java.util.function.Function" to 2),
+            "Consumer" to ("java.util.function.Consumer" to 1),
+            "Predicate" to ("java.util.function.Predicate" to 1),
+            "UnaryOperator" to ("java.util.function.UnaryOperator" to 1),
+            "ToIntFunction" to ("java.util.function.ToIntFunction" to 1),
+            "ToLongFunction" to ("java.util.function.ToLongFunction" to 1),
+            "ToDoubleFunction" to ("java.util.function.ToDoubleFunction" to 1)
+        )
+        val (owner, arity) = supported[target.nameAsString] ?: return null
+        if (!exactTypeReference(target.nameWithScope, target.nameAsString, owner)) return null
+        val arguments = target.typeArguments.orElse(null) ?: return null
+        if (arguments.size != arity) return null
+        return arguments.first().asString()
     }
 
     private fun valueDeclaration(name: NameExpr): Node? {
@@ -221,6 +257,20 @@ internal class ExactJavaSemantics(private val cu: CompilationUnit) {
                     null
                 }
             }
+            else -> null
+        }
+    }
+
+    private fun variableLexicalScope(declaration: VariableDeclarator): Node? {
+        val expression = declaration.parentNode.orElse(null) as? VariableDeclarationExpr ?: return null
+        return when (val parent = expression.parentNode.orElse(null)) {
+            is ExpressionStmt -> parent.parentNode.orElse(null) as? BlockStmt
+            is com.github.javaparser.ast.stmt.ForEachStmt ->
+                parent.takeIf { it.variable === expression }?.body
+            is ForStmt ->
+                parent.takeIf { loop -> loop.initialization.any { it === expression } }
+            is TryStmt ->
+                parent.takeIf { statement -> statement.resources.any { it === expression } }?.tryBlock
             else -> null
         }
     }

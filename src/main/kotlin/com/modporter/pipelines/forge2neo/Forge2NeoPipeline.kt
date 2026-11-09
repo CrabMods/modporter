@@ -2,6 +2,8 @@ package com.modporter.pipelines.forge2neo
 
 import com.modporter.core.transforms.ast.AstTransformPass
 import com.modporter.core.transforms.build.BuildSystemPass
+import com.modporter.core.transforms.structural.LegacyMigrationInventoryPrepass
+import com.modporter.core.transforms.structural.LegacySourceContractsPass
 import com.modporter.core.transforms.structural.StructuralRefactorPass
 import com.modporter.core.transforms.text.TextReplacementPass
 import com.modporter.registry.PipelineDefinition
@@ -19,14 +21,17 @@ object Forge2NeoPipeline {
         targetFramework = "neoforge-1.21.1",
         mappingsPrefix = "/mappings/forge2neo",
         passFactory = { mappingDb, options ->
+            val buildSystemPass = BuildSystemPass(
+                offlineMode = options.offline || !options.resolveDeps,
+                mappingsPrefix = "/mappings/forge2neo"
+            )
             listOf(
+                LegacyMigrationInventoryPrepass(buildSystemPass),
+                LegacySourceContractsPass(),
                 TextReplacementPass(mappingDb),
                 AstTransformPass(mappingDb),
                 StructuralRefactorPass(),
-                BuildSystemPass(
-                    offlineMode = options.offline || !options.resolveDeps,
-                    mappingsPrefix = "/mappings/forge2neo"
-                ),
+                buildSystemPass,
                 ResourceMigrationPass(
                     mappingDb,
                     addToolCredit = options.addToolCredit,

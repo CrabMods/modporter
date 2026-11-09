@@ -1,0 +1,1152 @@
+
+    @Test
+    fun `legacy mob category enum extension migration fails closed for unnameable literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("examplemod")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("BrokenMobCategories.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.MobCategory;
+
+            public class BrokenMobCategories {
+                public static final MobCategory BAD_ENUM = MobCategory.create("!!!", "sky_monster", 4, false, false, 128);
+                public static final MobCategory BAD_SERIALIZED = MobCategory.create("SKY_MONSTER", "???", 4, false, false, 128);
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("BrokenMobCategories.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("""MobCategory.create("!!!", "sky_monster", 4, false, false, 128)"""), migrated)
+        assertTrue(migrated.contains("""MobCategory.create("SKY_MONSTER", "???", 4, false, false, 128)"""), migrated)
+        assertFalse(migrated.contains("MobCategory.valueOf("), migrated)
+        assertFalse(srcDir.resolve("NeoForgeEnumExtensions.java").exists())
+        assertFalse(tempDir.resolve("src/main/resources/META-INF/enumextensions.json").exists())
+        assertTrue(
+            result.changes.none { it.ruleId.startsWith("struct-mobcategory-enum-extension") },
+            "unnameable mob category literals must not be migrated with synthetic fallback names: ${result.changes}"
+        )
+    }
+
+    @Test
+    fun `migrates legacy mob category create calls to enum extension metadata`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val metaInf = tempDir.resolve("src/main/resources/META-INF")
+        val worldgenDir = tempDir.resolve("src/generated/resources/data/examplemod/worldgen")
+        srcDir.createDirectories()
+        metaInf.createDirectories()
+        metaInf.resolve("neoforge.mods.toml").writeText("""
+            modLoader="javafml"
+
+            [[mods]]
+            modId="examplemod"
+        """.trimIndent())
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("examplemod")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleMobCategories.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.MobCategory;
+
+            public class ExampleMobCategories {
+                public static final MobCategory SKY_MONSTER = MobCategory.create("SKY_MONSTER", "sky_monster", 4, false, false, 128);
+                public static final MobCategory AERWHALE = MobCategory.create("AERWHALE", "aerwhale", 1, true, false, 128);
+            }
+        """.trimIndent())
+        worldgenDir.resolve("biome").createDirectories()
+        worldgenDir.resolve("biome/sky.json").writeText("""
+            {
+              "spawners": {
+                "sky_monster": [
+                  {
+                    "type": "examplemod:zephyr",
+                    "weight": 20,
+                    "minCount": 1,
+                    "maxCount": 1
+                  }
+                ],
+                "aerwhale": [
+                  {
+                    "type": "examplemod:aerwhale",
+                    "weight": 10,
+                    "minCount": 1,
+                    "maxCount": 1
+                  }
+                ]
+              },
+              "carvers": {
+                "sky_monster": "not a mob category key"
+              }
+            }
+        """.trimIndent())
+        worldgenDir.resolve("structure").createDirectories()
+        worldgenDir.resolve("structure/dungeon.json").writeText("""
+            {
+              "spawn_overrides": {
+                "sky_monster": {
+                  "bounding_box": "full",
+                  "spawns": []
+                }
+              }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val categories = srcDir.resolve("ExampleMobCategories.java").readText()
+        val helper = srcDir.resolve("NeoForgeEnumExtensions.java").readText()
+        val enumExtensions = metaInf.resolve("enumextensions.json").readText()
+        val toml = metaInf.resolve("neoforge.mods.toml").readText()
+        val biome = worldgenDir.resolve("biome/sky.json").readText()
+        val structure = worldgenDir.resolve("structure/dungeon.json").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(categories.contains("MobCategory.valueOf(\"EXAMPLEMOD_SKY_MONSTER\")"))
+        assertTrue(categories.contains("MobCategory.valueOf(\"EXAMPLEMOD_AERWHALE\")"))
+        assertFalse(categories.contains("MobCategory.create("))
+        assertTrue(helper.contains("public static Object MobCategory_EXAMPLEMOD_SKY_MONSTER(int idx, Class<?> type)"))
+        assertFalse(helper.contains("type.cast("), helper)
+        assertTrue(helper.contains("case 0 -> \"examplemod:sky_monster\";"))
+        assertTrue(helper.contains("case 0 -> \"examplemod:aerwhale\";"))
+        assertTrue(helper.contains("case 1 -> 4;"))
+        assertTrue(helper.contains("case 2 -> false;"))
+        assertTrue(helper.contains("case 3 -> false;"))
+        assertTrue(helper.contains("case 4 -> 128;"))
+        assertTrue(enumExtensions.contains("\"enum\": \"net/minecraft/world/entity/MobCategory\""))
+        assertTrue(enumExtensions.contains("\"constructor\": \"(Ljava/lang/String;IZZI)V\""))
+        assertTrue(enumExtensions.contains("\"name\": \"EXAMPLEMOD_SKY_MONSTER\""))
+        assertTrue(toml.contains("enumExtensions=\"META-INF/enumextensions.json\""))
+        assertTrue(toml.indexOf("[[mods]]") < toml.indexOf("enumExtensions=\"META-INF/enumextensions.json\""), toml)
+        assertTrue(toml.indexOf("enumExtensions=\"META-INF/enumextensions.json\"") < toml.indexOf("modId=\"examplemod\""), toml)
+        assertTrue(result.changes.any { it.ruleId == "struct-mobcategory-data-keys" })
+        assertTrue(biome.contains(""""examplemod:sky_monster": ["""), biome)
+        assertTrue(biome.contains(""""examplemod:aerwhale": ["""), biome)
+        assertTrue(biome.contains(""""sky_monster": "not a mob category key""""), biome)
+        assertTrue(structure.contains(""""examplemod:sky_monster": {"""), structure)
+        assertFalse(structure.contains(""""sky_monster": {"""), structure)
+    }
+
+    @Test
+    fun `mob effect tick trailing return is added after nested lambda blocks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RemedyEffect.java").writeText("""
+            package com.example;
+
+            import java.util.Optional;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectCategory;
+            import net.minecraft.world.entity.LivingEntity;
+
+            public class RemedyEffect extends MobEffect {
+                public RemedyEffect() {
+                    super(MobEffectCategory.BENEFICIAL, 0x123456);
+                }
+
+                @Override
+                public boolean applyEffectTick(LivingEntity livingEntity, int amplifier) {
+                    Optional.of(livingEntity).ifPresent((entity) -> {
+                        if (entity.isAlive()) {
+                            entity.clearFire();
+                        }
+                    });
+                    livingEntity.setTicksFrozen(0);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("RemedyEffect.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(Regex("""(?s)\}\);\s*livingEntity\.setTicksFrozen\(0\);\s*return true;\s*\}""").containsMatchIn(migrated), migrated)
+        assertFalse(Regex("""(?s)ifPresent\s*\([^;]+return true;[^;]+;""").containsMatchIn(migrated), migrated)
+    }
+
+    @Test
+    fun `migrates legacy WalkNodeEvaluator block path type static calls to source backed helper`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("TeleportChecks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.pathfinder.PathType;
+            import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;
+
+            public class TeleportChecks {
+                public boolean canStand(Level level, BlockPos pos) {
+                    // WalkNodeEvaluator.getBlockPathTypeStatic(level, pos);
+                    String literal = "WalkNodeEvaluator.getBlockPathTypeStatic(level, pos)";
+                    PathType type = WalkNodeEvaluator.getBlockPathTypeStatic(level, pos.mutable());
+                    return literal.length() > 0 && type == PathType.WALKABLE;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("TeleportChecks.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("PathType type = modporterGetLegacyBlockPathTypeStatic(level, pos.mutable());"), migrated)
+        assertTrue(migrated.contains("private static net.minecraft.world.level.pathfinder.PathType modporterGetLegacyBlockPathTypeStatic"), migrated)
+        assertTrue(migrated.contains("net.minecraft.world.level.pathfinder.NodeEvaluator.isBurningBlock(blockstate)"), migrated)
+        assertTrue(migrated.contains("blockstate.getBlockPathType(level, pos, null)"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;"), migrated)
+        assertTrue(migrated.contains("// WalkNodeEvaluator.getBlockPathTypeStatic(level, pos);"), migrated)
+        assertTrue(migrated.contains("\"WalkNodeEvaluator.getBlockPathTypeStatic(level, pos)\""), migrated)
+    }
+
+    @Test
+    fun `migrates legacy blocked path type constants only for proven blocked consumers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AetherBlockPathTypes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.pathfinder.PathType;
+
+            public class AetherBlockPathTypes {
+                public static final PathType BOSS_DOORWAY = PathType.create("BOSS_DOORWAY", -1.0F);
+                public static final PathType CUSTOM_MALUS = PathType.create("CUSTOM_MALUS", -1.0F);
+            }
+        """.trimIndent())
+        srcDir.resolve("DoorwayBlock.java").writeText("""
+            package com.example;
+
+            import javax.annotation.Nullable;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.level.pathfinder.PathType;
+
+            public class DoorwayBlock {
+                @Nullable
+                public PathType getBlockPathType(BlockState state, BlockGetter level, BlockPos pos, @Nullable Mob mob) {
+                    return AetherBlockPathTypes.BOSS_DOORWAY;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("PathConsumer.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.Mob;
+
+            public class PathConsumer {
+                public void configure(Mob mob) {
+                    mob.setPathfindingMalus(AetherBlockPathTypes.BOSS_DOORWAY, -1.0F);
+                    mob.setPathfindingMalus(AetherBlockPathTypes.CUSTOM_MALUS, 0.0F);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val constants = srcDir.resolve("AetherBlockPathTypes.java").readText()
+        val doorway = srcDir.resolve("DoorwayBlock.java").readText()
+        val consumer = srcDir.resolve("PathConsumer.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(doorway.contains("return PathType.BLOCKED;"))
+        assertFalse(doorway.contains("AetherBlockPathTypes.BOSS_DOORWAY"))
+        assertFalse(constants.contains("BOSS_DOORWAY = PathType.create"))
+        assertTrue(constants.contains("CUSTOM_MALUS = PathType.create(\"CUSTOM_MALUS\", -1.0F);"))
+        assertTrue(consumer.contains("import net.minecraft.world.level.pathfinder.PathType;"))
+        assertTrue(consumer.contains("mob.setPathfindingMalus(PathType.BLOCKED, -1.0F);"))
+        assertTrue(consumer.contains("AetherBlockPathTypes.CUSTOM_MALUS"))
+    }
+
+    @Test
+    fun `migrates legacy blocked path type constants across imported owner packages`() {
+        val aiDir = tempDir.resolve("src/main/java/com/example/entity/ai")
+        val blockDir = tempDir.resolve("src/main/java/com/example/block")
+        aiDir.createDirectories()
+        blockDir.createDirectories()
+        aiDir.resolve("ExampleBlockPathTypes.java").writeText("""
+            package com.example.entity.ai;
+
+            import net.minecraft.world.level.pathfinder.PathType;
+
+            public class ExampleBlockPathTypes {
+                public static final PathType BOSS_DOORWAY = PathType.create("BOSS_DOORWAY", -1.0F);
+            }
+        """.trimIndent())
+        blockDir.resolve("DoorwayBlock.java").writeText("""
+            package com.example.block;
+
+            import com.example.entity.ai.ExampleBlockPathTypes;
+            import javax.annotation.Nullable;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.level.pathfinder.PathType;
+
+            public class DoorwayBlock {
+                @Nullable
+                @Override
+                public PathType getBlockPathType(BlockState state, BlockGetter level, BlockPos pos, @Nullable Mob mob) {
+                    return ExampleBlockPathTypes.BOSS_DOORWAY;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val constants = aiDir.resolve("ExampleBlockPathTypes.java").readText()
+        val doorway = blockDir.resolve("DoorwayBlock.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(doorway.contains("return PathType.BLOCKED;"), doorway)
+        assertFalse(doorway.contains("import com.example.entity.ai.ExampleBlockPathTypes;"), doorway)
+        assertFalse(constants.contains("PathType.create("), constants)
+    }
+
+    @Test
+    fun `migrates legacy sleeping time check event result API by event parameter type`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("SleepSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraftforge.event.entity.player.SleepingTimeCheckEvent;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.common.util.TriState;
+
+            public class SleepSurface {
+                @SubscribeEvent
+                public static void denySleep(SleepingTimeCheckEvent event) {
+                    event.getSleepingLocation().ifPresent(pos -> {});
+                    event.setResult(TriState.FALSE);
+                }
+
+                @SubscribeEvent
+                public static void allowSleep(SleepingTimeCheckEvent sleepEvent) {
+                    sleepEvent.setResult(TriState.TRUE);
+                    sleepEvent.setResult(TriState.DEFAULT);
+                }
+
+                public static void unrelated(OtherEvent event) {
+                    event.setResult(TriState.FALSE);
+                }
+
+                private static class OtherEvent {
+                    void setResult(TriState state) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("SleepSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.neoforged.neoforge.event.entity.player.CanPlayerSleepEvent;"))
+        assertFalse(migrated.contains("SleepingTimeCheckEvent"))
+        assertTrue(migrated.contains("java.util.Optional.of(event.getPos()).ifPresent(pos -> {})"))
+        assertTrue(migrated.contains("event.setProblem(net.minecraft.world.entity.player.Player.BedSleepingProblem.NOT_POSSIBLE_NOW);"))
+        assertTrue(migrated.contains("sleepEvent.setProblem(null);"))
+        assertTrue(migrated.contains("sleepEvent.setProblem(sleepEvent.getVanillaProblem());"))
+        assertTrue(migrated.contains("event.setResult(TriState.FALSE);"))
+    }
+
+    @Test
+    fun `migrates legacy sleeping location check event to direct sleep position API`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("SleepLocationSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraftforge.event.entity.player.SleepingLocationCheckEvent;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.common.util.TriState;
+
+            public class SleepLocationSurface {
+                @SubscribeEvent
+                public static void allowCustomBed(SleepingLocationCheckEvent event) {
+                    if (event.getEntity().level().getBlockState(event.getSleepingLocation()).isAir()) {
+                        event.setResult(TriState.TRUE);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("SleepLocationSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.neoforged.neoforge.event.entity.player.CanPlayerSleepEvent;"), migrated)
+        assertFalse(migrated.contains("SleepingLocationCheckEvent"), migrated)
+        assertTrue(migrated.contains("event.getEntity().level().getBlockState(event.getPos()).isAir()"), migrated)
+        assertTrue(migrated.contains("event.setProblem(null);"), migrated)
+        assertFalse(migrated.contains("java.util.Optional.of(event.getPos())"), migrated)
+    }
+
+    @Test
+    fun `migrates legacy fill bucket event to right click block interaction result`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BucketEventSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.phys.BlockHitResult;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.common.util.TriState;
+            import net.neoforged.neoforge.event.entity.player.FillBucketEvent;
+
+            public class BucketEventSurface {
+                @SubscribeEvent
+                public static void onFillBucketEvent(FillBucketEvent event) {
+                    if (event.getEntity() instanceof ServerPlayer player && event.getTarget() instanceof BlockHitResult hit && event.getEmptyBucket().getItem() == Items.BUCKET) {
+                        event.setFilledBucket(event.getEmptyBucket().copy());
+                        event.setResult(TriState.TRUE);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("BucketEventSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.InteractionResult;"), migrated)
+        assertTrue(migrated.contains("public static void onFillBucketEvent(PlayerInteractEvent.RightClickBlock event)"), migrated)
+        assertTrue(migrated.contains("event.getHitVec() instanceof BlockHitResult hit"), migrated)
+        assertTrue(migrated.contains("event.getItemStack().getItem() == Items.BUCKET"), migrated)
+        assertTrue(migrated.contains("event.getEntity().setItemInHand(event.getHand(), event.getItemStack().copy());"), migrated)
+        assertTrue(migrated.contains("event.setCancellationResult(InteractionResult.SUCCESS);"), migrated)
+        assertTrue(migrated.contains("event.setCanceled(true);"), migrated)
+        assertFalse(migrated.contains("import net.neoforged.neoforge.event.entity.player.FillBucketEvent;"), migrated)
+        assertFalse(migrated.contains("import net.minecraftforge.event.entity.player.FillBucketEvent;"), migrated)
+        assertFalse(migrated.contains("(FillBucketEvent event)"), migrated)
+        assertFalse(migrated.contains("setFilledBucket"), migrated)
+    }
+
+    @Test
+    fun `migrates legacy projectile dispenser chest boat and projectile damage APIs by source shape`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DispenserSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Position;
+            import net.minecraft.core.dispenser.BlockSource;
+            import net.minecraft.core.dispenser.ProjectileDispenseBehavior;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.sounds.SoundEvent;
+            import net.minecraft.sounds.SoundSource;
+            import net.minecraft.world.entity.projectile.Projectile;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.DispenserBlock;
+            import net.minecraft.world.level.block.entity.DispenserBlockEntity;
+
+            public class DispenserSurface {
+                private boolean success;
+
+                protected ItemStack execute(BlockSource source, ItemStack stack) {
+                    ServerLevel level = source.level();
+                    stack.hurt(1, level.getRandom(), null);
+                    if (this.isSuccess() && stack.hurt(1, level.getRandom(), null)) {
+                        stack.setCount(0);
+                    }
+                    BlockPos pos = source.getPos().relative(source.getBlockState().getValue(DispenserBlock.FACING));
+                    source.getLevel().levelEvent(1000, pos, 0);
+                    source.<DispenserBlockEntity>getEntity().addItem(stack.copy());
+                    if (source.<DispenserBlockEntity>getEntity().addItem(stack.copy()) < 0) {
+                        this.success = false;
+                    }
+                    source.level().playSound(null, source.x(), source.y(), source.z(), sound(), SoundSource.NEUTRAL, 1.0F, 1.0F);
+                    Object behavior = new ProjectileDispenseBehavior() {
+                        @Override
+                        protected Projectile getProjectile(Level level, Position pos, ItemStack stack) {
+                            return new DemoProjectile(level, pos);
+                        }
+                    };
+                    return stack;
+                }
+
+                private boolean isSuccess() {
+                    return success;
+                }
+
+                private SoundEvent sound() {
+                    return null;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CustomProjectileBehavior.java").writeText("""
+            package com.example;
+
+            import net.minecraft.Util;
+            import net.minecraft.core.Position;
+            import net.minecraft.core.dispenser.BlockSource;
+            import net.minecraft.core.dispenser.ProjectileDispenseBehavior;
+            import net.minecraft.world.entity.projectile.Projectile;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.DispenserBlock;
+
+            public class CustomProjectileBehavior extends ProjectileDispenseBehavior {
+                @Override
+                public ItemStack execute(BlockSource blockSource, ItemStack stack) {
+                    Projectile projectile = this.getProjectile(blockSource.level(), DispenserBlock.getDispensePosition(blockSource), stack);
+                    if (projectile != null) {
+                        this.spawn(projectile, this.getPower(), this.getUncertainty());
+                        stack.shrink(1);
+                    }
+                    return stack;
+                }
+
+                @Override
+                protected Projectile getProjectile(Level level, Position position, ItemStack stack) {
+                    return Util.make(new DemoProjectile(level, position), (projectile) -> projectile.setNoGravity(true));
+                }
+
+                @Override
+                protected float getUncertainty() {
+                    return 3.0F;
+                }
+
+                private void spawn(Projectile projectile, float power, float uncertainty) {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ArrowSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.projectile.AbstractArrow;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.level.Level;
+
+            public abstract class ArrowSurface extends AbstractArrow {
+                protected ArrowSurface(EntityType<? extends AbstractArrow> type, Level level) {
+                    super(type, level);
+                }
+
+                @Override
+                protected ItemStack getPickupItem() {
+                    return new ItemStack(Items.ARROW);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ChestBoatSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.entity.vehicle.ContainerEntity;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.storage.loot.LootTable;
+            import org.jetbrains.annotations.Nullable;
+
+            public abstract class ChestBoatSurface implements ContainerEntity {
+                @Nullable
+                private ResourceLocation lootTable;
+
+                protected void addAdditionalSaveData(CompoundTag tag) {
+                    this.addChestVehicleSaveData(tag);
+                }
+
+                protected void readAdditionalSaveData(CompoundTag tag) {
+                    this.readChestVehicleSaveData(tag);
+                }
+
+                @Nullable
+                @Override
+                public net.minecraft.resources.ResourceKey<LootTable> getLootTable() {
+                    return this.lootTable;
+                }
+
+                @Override
+                public void setLootTable(@Nullable ResourceLocation lootTable) {
+                    this.lootTable = lootTable;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ProjectileSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.damagesource.DamageSource;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.projectile.LargeFireball;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.phys.EntityHitResult;
+
+            public class ProjectileSurface extends LargeFireball {
+                public ProjectileSurface(Level level, LivingEntity owner, double x, double y, double z, int power) {
+                    super(level, owner, x, y, z, power);
+                }
+
+                protected void hit(EntityHitResult result) {
+                    result.getEntity().hurt(this.damageSources().fireball(this, this.getOwner()), 16.0F);
+                    this.doEnchantDamageEffects((LivingEntity) this.getOwner(), result.getEntity());
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TrailSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.particles.ParticleOptions;
+            import net.minecraft.core.particles.ParticleTypes;
+
+            public class TrailSurface {
+                public void tick(double r, double g, double b) {
+                    this.makeTrail(ParticleTypes.ENTITY_EFFECT, r, g, b, 5);
+                }
+
+                private void makeTrail(ParticleOptions option, int amount) {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("HurtingProjectileSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.projectile.AbstractHurtingProjectile;
+            import net.minecraft.world.entity.projectile.Projectile;
+            import net.minecraft.world.phys.Vec3;
+
+            public class HurtingProjectileSurface {
+                public void rebound(AbstractHurtingProjectile projectile, Vec3 rebound) {
+                    projectile.xPower = rebound.x() * 0.1D;
+                    projectile.yPower = rebound.y() * 0.1D;
+                    projectile.zPower = rebound.z() * 0.1D;
+                }
+
+                public void deflect(Projectile projectile) {
+                    projectile.setDeltaMovement(projectile.getDeltaMovement().scale(-0.25));
+                    if (projectile instanceof AbstractHurtingProjectile hurting) {
+                        hurting.xPower *= -0.25;
+                        hurting.yPower *= -0.25;
+                        hurting.zPower *= -0.25;
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CopiedHurtingProjectileTick.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.projectile.Fireball;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.phys.Vec3;
+
+            public class CopiedHurtingProjectileTick extends Fireball {
+                public CopiedHurtingProjectileTick(EntityType<? extends CopiedHurtingProjectileTick> type, LivingEntity owner, double x, double y, double z, Level level) {
+                    super(type, owner, x, y, z, level);
+                }
+
+                public CopiedHurtingProjectileTick(EntityType<? extends CopiedHurtingProjectileTick> type, double x, double y, double z, Vec3 movement, Level level) {
+                    super(type, x, y, z, movement, level);
+                }
+
+                public void tick() {
+                    Vec3 vec3 = this.getDeltaMovement();
+                    float f = 0.8F;
+                    this.setDeltaMovement(vec3.add(this.xPower, this.yPower, this.zPower).scale(f));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("EventSurface.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.bus.api.Event;
+            import net.neoforged.neoforge.event.entity.player.AttackEntityEvent;
+            import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+            import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
+
+            public class EventSurface {
+                @SubscribeEvent
+                public void route(PlayerInteractEvent event) {
+                    if (event instanceof PlayerInteractEvent.RightClickBlock rightClickBlock) {
+                        checkTooFar(event, new Object());
+                    }
+                }
+
+                public void rightClick(PlayerInteractEvent.RightClickBlock event) {
+                    event.setUseBlock(Event.Result.DENY);
+                }
+
+                public void attack(AttackEntityEvent event) {
+                    checkAttack(event, new Object());
+                }
+
+                private static void checkTooFar(PlayerInteractEvent event, Object target) {
+                    if (!event.isCanceled()) {
+                        event.setCanceled(true);
+                    }
+                }
+
+                private static void checkAttack(PlayerEvent event, Object target) {
+                    if (!event.isCanceled()) {
+                        event.setCanceled(true);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("SpawnEggSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.SpawnEggItem;
+
+            public class SpawnEggSurface {
+                public boolean isType(ItemStack stack, SpawnEggItem spawnEggItem, Object expected) {
+                    return spawnEggItem.getType(stack.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()) == expected;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val dispenser = srcDir.resolve("DispenserSurface.java").readText()
+        val customProjectileBehavior = srcDir.resolve("CustomProjectileBehavior.java").readText()
+        val arrow = srcDir.resolve("ArrowSurface.java").readText()
+        val chestBoat = srcDir.resolve("ChestBoatSurface.java").readText()
+        val projectile = srcDir.resolve("ProjectileSurface.java").readText()
+        val trail = srcDir.resolve("TrailSurface.java").readText()
+        val hurtingProjectile = srcDir.resolve("HurtingProjectileSurface.java").readText()
+        val copiedTick = srcDir.resolve("CopiedHurtingProjectileTick.java").readText()
+        val event = srcDir.resolve("EventSurface.java").readText()
+        val spawnEgg = srcDir.resolve("SpawnEggSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(dispenser.contains("stack.hurtAndBreak(1, level, null, item -> {})"))
+        assertTrue(dispenser.contains("if (this.isSuccess())"))
+        assertTrue(dispenser.contains("stack.hurtAndBreak(1, level, null, item -> {"))
+        assertTrue(dispenser.contains("source.center().x()"))
+        assertTrue(dispenser.contains("source.pos().relative(source.state().getValue(DispenserBlock.FACING))"))
+        assertTrue(dispenser.contains("source.level().levelEvent(1000, pos, 0)"))
+        assertFalse(dispenser.contains("source.getPos()"))
+        assertFalse(dispenser.contains("source.getBlockState()"))
+        assertFalse(dispenser.contains("source.getLevel()"))
+        assertFalse(dispenser.contains("getEntity()"))
+        assertTrue(dispenser.contains("source.blockEntity().insertItem(stack.copy())"))
+        assertTrue(dispenser.contains("if (!source.blockEntity().insertItem(stack.copy()).isEmpty())"))
+        assertTrue(dispenser.contains("import net.minecraft.core.Direction;"))
+        assertTrue(dispenser.contains("new DefaultDispenseItemBehavior()"))
+        assertTrue(dispenser.contains("protected ItemStack execute(BlockSource source, ItemStack stack)"))
+        assertTrue(dispenser.contains("Projectile projectile = this.getProjectile(level, pos, stack);"))
+        assertTrue(dispenser.contains("protected Projectile getProjectile(Level level, Position pos, ItemStack stack)"))
+        assertTrue(dispenser.contains("projectile.shoot(direction.getStepX(), direction.getStepY(), direction.getStepZ(), 1.1F, 6.0F);"))
+        assertTrue(!dispenser.contains("ProjectileDispenseBehavior"))
+        assertTrue(customProjectileBehavior.contains("extends DefaultDispenseItemBehavior"))
+        assertTrue(customProjectileBehavior.contains("this.spawn(projectile, 1.1F, this.getUncertainty());"))
+        assertFalse(customProjectileBehavior.contains("extends ProjectileDispenseBehavior"))
+        assertFalse(customProjectileBehavior.contains("@Override\n    protected Projectile getProjectile"))
+        assertFalse(customProjectileBehavior.contains("@Override\n    protected float getUncertainty"))
+        assertTrue(arrow.contains("protected ItemStack getDefaultPickupItem()"))
+        assertTrue(chestBoat.contains("private ResourceKey<LootTable> lootTable;"))
+        assertTrue(chestBoat.contains("addChestVehicleSaveData(tag, this.registryAccess())"))
+        assertTrue(chestBoat.contains("readChestVehicleSaveData(tag, this.registryAccess())"))
+        assertTrue(chestBoat.contains("setLootTable(@Nullable ResourceKey<LootTable> lootTable)"))
+        assertTrue(projectile.contains("super(level, owner, new Vec3(x, y, z), power);"))
+        assertTrue(projectile.contains("DamageSource postAttackDamageSource = this.damageSources().fireball(this, this.getOwner());"))
+        assertTrue(projectile.contains("EnchantmentHelper.doPostAttackEffects(serverLevel, result.getEntity(), postAttackDamageSource);"))
+        assertTrue(trail.contains("ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, (float) r, (float) g, (float) b), 5"))
+        assertTrue(hurtingProjectile.contains("projectile.accelerationPower = 0.1D;"))
+        assertTrue(hurtingProjectile.contains("hurting.accelerationPower *= 0.25;"))
+        assertTrue(!hurtingProjectile.contains("xPower"))
+        assertTrue(copiedTick.contains("super(type, owner, new Vec3(x, y, z), level);"))
+        assertTrue(copiedTick.contains("super(type, x, y, z, movement, level);"))
+        assertTrue(copiedTick.contains("vec3.add(vec3.normalize().scale(this.accelerationPower)).scale(f)"))
+        assertTrue(!copiedTick.contains("xPower"))
+        assertTrue(event.contains("event.setUseBlock(TriState.FALSE);"))
+        assertTrue(event.contains("private static void checkTooFar(ICancellableEvent event, Object target)"))
+        assertTrue(event.contains("private static void checkAttack(ICancellableEvent event, Object target)"))
+        assertTrue(event.contains("public void route(PlayerInteractEvent.RightClickBlock rightClickBlock)"))
+        assertTrue(event.contains("checkTooFar(rightClickBlock, new Object())"))
+        assertTrue(event.contains("checkAttack(event, new Object())"))
+        assertTrue(!event.contains("void route(PlayerInteractEvent event)"), event)
+        assertTrue(spawnEgg.contains("spawnEggItem.getType(stack) == expected"))
+    }
+
+    @Test
+    fun `migrates legacy abstract arrow constructor knockback and enchantment hooks structurally`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DartSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.damagesource.DamageSource;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.projectile.AbstractArrow;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.EnchantmentHelper;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.phys.EntityHitResult;
+            import net.minecraft.world.phys.Vec3;
+
+            import java.util.function.Supplier;
+
+            public abstract class DartSurface extends AbstractArrow {
+                private final Supplier<Item> pickupItem;
+
+                protected DartSurface(EntityType<? extends DartSurface> type, Level level, LivingEntity shooter, Supplier<Item> pickupItem) {
+                    super(type, shooter, level);
+                    this.pickupItem = pickupItem;
+                }
+
+                @Override
+                protected ItemStack getPickupItem() {
+                    return new ItemStack(this.pickupItem.get());
+                }
+
+                protected void onHitEntity(EntityHitResult result) {
+                    Entity entity = result.getEntity();
+                    Entity owner = this.getOwner();
+                    DamageSource damageSource;
+                    if (owner == null) {
+                        damageSource = this.damageSources().arrow(this, this);
+                    } else {
+                        damageSource = this.damageSources().arrow(this, owner);
+                    }
+                    if (entity instanceof LivingEntity livingentity) {
+                        if (this.getKnockback() > 0) {
+                            double d0 = Math.max(0.0D, 1.0D - livingentity.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.KNOCKBACK_RESISTANCE));
+                            Vec3 vec3 = this.getDeltaMovement().multiply(1.0, 0.0, 1.0).normalize().scale((double) this.getKnockback() * 0.6 * d0);
+                            if (vec3.lengthSqr() > 0.0D) {
+                                livingentity.push(vec3.x, 0.1D, vec3.z);
+                            }
+                        }
+
+                        if (!this.level().isClientSide() && owner instanceof LivingEntity) {
+                            EnchantmentHelper.doPostHurtEffects(livingentity, owner);
+                            EnchantmentHelper.doPostDamageEffects((LivingEntity)owner, livingentity);
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val dart = srcDir.resolve("DartSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(dart.contains("super(type, shooter, level, new ItemStack(pickupItem.get()), null);"), dart)
+        assertTrue(dart.contains("protected ItemStack getDefaultPickupItem()"), dart)
+        assertTrue(dart.contains("this.doKnockback(livingentity, damageSource);"), dart)
+        assertTrue(dart.contains("EnchantmentHelper.doPostAttackEffectsWithItemSource(serverlevel, livingentity, damageSource, this.getWeaponItem());"), dart)
+        assertTrue(dart.contains("import net.minecraft.server.level.ServerLevel;"), dart)
+        assertFalse(dart.contains("getKnockback()"), dart)
+        assertFalse(dart.contains("doPostHurtEffects"), dart)
+        assertFalse(dart.contains("doPostDamageEffects"), dart)
+    }
+
+    @Test
+    fun `migrates legacy player attack mixin post hurt injection target`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/mixin")
+        srcDir.createDirectories()
+        srcDir.resolve("PlayerMixin.java").writeText("""
+            package com.example.mixin;
+
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.player.Player;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.injection.At;
+            import org.spongepowered.asm.mixin.injection.Inject;
+            import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+            @Mixin(Player.class)
+            public class PlayerMixin {
+                @Inject(at = @At(value = "INVOKE", target = "Lnet/minecraft/world/item/enchantment/EnchantmentHelper;doPostHurtEffects(Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/entity/Entity;)V", shift = At.Shift.AFTER), method = "attack(Lnet/minecraft/world/entity/Entity;)V")
+                private void attack(Entity target, CallbackInfo ci) {
+                    Player player = (Player) (Object) this;
+                    Hooks.damageGloves(player);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val mixin = srcDir.resolve("PlayerMixin.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(mixin.contains("import net.minecraft.world.entity.LivingEntity;"), mixin)
+        assertTrue(mixin.contains("target = \"Lnet/minecraft/world/entity/player/Player;setLastHurtMob(Lnet/minecraft/world/entity/Entity;)V\""), mixin)
+        assertTrue(mixin.contains("if (target instanceof LivingEntity) {"), mixin)
+        assertTrue(mixin.contains("Hooks.damageGloves(player);"), mixin)
+        assertFalse(mixin.contains("EnchantmentHelper;doPostHurtEffects"), mixin)
+    }
+
+    @Test
+    fun `migrates legacy doEnchant damage effects from preceding target hurt source`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExploderSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.damagesource.DamageSource;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.level.Level;
+
+            public class ExploderSurface extends Mob {
+                protected ExploderSurface(EntityType<? extends Mob> type, Level level) {
+                    super(type, level);
+                }
+
+                public void explodeAt(LivingEntity entity) {
+                    DamageSource damageSource = this.damageSources().mobAttack(this);
+                    if (entity.hurt(damageSource, 1.0F)) {
+                        if (this.level() instanceof ServerLevel level) {
+                            level.broadcastEntityEvent(this, (byte) 4);
+                        }
+
+                        this.doEnchantDamageEffects(this, entity);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val exploder = srcDir.resolve("ExploderSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(exploder.contains("EnchantmentHelper.doPostAttackEffects(serverLevel, entity, damageSource);"), exploder)
+        assertTrue(exploder.contains("import net.minecraft.world.item.enchantment.EnchantmentHelper;"), exploder)
+        assertFalse(exploder.contains("doEnchantDamageEffects"), exploder)
+    }
+
+    @Test
+    fun `legacy doEnchant damage effects does not use unrelated method damage source`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExploderSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.damagesource.DamageSource;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.level.Level;
+
+            public class ExploderSurface extends Mob {
+                protected ExploderSurface(EntityType<? extends Mob> type, Level level) {
+                    super(type, level);
+                }
+
+                public void explodeAt(LivingEntity firstTarget, LivingEntity entity) {
+                    DamageSource damageSource = this.damageSources().mobAttack(this);
+                    firstTarget.hurt(damageSource, 1.0F);
+                    if (this.level() instanceof ServerLevel level) {
+                        level.broadcastEntityEvent(this, (byte) 4);
+                    }
+
+                    this.doEnchantDamageEffects(this, entity);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val exploder = srcDir.resolve("ExploderSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(exploder.contains("this.doEnchantDamageEffects(this, entity);"), exploder)
+        assertFalse(exploder.contains("EnchantmentHelper.doPostAttackEffects"), exploder)
+        assertFalse(exploder.contains("import net.minecraft.world.item.enchantment.EnchantmentHelper;"), exploder)
+    }
+
+    @Test
+    fun `migrates abstract render living subscribers with pre render model mutations`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ClientEvents.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.model.HeadedModel;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.client.event.RenderLivingEvent;
+            import net.neoforged.neoforge.client.event.RenderPlayerEvent;
+            import net.neoforged.neoforge.client.event.RenderGuiLayerEvent;
+
+            public class ClientEvents {
+                @SubscribeEvent
+                public static void hideHead(RenderLivingEvent<?, ?> event) {
+                    if (event.getRenderer().getModel() instanceof HeadedModel headedModel) {
+                        headedModel.getHead().visible = false;
+                    }
+                }
+
+                @SubscribeEvent
+                public static void inspect(RenderLivingEvent<?, ?> event) {
+                    event.getEntity().getName();
+                }
+
+                @SubscribeEvent
+                public static void camouflage(RenderLivingEvent event) {
+                    event.setCanceled(true);
+                }
+
+                @SubscribeEvent(priority = EventPriority.LOWEST)
+                public static void renderPlayer(RenderPlayerEvent event) {
+                    if (event.isCanceled()) {
+                        return;
+                    }
+                    event.setCanceled(true);
+                }
+
+                @SubscribeEvent
+                public static void renderLayer(RenderGuiLayerEvent event) {
+                    event.setCanceled(true);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val events = srcDir.resolve("ClientEvents.java").readText()
+
+        assertTrue(events.contains("hideHead(RenderLivingEvent.Pre<?, ?> event)"))
+        assertTrue(events.contains("inspect(RenderLivingEvent<?, ?> event)"))
+        assertTrue(events.contains("camouflage(RenderLivingEvent.Pre<?, ?> event)"))
+        assertTrue(events.contains("renderPlayer(RenderPlayerEvent.Pre event)"))
+        assertTrue(events.contains("renderLayer(RenderGuiLayerEvent.Pre event)"))
+    }
+
+    @Test
+    fun `migrates drop experience block constructor order for subclasses and call sites`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RichOreBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.util.valueproviders.UniformInt;
+            import net.minecraft.world.level.block.DropExperienceBlock;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+
+            public class RichOreBlock extends DropExperienceBlock {
+                public RichOreBlock(BlockBehaviour.Properties properties, UniformInt xpRange) {
+                    super(properties, xpRange);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleBlocks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.util.valueproviders.UniformInt;
+            import net.minecraft.world.level.block.DropExperienceBlock;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+
+            public class ExampleBlocks {
+                public Object rich() {
+                    return new RichOreBlock(BlockBehaviour.Properties.of().strength(3.0F), UniformInt.of(0, 2));
+                }
+
+                public Object vanilla() {
+                    return new DropExperienceBlock(BlockBehaviour.Properties.of().strength(3.0F), UniformInt.of(3, 5));
+                }
+
+                public Object vanillaNoXp() {
+                    return new DropExperienceBlock(BlockBehaviour.Properties.of().strength(2.0F));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val block = srcDir.resolve("RichOreBlock.java").readText()
+        val registry = srcDir.resolve("ExampleBlocks.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-drop-experience-constructor-order" })
+        assertTrue(block.contains("public RichOreBlock(UniformInt xpRange, BlockBehaviour.Properties properties)"), block)
+        assertTrue(block.contains("super(xpRange, properties);"), block)
+        assertTrue(registry.contains("new RichOreBlock(UniformInt.of(0, 2), BlockBehaviour.Properties.of().strength(3.0F))"), registry)
+        assertTrue(registry.contains("new DropExperienceBlock(UniformInt.of(3, 5), BlockBehaviour.Properties.of().strength(3.0F))"), registry)
+        assertTrue(registry.contains("new DropExperienceBlock(net.minecraft.util.valueproviders.ConstantInt.of(0), BlockBehaviour.Properties.of().strength(2.0F))"), registry)
+        assertFalse(registry.contains("new RichOreBlock(BlockBehaviour.Properties"), registry)
+        assertFalse(registry.contains("new DropExperienceBlock(BlockBehaviour.Properties"), registry)
+    }
+
+    @Test
+    fun `drop experience block constructor migration ignores comments strings and non executable hints`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CommentedOreBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.util.valueproviders.UniformInt;
+            import net.minecraft.world.level.block.DropExperienceBlock;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+
+            public class CommentedOreBlock extends DropExperienceBlock {
+                public static final com.mojang.serialization.MapCodec<CommentedOreBlock> CODEC = null;
+
+                /*
+                public CommentedOreBlock(BlockBehaviour.Properties properties, UniformInt xpRange) {
+                    super(properties, xpRange);
+                }
+                */
+                public CommentedOreBlock() {
+                    super(UniformInt.of(1, 2), BlockBehaviour.Properties.of());
+                }
+
+                @Override
+                public com.mojang.serialization.MapCodec<CommentedOreBlock> codec() {
+                    return CODEC;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleBlocks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.DropExperienceBlock;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+
+            public class ExampleBlocks {
+                /*
+                UniformInt guessedRange;
+                Object commented = new DropExperienceBlock(BlockBehaviour.Properties.of(), UniformInt.of(0, 1));
+                */
+                private static final String DOC = "new DropExperienceBlock(BlockBehaviour.Properties.of(), UniformInt.of(2, 3))";
+
+                public Object ambiguous(Object guessedRange) {
+                    return new DropExperienceBlock(BlockBehaviour.Properties.of(), guessedRange);
+                }
+            }
+        """.trimIndent())
+        val originals = srcDir.toFile()
+            .walkTopDown()
+            .filter { it.isFile && it.extension == "java" }
+            .associate { it.name to it.readText() }
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.toFile()
+            .walkTopDown()
+            .filter { it.isFile && it.extension == "java" }
+            .associate { it.name to it.readText() }
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertEquals(0, result.changeCount, "changes=${result.changes}")
+        assertEquals(originals, migrated)
+        assertFalse(migrated.getValue("CommentedOreBlock.java").contains("public CommentedOreBlock(UniformInt xpRange"), migrated.getValue("CommentedOreBlock.java"))
+        assertFalse(migrated.getValue("ExampleBlocks.java").contains("new DropExperienceBlock(guessedRange, BlockBehaviour.Properties.of())"), migrated.getValue("ExampleBlocks.java"))
+        assertFalse(migrated.getValue("ExampleBlocks.java").contains("new DropExperienceBlock(UniformInt.of(0, 1), BlockBehaviour.Properties.of())"), migrated.getValue("ExampleBlocks.java"))
+    }

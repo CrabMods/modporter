@@ -1,0 +1,14 @@
+package @PACKAGE@;
+
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.block.state.BlockState;
+
+/**
+ * Shared SPI for a dependency plant which cannot directly implement the canonical IPlantable ABI.
+ */
+public interface LegacyPlantableAdapter<T> {
+    BlockState getPlant(T value, BlockGetter level, BlockPos pos);
+
+    PlantType getPlantType(T value, BlockGetter level, BlockPos pos);
+}

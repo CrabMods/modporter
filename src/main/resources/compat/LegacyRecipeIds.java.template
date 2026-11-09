@@ -1,0 +1,356 @@
+package @PACKAGE@;
+
+import java.lang.ref.ReferenceQueue;
+import java.lang.ref.WeakReference;
+import java.util.ArrayList;
+import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.item.crafting.Recipe;
+import net.minecraft.world.item.crafting.RecipeHolder;
+import net.minecraft.world.item.crafting.RecipeManager;
+
+/**
+ * Restores legacy recipe-object ID reads without inventing IDs.
+ *
+ * <p>Project virtual getId() behavior remains authoritative when it yields a valid
+ * source-owned ID. Exact holder-object identity supplies IDs for recipes without that
+ * getter and for a PendingSourceOwned generated pending-decode sentinel. Fresh
+ * vanilla recipes, unresolved pending decodes, and ambiguous fallback identities
+ * fail closed.</p>
+ */
+public final class LegacyRecipeIds {
+    private static final Object LOCK = new Object();
+    private static final ReferenceQueue<Recipe<?>> COLLECTED_RECIPES = new ReferenceQueue<>();
+    private static final ReferenceQueue<RecipeManager> COLLECTED_MANAGERS = new ReferenceQueue<>();
+    private static final Map<RecipeIdentity, LoadedIds> LOADED_IDS = new HashMap<>();
+    private static final Map<LogicalSide, ManagerState> ACTIVE_SIDES =
+        new EnumMap<>(LogicalSide.class);
+    private static long nextManagerToken = 1;
+
+    /**
+     * Implemented only by project recipe classes with a source-proven reachable
+     * public no-argument ResourceLocation getId() method.
+     */
+    public interface SourceOwned {
+        ResourceLocation modporter$sourceRecipeId();
+    }
+
+    /**
+     * Added only to recipes whose generated legacy-codec setter uses the
+     * reserved pending ID until a holder assignment supplies the physical ID.
+     */
+    public interface PendingSourceOwned extends SourceOwned {
+    }
+
+    private LegacyRecipeIds() {
+    }
+
+    /**
+     * Calls a source-owned virtual getter exactly once when present. Its valid
+     * value wins over holder metadata. Loaded identity is the fallback only for
+     * recipes without that getter or for a PendingSourceOwned generated
+     * pending-decode sentinel.
+     *
+     * @throws IllegalStateException when no proven ID exists or active holders disagree
+     */
+    public static ResourceLocation id(Recipe<?> recipe) {
+        Objects.requireNonNull(recipe, "recipe");
+
+        if (recipe instanceof SourceOwned sourceOwned) {
+            ResourceLocation sourceId = sourceOwned.modporter$sourceRecipeId();
+            if (usable(sourceId)) {
+                return sourceId;
+            }
+            if (sourceId == null) {
+                throw unavailable(recipe, "its source-owned id is null");
+            }
+            if (!(recipe instanceof PendingSourceOwned)) {
+                throw unavailable(
+                    recipe,
+                    "its source-owned getter returned the reserved pending id"
+                );
+            }
+            ResourceLocation loaded = loadedId(recipe);
+            if (loaded != null) {
+                return loaded;
+            }
+            throw unavailable(
+                recipe,
+                "its source-owned id is pending and no loaded holder identity exists"
+            );
+        }
+
+        ResourceLocation loaded = loadedId(recipe);
+        if (loaded != null) {
+            return loaded;
+        }
+
+        throw unavailable(recipe, "it is not a currently loaded holder value and owns no source id");
+    }
+
+    private static ResourceLocation loadedId(Recipe<?> recipe) {
+        synchronized (LOCK) {
+            drainCollected();
+            LoadedIds loaded = LOADED_IDS.get(new RecipeIdentity(recipe));
+            return loaded == null ? null : loaded.resolve(recipe);
+        }
+    }
+
+    /**
+     * Replaces the current server-side generation without disturbing the
+     * simultaneous client generation of an integrated server.
+     */
+    public static void assignServerIds(RecipeManager manager) {
+        assignIds(LogicalSide.SERVER, manager);
+    }
+
+    /** Replaces the current client-side generation without disturbing the server. */
+    public static void assignClientIds(RecipeManager manager) {
+        assignIds(LogicalSide.CLIENT, manager);
+    }
+
+    /**
+     * Removes this exact server generation. A late stop event cannot erase a
+     * newer server generation that has already replaced it.
+     */
+    public static void clearServerIds(RecipeManager manager) {
+        Objects.requireNonNull(manager, "manager");
+        clearIds(LogicalSide.SERVER, manager);
+    }
+
+    /** Removes the disconnected client generation even if its manager remains reachable. */
+    public static void clearClientIds() {
+        clearIds(LogicalSide.CLIENT, null);
+    }
+
+    private static void assignIds(LogicalSide side, RecipeManager manager) {
+        Objects.requireNonNull(manager, "manager");
+
+        IdentityHashMap<Recipe<?>, HolderIdentity> snapshot = new IdentityHashMap<>();
+        for (RecipeHolder<?> holder : manager.getRecipes()) {
+            Recipe<?> recipe = holder.value();
+            ResourceLocation id = holder.id();
+            HolderIdentity current = snapshot.get(recipe);
+            snapshot.put(recipe, current == null ? HolderIdentity.of(id) : current.merge(id));
+        }
+
+        synchronized (LOCK) {
+            drainCollected();
+
+            ManagerState previous = ACTIVE_SIDES.remove(side);
+            if (previous != null) {
+                removeManagerState(previous);
+            }
+
+            long token = nextManagerToken++;
+            if (nextManagerToken == 0) {
+                nextManagerToken = 1;
+            }
+
+            List<RecipeIdentity> recipes = new ArrayList<>(snapshot.size());
+            for (Map.Entry<Recipe<?>, HolderIdentity> entry : snapshot.entrySet()) {
+                RecipeIdentity identity = new RecipeIdentity(entry.getKey(), COLLECTED_RECIPES);
+                LOADED_IDS.computeIfAbsent(identity, ignored -> new LoadedIds())
+                    .put(token, entry.getValue());
+                recipes.add(identity);
+            }
+
+            ACTIVE_SIDES.put(
+                side,
+                new ManagerState(
+                    new ManagerIdentity(manager, side, COLLECTED_MANAGERS),
+                    token,
+                    List.copyOf(recipes)
+                )
+            );
+        }
+    }
+
+    private static void clearIds(LogicalSide side, RecipeManager expectedManager) {
+        synchronized (LOCK) {
+            drainCollected();
+            ManagerState current = ACTIVE_SIDES.get(side);
+            if (current == null) {
+                return;
+            }
+            if (expectedManager != null && current.manager().get() != expectedManager) {
+                return;
+            }
+            ACTIVE_SIDES.remove(side);
+            removeManagerState(current);
+        }
+    }
+
+    private static boolean usable(ResourceLocation id) {
+        return id != null && !pending(id);
+    }
+
+    private static boolean pending(ResourceLocation id) {
+        return "modporter".equals(id.getNamespace())
+            && "pending_recipe_id".equals(id.getPath());
+    }
+
+    private static IllegalStateException unavailable(Recipe<?> recipe, String reason) {
+        return new IllegalStateException(
+            "Recipe id is unavailable for " + recipe.getClass().getName() + ": " + reason
+        );
+    }
+
+    private static void drainCollected() {
+        RecipeIdentity recipe;
+        while ((recipe = (RecipeIdentity) COLLECTED_RECIPES.poll()) != null) {
+            LOADED_IDS.remove(recipe);
+        }
+
+        ManagerIdentity manager;
+        while ((manager = (ManagerIdentity) COLLECTED_MANAGERS.poll()) != null) {
+            ManagerState state = ACTIVE_SIDES.get(manager.side());
+            if (state != null && state.manager() == manager) {
+                ACTIVE_SIDES.remove(manager.side());
+                removeManagerState(state);
+            }
+        }
+    }
+
+    private static void removeManagerState(ManagerState state) {
+        for (RecipeIdentity recipe : state.recipes()) {
+            LoadedIds loaded = LOADED_IDS.get(recipe);
+            if (loaded == null) {
+                continue;
+            }
+            loaded.remove(state.token());
+            if (loaded.isEmpty()) {
+                LOADED_IDS.remove(recipe);
+            }
+        }
+    }
+
+    private enum LogicalSide {
+        SERVER,
+        CLIENT
+    }
+
+    private record ManagerState(
+            ManagerIdentity manager,
+            long token,
+            List<RecipeIdentity> recipes) {
+    }
+
+    private static final class LoadedIds {
+        private final Map<Long, HolderIdentity> byManager = new HashMap<>();
+
+        private void put(long managerToken, HolderIdentity identity) {
+            byManager.put(managerToken, identity);
+        }
+
+        private void remove(long managerToken) {
+            byManager.remove(managerToken);
+        }
+
+        private boolean isEmpty() {
+            return byManager.isEmpty();
+        }
+
+        private ResourceLocation resolve(Recipe<?> recipe) {
+            ResourceLocation resolved = null;
+            for (HolderIdentity identity : byManager.values()) {
+                if (identity.ambiguous()) {
+                    throw unavailable(recipe, "the same object is held under multiple ids");
+                }
+                ResourceLocation candidate = identity.id();
+                if (!usable(candidate)) {
+                    throw unavailable(recipe, "a loaded holder supplied a null or pending id");
+                }
+                if (resolved == null) {
+                    resolved = candidate;
+                } else if (!resolved.equals(candidate)) {
+                    throw unavailable(recipe, "active recipe managers disagree on its holder id");
+                }
+            }
+            return resolved;
+        }
+    }
+
+    private record HolderIdentity(ResourceLocation id, boolean ambiguous) {
+        private static HolderIdentity of(ResourceLocation id) {
+            return new HolderIdentity(id, false);
+        }
+
+        private HolderIdentity merge(ResourceLocation other) {
+            return ambiguous || !Objects.equals(id, other)
+                ? new HolderIdentity(null, true)
+                : this;
+        }
+    }
+
+    private static final class RecipeIdentity extends WeakReference<Recipe<?>> {
+        private final int identityHash;
+
+        private RecipeIdentity(Recipe<?> recipe) {
+            super(recipe);
+            identityHash = System.identityHashCode(recipe);
+        }
+
+        private RecipeIdentity(Recipe<?> recipe, ReferenceQueue<Recipe<?>> queue) {
+            super(recipe, queue);
+            identityHash = System.identityHashCode(recipe);
+        }
+
+        @Override
+        public int hashCode() {
+            return identityHash;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) {
+                return true;
+            }
+            if (!(other instanceof RecipeIdentity identity)) {
+                return false;
+            }
+            Recipe<?> recipe = get();
+            return recipe != null && recipe == identity.get();
+        }
+    }
+
+    private static final class ManagerIdentity extends WeakReference<RecipeManager> {
+        private final int identityHash;
+        private final LogicalSide side;
+
+        private ManagerIdentity(
+                RecipeManager manager,
+                LogicalSide side,
+                ReferenceQueue<RecipeManager> queue) {
+            super(manager, queue);
+            identityHash = System.identityHashCode(manager);
+            this.side = side;
+        }
+
+        private LogicalSide side() {
+            return side;
+        }
+
+        @Override
+        public int hashCode() {
+            return identityHash;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) {
+                return true;
+            }
+            if (!(other instanceof ManagerIdentity identity)) {
+                return false;
+            }
+            RecipeManager manager = get();
+            return manager != null && manager == identity.get();
+        }
+    }
+}

@@ -1,5 +1,4 @@
 # id	source	fragment_dir	order_file	max_lines
-structural-refactor-pass	src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt	src/main/kotlin/com/modporter/core/transforms/structural/fragments	StructuralRefactorPass.fragments	3000
 structural-refactor-extra-test	src/test/kotlin/com/modporter/transforms/StructuralRefactorExtraTest.kt	src/test/kotlin/com/modporter/transforms/fragments/StructuralRefactorExtraTest	StructuralRefactorExtraTest.fragments	1200
 mapping-completeness-test	src/test/kotlin/com/modporter/mapping/MappingCompletenessTest.kt	src/test/kotlin/com/modporter/mapping/fragments/MappingCompletenessTest	MappingCompletenessTest.fragments	1200
 build-system-test	src/test/kotlin/com/modporter/transforms/BuildSystemTest.kt	src/test/kotlin/com/modporter/transforms/fragments/BuildSystemTest	BuildSystemTest.fragments	1200

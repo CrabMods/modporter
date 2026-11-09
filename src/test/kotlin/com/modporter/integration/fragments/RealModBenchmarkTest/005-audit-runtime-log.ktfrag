@@ -1,0 +1,1194 @@
+
+    private fun auditRuntimeLog(
+        logFile: Path,
+        failOnWarnings: Boolean,
+        projectDir: Path? = null,
+        inputSourceDir: Path? = null
+    ): RuntimeLogAudit {
+        if (!logFile.exists()) return RuntimeLogAudit(listOf("log file missing: $logFile"), emptyList())
+
+        val decoded = StrictUtf8RuntimeLog.decode(logFile)
+        if (decoded is StrictUtf8RuntimeLog.DecodeResult.Failure) {
+            return RuntimeLogAudit(listOf(decoded.note()), emptyList())
+        }
+        val lines = (decoded as StrictUtf8RuntimeLog.DecodeResult.Success).text.lines()
+        val findings = mutableListOf<String>()
+        val allowedIssues = mutableListOf<String>()
+        val flywheelJarJarEvidence =
+            if (failOnWarnings) projectDir?.let { FlywheelJarJarRuntimeEvidence.audit(it, lines) }
+            else null
+        val evidenceCache = RuntimeLogEvidenceCache(projectDir, inputSourceDir)
+        var clientShutdownStarted = false
+        lines.forEachIndexed { index, line ->
+            if (line.contains("[minecraft/Minecraft]: Stopping!")) {
+                clientShutdownStarted = true
+            }
+            if (isAllowedRuntimeLogNoise(lines, index, clientShutdownStarted)) return@forEachIndexed
+            val trimmed = line.trim()
+            val fatal = runtimeFatalPatterns.any { it.containsMatchIn(line) }
+            val warning = failOnWarnings && runtimeWarningPatterns.any { it.containsMatchIn(line) }
+            if (fatal || warning) {
+                val allowedIssue =
+                    flywheelJarJarEvidence?.allowedIssueAt(index)
+                        ?: allowedKnownUpstreamRuntimeIssue(lines, index, evidenceCache)
+                if (allowedIssue != null) {
+                    allowedIssues.add("line ${index + 1}: $allowedIssue")
+                    return@forEachIndexed
+                }
+                val kind = if (fatal) "fatal" else "warning"
+                findings.add("$kind line ${index + 1}: ${trimmed.take(240)}")
+            }
+        }
+
+        return RuntimeLogAudit(findings.take(12), summarizeAllowedRuntimeIssues(allowedIssues))
+    }
+
+    private fun summarizeAllowedRuntimeIssues(allowedIssues: List<String>): List<String> {
+        val grouped = linkedMapOf<String, MutableList<Int>>()
+        val unparsed = mutableListOf<String>()
+        val pattern = Regex("""^line\s+(\d+):\s+(.+)$""")
+        allowedIssues.distinct().forEach { issue ->
+            val match = pattern.matchEntire(issue)
+            if (match == null) {
+                unparsed.add(issue)
+            } else {
+                grouped.getOrPut(match.groupValues[2]) { mutableListOf() }
+                    .add(match.groupValues[1].toInt())
+            }
+        }
+
+        return grouped.map { (issue, lines) ->
+            val sortedLines = lines.distinct().sorted()
+            if (sortedLines.size == 1) {
+                "line ${sortedLines.single()}: $issue"
+            } else {
+                "${summarizeLineNumbers(sortedLines)}: $issue"
+            }
+        } + unparsed.distinct()
+    }
+
+    private fun summarizeLineNumbers(lines: List<Int>): String {
+        if (lines.size == 1) return "line ${lines.single()}"
+        val ranges = mutableListOf<String>()
+        var start = lines.first()
+        var previous = start
+        for (line in lines.drop(1)) {
+            if (line == previous + 1) {
+                previous = line
+            } else {
+                ranges.add(if (start == previous) "$start" else "$start-$previous")
+                start = line
+                previous = line
+            }
+        }
+        ranges.add(if (start == previous) "$start" else "$start-$previous")
+
+        val rendered = if (ranges.size <= 6) {
+            ranges.joinToString(", ")
+        } else {
+            ranges.take(3).joinToString(", ") + ", ..., " + ranges.takeLast(2).joinToString(", ")
+        }
+        return "lines $rendered (${lines.size} occurrences)"
+    }
+
+    private fun isAllowedRuntimeLogNoise(lines: List<String>, index: Int, clientShutdownStarted: Boolean): Boolean {
+        val line = lines[index]
+        return allowedRuntimeLogFragments.any { line.contains(it) } ||
+            clientShutdownStarted && line.contains("[mojang/OpenAlUtil]: Stop: Invalid name parameter.") ||
+            clientShutdownStarted &&
+            line.contains("[minecraft/Connection]: Exception caught in connection") &&
+            lines.getOrNull(index + 1)?.contains("java.nio.channels.ClosedChannelException") == true
+    }
+
+    private fun allowedKnownUpstreamRuntimeIssue(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        mojangPublicKeyNetworkTimeoutEvidence(lines, index)?.let {
+            return "external Mojang public-key lookup network timeout ($it)"
+        }
+        externalDependencyMissingMixinEvidence(lines, index, evidenceCache)?.let {
+            return "external dependency optional mixin target warning ($it)"
+        }
+        externalDependencyMobCategoryEvidence(lines, index, evidenceCache)?.let {
+            return "external dependency mob-category warning ($it)"
+        }
+        externalDependencyConfigCorrectionEvidence(lines, index, evidenceCache)?.let {
+            return "external dependency config correction warning ($it)"
+        }
+        externalDependencyCreativeTabDuplicateEvidence(lines, index, evidenceCache)?.let {
+            return "external dependency creative-tab duplicate item warning ($it)"
+        }
+        externalDependencyMissingModelEvidence(lines, index, evidenceCache)?.let {
+            return "external dependency missing model warning ($it)"
+        }
+        externalDependencyPatchouliJeiKeybindingEvidence(lines, index, evidenceCache)?.let {
+            return "external dependency Patchouli/JEI integration warning ($it)"
+        }
+        externalDependencyMissingSoundFileEvidence(lines, index, evidenceCache)?.let {
+            return "external dependency missing sound file warning ($it)"
+        }
+        externalDependencyMissingSubtitleEvidence(lines, index, evidenceCache)?.let {
+            return "external dependency missing subtitle warning ($it)"
+        }
+        sourceInheritedCreativeTabDuplicateEvidence(lines, index, evidenceCache)?.let {
+            return "source-inherited creative-tab duplicate item warning ($it)"
+        }
+        sourceInheritedMissingSoundEvidence(lines[index], evidenceCache)?.let {
+            return "source-inherited missing sound definition warning ($it)"
+        }
+        sourceInheritedMissingSoundFileEvidence(lines[index], evidenceCache)?.let {
+            return "source-inherited missing sound file warning ($it)"
+        }
+        sourceInheritedMissingModelEvidence(lines[index], evidenceCache)?.let {
+            return "source-inherited missing model warning ($it)"
+        }
+        sourceInheritedMissingBlockstateVariantEvidence(lines[index], evidenceCache)?.let {
+            return "source-inherited missing blockstate variant warning ($it)"
+        }
+        sourceInheritedMissingModelTextureEvidence(lines, index, evidenceCache)?.let {
+            return "source-inherited missing model texture warning ($it)"
+        }
+        sourceInheritedTextureMipEvidence(lines[index], evidenceCache)?.let {
+            return "source-inherited texture mip warning ($it)"
+        }
+        sourceInheritedSlowDeferredWorkEvidence(lines[index], evidenceCache)?.let {
+            return "source-inherited slow deferred work warning ($it)"
+        }
+        sourceInheritedGameTestServerLagEvidence(lines, index, evidenceCache)?.let {
+            return "source-inherited GameTest server lag warning ($it)"
+        }
+        journeyMapSepiaColorModulatorEvidence(lines, index, evidenceCache)?.let {
+            return "pinned JourneyMap sepia shader metadata warning ($it)"
+        }
+        return null
+    }
+
+    private fun mojangPublicKeyNetworkTimeoutEvidence(lines: List<String>, index: Int): String? {
+        val line = lines[index]
+        if (!line.contains("[mojang/YggdrasilServicesKeyInfo]: Failed to request yggdrasil public key")) return null
+        val evidenceWindow = lines.drop(index).take(32).joinToString("\n")
+        val endpoint = "https://api.minecraftservices.com/publickeys"
+        if (!evidenceWindow.contains(endpoint)) return null
+        val timedOut = evidenceWindow.contains("Connect timed out") ||
+            evidenceWindow.contains("Read timed out") ||
+            evidenceWindow.contains("java.net.SocketTimeoutException")
+        if (!timedOut) return null
+        return "authlib request to $endpoint timed out"
+    }
+
+    private fun externalDependencyMissingMixinEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val project = evidenceCache.projectDir ?: return null
+        val config = missingMixinConfigName(lines, index) ?: return null
+        if (evidenceCache.containsFileNamed(config)) {
+            return null
+        }
+
+        val targetClass = missingMixinTargetClassName(lines, index)
+        if (targetClass != null && evidenceCache.containsAnyText(targetClass, targetClass.replace('.', '/'))) {
+            return null
+        }
+
+        val sourceMod = mixinConfigSourceMod(lines, index, config)?.let { sourceMod ->
+            val targetMod = evidenceCache.targetMod ?: detectBenchmarkModId(project)
+            if (targetMod != null && sourceMod == targetMod) return null
+            "config '$config' was loaded from dependency '$sourceMod' and is absent from converted/input project resources"
+        } ?: evidenceCache.externalClasspathConfigSource(config)
+            ?: mixinConfigLoadedDependencyEvidence(lines, config, evidenceCache)
+            ?: return null
+
+        return sourceMod
+    }
+
+    private fun mixinConfigLoadedDependencyEvidence(
+        lines: List<String>,
+        config: String,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val ownerMod = loadedModIdForMixinConfig(lines, config) ?: return null
+        val targetMod = evidenceCache.targetMod
+        if (targetMod != null && ownerMod == targetMod) return null
+        if (!evidenceCache.buildFileContainsDependencyId(ownerMod)) return null
+        return "config '$config' is attributed to loaded external mod '$ownerMod' by runtime Mod List and active build dependency evidence"
+    }
+
+    private fun loadedModIdForMixinConfig(lines: List<String>, config: String): String? {
+        val loadedModIds = loadedRuntimeModIds(lines)
+        val stem = config
+            .removeSuffix(".json")
+            .removeSuffix(".mixins")
+            .removeSuffix(".mixin")
+        return loadedModIds.firstOrNull { modId ->
+            stem == modId ||
+                stem.startsWith("$modId.") ||
+                stem.startsWith("${modId}_") ||
+                stem.startsWith("${modId}-")
+        }
+    }
+
+    private fun loadedRuntimeModIds(lines: List<String>): Set<String> {
+        val pattern = Regex("""\(([a-z0-9_.-]+)\)\s*$""")
+        return lines.mapNotNull { line -> pattern.find(line)?.groupValues?.get(1) }
+            .filterNot { it == "unknown" }
+            .toSet()
+    }
+
+    private fun missingMixinTargetClassName(lines: List<String>, index: Int): String? {
+        val windowStart = (index - 1).coerceAtLeast(0)
+        val windowEnd = (index + 2).coerceAtMost(lines.lastIndex)
+        val pattern = Regex("""@Mixin target ([^ ]+) was not found [^:\s]+\.mixins\.json:""")
+        for (lineIndex in windowStart..windowEnd) {
+            pattern.find(lines[lineIndex])?.let { return it.groupValues[1] }
+        }
+        return null
+    }
+
+    private fun missingMixinConfigName(lines: List<String>, index: Int): String? {
+        val windowStart = (index - 1).coerceAtLeast(0)
+        val windowEnd = (index + 2).coerceAtMost(lines.lastIndex)
+        val pattern = Regex("""@Mixin target [^ ]+ was not found ([^:\s]+\.mixins\.json):""")
+        for (lineIndex in windowStart..windowEnd) {
+            pattern.find(lines[lineIndex])?.let { return it.groupValues[1] }
+        }
+        return null
+    }
+
+    private fun mixinConfigSourceMod(lines: List<String>, index: Int, config: String): String? {
+        val pattern = Regex("""Registering mixin config: ${Regex.escape(config)} source=SecureJarResource\(([^)]+)\)""")
+        return lines.take(index + 1)
+            .takeLast(300)
+            .asReversed()
+            .firstNotNullOfOrNull { line -> pattern.find(line)?.groupValues?.get(1) }
+    }
+
+    private fun externalDependencyMobCategoryEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        evidenceCache.projectDir ?: return null
+        val match = Regex("""Detected ([a-z0-9_.-]+:[a-z0-9_./-]+) that was registered with [A-Z_]+ mob category but was added under [A-Z_]+ mob category""")
+            .find(lines[index])
+            ?: return null
+        val entityId = match.groupValues[1]
+        val targetMod = evidenceCache.targetMod
+        val namespace = entityId.substringBefore(':')
+        if (targetMod != null && namespace == targetMod) return null
+        if (evidenceCache.containsText(entityId)) return null
+        val evidence = externalDependencyNamespaceEvidence(namespace, lines, evidenceCache) ?: return null
+        return "entity '$entityId' belongs to external dependency namespace '$namespace' with $evidence evidence and is absent from converted/input project sources"
+    }
+
+    private fun externalDependencyConfigCorrectionEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        evidenceCache.projectDir ?: return null
+        val config = correctedConfigFileName(lines[index]) ?: return null
+        val ownerMod = configTrackerOwnerMod(lines, index, config)
+            ?: loadedModIdForConfig(lines, config)
+            ?: return null
+        val targetMod = evidenceCache.targetMod
+        if (targetMod != null && ownerMod == targetMod) return null
+        if (!evidenceCache.buildFileContainsDependencyId(ownerMod)) return null
+        return "config '$config' is tracked for loaded external mod '$ownerMod' with active build dependency evidence"
+    }
+
+    private fun correctedConfigFileName(line: String): String? =
+        Regex("""Configuration file .*[\\/ ]([a-z0-9_.-]+-(?:client|common|server)\.toml) is not correct\. Correcting""")
+            .find(line)
+            ?.groupValues
+            ?.get(1)
+
+    private fun configTrackerOwnerMod(lines: List<String>, index: Int, config: String): String? {
+        val pattern = Regex("""Config file ${Regex.escape(config)} for ([a-z0-9_.-]+) tracking""")
+        return lines.take(index + 1)
+            .takeLast(80)
+            .asReversed()
+            .firstNotNullOfOrNull { line -> pattern.find(line)?.groupValues?.get(1) }
+    }
+
+    private fun loadedModIdForConfig(lines: List<String>, config: String): String? {
+        val stem = config
+            .removeSuffix(".toml")
+            .removeSuffix("-client")
+            .removeSuffix("-common")
+            .removeSuffix("-server")
+        return loadedRuntimeModIds(lines).firstOrNull { modId -> stem == modId }
+    }
+
+    private fun sourceInheritedMissingSoundEvidence(
+        line: String,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val match = Regex("""Missing sound for event: ([a-z0-9_.-]+):([a-z0-9_./-]+)""")
+            .find(line)
+            ?: return null
+        val namespace = match.groupValues[1]
+        val soundPath = match.groupValues[2]
+        val project = evidenceCache.projectDir ?: return null
+        val sourceDir = evidenceCache.inputSourceDir ?: benchmarkInputSourceDir(project) ?: return null
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (namespace != targetMod) return null
+        if (!sourceDeclaresSoundEvent(project, namespace, soundPath)) return null
+        if (!sourceDeclaresSoundEvent(sourceDir, namespace, soundPath)) return null
+        if (!hasSoundDefinitionFile(project, namespace) || !hasSoundDefinitionFile(sourceDir, namespace)) return null
+        if (resourceDefinesSoundEvent(project, namespace, soundPath)) return null
+        if (resourceDefinesSoundEvent(sourceDir, namespace, soundPath)) return null
+        return "input and converted sources declare sound event '$namespace:$soundPath' but their sounds.json resources omit it"
+    }
+
+    private fun sourceInheritedMissingSoundFileEvidence(
+        line: String,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val match = Regex("""File ([a-z0-9_.-]+):sounds/([a-z0-9_./-]+)\.ogg does not exist, cannot add it to event ([a-z0-9_.-]+):([a-z0-9_./-]+)""")
+            .find(line)
+            ?: return null
+        val fileNamespace = match.groupValues[1]
+        val soundFilePath = match.groupValues[2]
+        val eventNamespace = match.groupValues[3]
+        val eventPath = match.groupValues[4]
+        val project = evidenceCache.projectDir ?: return null
+        val sourceDir = evidenceCache.inputSourceDir ?: benchmarkInputSourceDir(project) ?: return null
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (fileNamespace != targetMod || eventNamespace != targetMod || fileNamespace != eventNamespace) return null
+        val soundReference = "$fileNamespace:$soundFilePath"
+        if (!resourceDefinesSoundFileReference(project, eventNamespace, eventPath, soundReference)) return null
+        if (!resourceDefinesSoundFileReference(sourceDir, eventNamespace, eventPath, soundReference)) return null
+        if (resourceHasSoundFile(project, fileNamespace, soundFilePath)) return null
+        if (resourceHasSoundFile(sourceDir, fileNamespace, soundFilePath)) return null
+        return "input and converted resources declare sound file '$soundReference' for event '$eventNamespace:$eventPath' but both omit sounds/$soundFilePath.ogg"
+    }
+
+    private fun externalDependencyPatchouliJeiKeybindingEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val match = Regex("""\[[^\]]*/(?:WARN|ERROR)]\s+\[([a-z0-9_.-]+)/]: Could not locate JEI keybindings, lookups in books may not work""")
+            .find(lines[index])
+            ?: return null
+        val ownerMod = match.groupValues[1]
+        if (ownerMod != "patchouli") return null
+        val evidence = externalDependencyNamespaceEvidence(ownerMod, lines, evidenceCache) ?: return null
+        return "logger owner '$ownerMod' is an external dependency with $evidence evidence"
+    }
+
+    private fun externalDependencyMissingSoundFileEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val match = Regex("""File ([a-z0-9_.-]+):sounds/([a-z0-9_./-]+)\.ogg does not exist, cannot add it to event ([a-z0-9_.-]+):([a-z0-9_./-]+)""")
+            .find(lines[index])
+            ?: return null
+        val fileNamespace = match.groupValues[1]
+        val soundFilePath = match.groupValues[2]
+        val eventNamespace = match.groupValues[3]
+        val eventPath = match.groupValues[4]
+        val project = evidenceCache.projectDir ?: return null
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (eventNamespace == targetMod || fileNamespace == targetMod) return null
+        val soundReference = "$fileNamespace:$soundFilePath"
+        val soundEvent = "$eventNamespace:$eventPath"
+        if (evidenceCache.containsAnyText(soundReference, soundEvent)) return null
+        if (resourceHasSoundFile(project, fileNamespace, soundFilePath)) return null
+        val evidence = externalDependencyNamespaceEvidence(eventNamespace, lines, evidenceCache) ?: return null
+        return "sound event '$soundEvent' belongs to external dependency namespace '$eventNamespace' with $evidence evidence; converted/input sources do not reference '$soundReference'"
+    }
+
+    private fun externalDependencyMissingSubtitleEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val match = Regex("""Missing subtitle translation\{key='([^']+)'[^}]*} for sound event: ([a-z0-9_.-]+):([a-z0-9_./-]+)""")
+            .find(lines[index])
+            ?: return null
+        val key = match.groupValues[1]
+        val eventNamespace = match.groupValues[2]
+        val eventPath = match.groupValues[3]
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (eventNamespace == targetMod) return null
+        val soundEvent = "$eventNamespace:$eventPath"
+        if (evidenceCache.containsAnyText(key, soundEvent)) return null
+        val evidence = externalDependencyNamespaceEvidence(eventNamespace, lines, evidenceCache) ?: return null
+        return "subtitle '$key' belongs to external dependency sound event '$soundEvent' with $evidence evidence and is absent from converted/input project sources"
+    }
+
+    private fun externalDependencyMissingModelEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val warning = missingModelWarning(lines[index]) ?: return null
+        val project = evidenceCache.projectDir ?: return null
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (warning.namespace == targetMod) return null
+        if (resourceHasModelFile(project, warning.namespace, warning.modelFolder, warning.modelPath)) return null
+        val evidence = externalDependencyNamespaceEvidence(warning.namespace, lines, evidenceCache) ?: return null
+        return "model '${warning.namespace}:${warning.modelFolder}/${warning.modelPath}' belongs to external dependency namespace '${warning.namespace}' with $evidence evidence"
+    }
+
+    private fun externalDependencyNamespaceEvidence(
+        namespace: String,
+        lines: List<String>,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        evidenceCache.projectDir ?: return null
+        val targetMod = evidenceCache.targetMod
+        if (targetMod != null && namespace == targetMod) return null
+        val activeDependency = evidenceCache.buildFileContainsDependencyId(namespace)
+        val loadedMod = namespace in loadedRuntimeModIds(lines)
+        if (!activeDependency && !loadedMod) return null
+        return buildList {
+            if (activeDependency) add("active build dependency")
+            if (loadedMod) add("loaded runtime mod")
+        }.joinToString(" and ")
+    }
+
+    private fun sourceInheritedMissingModelEvidence(
+        line: String,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val warning = missingModelWarning(line) ?: return null
+        val project = evidenceCache.projectDir ?: return null
+        val sourceDir = evidenceCache.inputSourceDir ?: benchmarkInputSourceDir(project) ?: return null
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (warning.namespace != targetMod) return null
+        if (resourceHasModelFile(project, warning.namespace, warning.modelFolder, warning.modelPath)) return null
+        if (resourceHasModelFile(sourceDir, warning.namespace, warning.modelFolder, warning.modelPath)) return null
+        if (!sourceDeclaresRegistryModelId(project, warning.namespace, warning.modelFolder, warning.modelPath)) return null
+        val relative = "assets/${warning.namespace}/models/${warning.modelFolder}/${warning.modelPath}.json"
+        return "input and converted sources declare ${warning.modelFolder} id '${warning.namespace}:${warning.modelPath}' and both omit model '$relative'"
+    }
+
+    private fun missingModelWarning(line: String): MissingModelWarning? {
+        val match = Regex("""Unable to load model: '([a-z0-9_.-]+):([a-z0-9_./-]+)' referenced from: [a-z0-9_.-]+:[a-z0-9_./-]+: java\.io\.FileNotFoundException: ([a-z0-9_.-]+):models/(item|block)/([a-z0-9_./-]+)\.json""")
+            .find(line)
+            ?: return null
+        val modelNamespace = match.groupValues[1]
+        val modelIdPath = match.groupValues[2]
+        val fileNamespace = match.groupValues[3]
+        val modelFolder = match.groupValues[4]
+        val modelPath = match.groupValues[5]
+        if (modelNamespace != fileNamespace) return null
+        if (modelIdPath != "$modelFolder/$modelPath") return null
+        return MissingModelWarning(modelNamespace, modelFolder, modelPath)
+    }
+
+    private data class MissingModelWarning(
+        val namespace: String,
+        val modelFolder: String,
+        val modelPath: String
+    )
+
+
+    private fun journeyMapSepiaColorModulatorEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache,
+        expectedSha256: String = JOURNEYMAP_RUNTIME_SHA256,
+        expectedSize: Long = JOURNEYMAP_RUNTIME_SIZE,
+        requirePinnedMapping: Boolean = true
+    ): String? {
+        val loggedMessage = Regex(
+            """^\[[^\]\r\n]+]\s+\[Render thread/WARN]\s+\[minecraft/ShaderInstance]:\s+(.+)$"""
+        ).matchEntire(lines[index])?.groupValues?.get(1) ?: return null
+        val exactMessage = journeyMapSepiaColorModulatorMessages.singleOrNull {
+            loggedMessage == it
+        } ?: return null
+        val artifact = evidenceCache.journeyMapSepiaEvidence(
+            lines,
+            expectedSha256,
+            expectedSize,
+            requirePinnedMapping
+        ) ?: return null
+        return "$artifact; ${exactMessage.substringBefore(" could not find uniform")}"
+    }
+
+    private fun journeyMapSepiaArtifactEvidence(
+        lines: List<String>,
+        expectedSha256: String,
+        expectedSize: Long,
+        requirePinnedMapping: Boolean
+    ): String? {
+        if (requirePinnedMapping && !journeyMapRuntimePinMatches(expectedSha256)) return null
+        val loadPattern = Regex("""Loading mod file (.+?\.jar) with languages(?:\s|$)""")
+        val loadedJars = lines.mapNotNull { line ->
+            loadPattern.find(line)?.groupValues?.get(1)?.trim()?.trim('"')
+        }.mapNotNull { raw ->
+            runCatching { Path.of(raw).toAbsolutePath().normalize() }.getOrNull()
+        }.distinct().filter { jar ->
+            Files.isRegularFile(jar) && modIdFromJar(jar) == "journeymap"
+        }
+        if (loadedJars.size != 1) return null
+        val jar = loadedJars.single()
+        if (Files.size(jar) != expectedSize || sha256File(jar) != expectedSha256.lowercase()) {
+            return null
+        }
+
+        val vertexShader = readJarEntryText(
+            jar,
+            "assets/journeymap/shaders/core/jm_position_tex_color.vsh"
+        ) ?: return null
+        if (Regex("""\bColorModulator\b""").containsMatchIn(vertexShader)) return null
+        for (shaderIndex in 1..3) {
+            val base = "assets/journeymap/shaders/core/sepia_$shaderIndex"
+            val descriptor = readJarEntryText(jar, "$base.json") ?: return null
+            val fragmentShader = readJarEntryText(jar, "$base.fsh") ?: return null
+            if (!journeyMapSepiaDescriptorMatches(descriptor, shaderIndex)) return null
+            val colorModulatorCount =
+                Regex("""\bColorModulator\b""").findAll(fragmentShader).count()
+            if (shaderIndex < 3) {
+                if (
+                    colorModulatorCount != 1 ||
+                    !Regex("""(?m)^\s*uniform\s+vec4\s+ColorModulator\s*;\s*$""")
+                        .containsMatchIn(fragmentShader)
+                ) {
+                    return null
+                }
+            } else if (colorModulatorCount != 0) {
+                return null
+            }
+        }
+        return "unique loaded full JourneyMap jar ${jar.fileName} has sha256 ${expectedSha256.lowercase()} and exact sepia descriptor/shader ownership"
+    }
+
+    private fun journeyMapSepiaDescriptorMatches(text: String, shaderIndex: Int): Boolean =
+        runCatching {
+            val descriptor = Json.parseToJsonElement(text).jsonObject
+            if (
+                descriptor["vertex"]?.jsonPrimitive?.contentOrNull !=
+                "journeymap:jm_position_tex_color" ||
+                descriptor["fragment"]?.jsonPrimitive?.contentOrNull !=
+                "journeymap:sepia_$shaderIndex"
+            ) {
+                return@runCatching false
+            }
+            val uniforms = descriptor["uniforms"]?.jsonArray ?: return@runCatching false
+            val colorModulator = uniforms.map { it.jsonObject }.singleOrNull {
+                it["name"]?.jsonPrimitive?.contentOrNull == "ColorModulator"
+            } ?: return@runCatching false
+            colorModulator["type"]?.jsonPrimitive?.contentOrNull == "float" &&
+                colorModulator["count"]?.jsonPrimitive?.contentOrNull == "4" &&
+                colorModulator["values"]?.jsonArray?.let { values ->
+                    values.size == 4 &&
+                        values.all {
+                            it.jsonPrimitive.contentOrNull?.toDoubleOrNull() == 1.0
+                        }
+                } == true
+        }.getOrDefault(false)
+
+    private fun journeyMapRuntimePinMatches(expectedSha256: String): Boolean =
+        runCatching {
+            val mapping = Path.of(System.getProperty("user.dir"))
+                .resolve("src/main/resources/mappings/forge2neo/neoforge-deps.json")
+            val dependencies = Json.parseToJsonElement(mapping.readText())
+                .jsonObject
+                .getValue("dependencies")
+                .jsonArray
+            val staging = dependencies.mapNotNull { dependency ->
+                dependency.jsonObject["runtimeArtifactStaging"]?.jsonObject
+            }.singleOrNull {
+                it["id"]?.jsonPrimitive?.contentOrNull == "journeymap"
+            } ?: return@runCatching false
+            staging["coordinate"]?.jsonPrimitive?.contentOrNull ==
+                "maven.modrinth:journeymap:1.21.1-6.0.0-beta.54+neoforge" &&
+                staging["sha256"]?.jsonPrimitive?.contentOrNull ==
+                expectedSha256.lowercase() &&
+                staging["runtimeFileName"]?.jsonPrimitive?.contentOrNull ==
+                "journeymap-121d84332dba0910.jar"
+        }.getOrDefault(false)
+
+    private fun sha256File(path: Path): String =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(Files.readAllBytes(path))
+            .joinToString("") { "%02x".format(it) }
+
+    private val journeyMapSepiaColorModulatorMessages = setOf(
+        "Shader journeymap:sepia_1 could not find uniform named ColorModulator in the specified shader program.",
+        "Shader journeymap:sepia_2 could not find uniform named ColorModulator in the specified shader program.",
+        "Shader journeymap:sepia_3 could not find uniform named ColorModulator in the specified shader program."
+    )
+
+    private val JOURNEYMAP_RUNTIME_SHA256 =
+        "121d84332dba09100ea8c654a8c5b75bdf1257639d00aca1210c5dc31f36cb38"
+    private val JOURNEYMAP_RUNTIME_SIZE = 3_546_019L
+    /**
+     * `Exception loading blockstate definition: 'ns:blockstates/x.json' missing model for variant:
+     * 'ns:x#a=1,b=2'`: the mod's own definition when the input and converted blockstate files are
+     * the same JSON and none of their variants covers that state (1.20.1 resolved and warned about
+     * the same file the same way).
+     */
+    private fun sourceInheritedMissingBlockstateVariantEvidence(
+        line: String,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val warning = Regex(
+            """Exception loading blockstate definition: '([a-z0-9_.-]+):blockstates/([a-z0-9_./-]+)\.json' missing model for variant: '([a-z0-9_.-]+):([a-z0-9_./-]+)#([^']*)'"""
+        ).find(line) ?: return null
+        val (namespace, block, stateNamespace, stateBlock, properties) = warning.destructured
+        if (namespace != stateNamespace || block != stateBlock) return null
+        val project = evidenceCache.projectDir ?: return null
+        val sourceDir = evidenceCache.inputSourceDir ?: benchmarkInputSourceDir(project) ?: return null
+        if (namespace != (evidenceCache.targetMod ?: return null)) return null
+        val relative = "assets/$namespace/blockstates/$block.json"
+        val converted = resourceJsonObject(project, relative) ?: return null
+        val input = resourceJsonObject(sourceDir, relative) ?: return null
+        if (converted != input) return null
+        val variants = converted["variants"] as? JsonObject ?: return null
+        val state = blockStateProperties(properties) ?: return null
+        if (variants.keys.any { key -> blockStateProperties(key)?.all { (name, value) -> state[name] == value } == true }) return null
+        return "input and converted blockstate '$relative' are identical and none of their ${variants.size} variants covers '$properties'"
+    }
+
+    /**
+     * `Missing textures in model ns:x#a=1:` followed by indented `atlas:textures/atlas/blocks.png:tns:path`
+     * lines: the mod's own references when the input and converted blockstate map that state to the
+     * same model, that model's `textures` are the same in both, each listed texture is one of them
+     * (an unqualified name resolves to `minecraft`), and neither resource tree provides the file.
+     */
+    private fun sourceInheritedMissingModelTextureEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val header = Regex("""Missing textures in model ([a-z0-9_.-]+):([a-z0-9_./-]+)#([^:\s]*):\s*$""").find(lines[index]) ?: return null
+        val (namespace, block, properties) = header.destructured
+        val project = evidenceCache.projectDir ?: return null
+        val sourceDir = evidenceCache.inputSourceDir ?: benchmarkInputSourceDir(project) ?: return null
+        if (namespace != (evidenceCache.targetMod ?: return null)) return null
+        val listed = Regex("""^\s+[a-z0-9_.-]+:textures/atlas/[a-z0-9_./-]+\.png:([a-z0-9_.-]+):([a-z0-9_./-]+)\s*$""")
+        val textures = mutableListOf<Pair<String, String>>()
+        var next = index + 1
+        while (next < lines.size && lines[next].isNotBlank() && lines[next][0].isWhitespace()) {
+            val texture = listed.find(lines[next]) ?: return null
+            textures += texture.groupValues[1] to texture.groupValues[2]
+            next++
+        }
+        if (textures.isEmpty()) return null
+        val blockstate = "assets/$namespace/blockstates/$block.json"
+        val model = blockstateVariantModel(project, blockstate, properties) ?: return null
+        if (blockstateVariantModel(sourceDir, blockstate, properties) != model) return null
+        val modelRelative = "assets/${model.first}/models/${model.second}.json"
+        val convertedTextures = (resourceJsonObject(project, modelRelative)?.get("textures") as? JsonObject) ?: return null
+        val inputTextures = (resourceJsonObject(sourceDir, modelRelative)?.get("textures") as? JsonObject) ?: return null
+        if (convertedTextures != inputTextures) return null
+        val references = convertedTextures.values.mapNotNull { (it as? JsonPrimitive)?.takeIf { value -> value.isString }?.content }
+        val missing = textures.map { (textureNamespace, texturePath) ->
+            val referenced = references.any { it == "$textureNamespace:$texturePath" || (textureNamespace == "minecraft" && it == texturePath) }
+            if (!referenced) return null
+            val textureRelative = "assets/$textureNamespace/textures/$texturePath.png"
+            if (resourceFile(project, textureRelative) != null || resourceFile(sourceDir, textureRelative) != null) return null
+            textureRelative
+        }
+        return "input and converted model '$modelRelative' reference the same textures and neither provides ${missing.joinToString { "'$it'" }}"
+    }
+
+    /** `a=1,b=2` as a map; empty for the catch-all variant key; null for anything else. */
+    private fun blockStateProperties(text: String): Map<String, String>? {
+        if (text.isEmpty()) return emptyMap()
+        val properties = linkedMapOf<String, String>()
+        for (entry in text.split(',')) {
+            val separator = entry.indexOf('=')
+            if (separator <= 0 || separator == entry.length - 1) return null
+            properties[entry.substring(0, separator)] = entry.substring(separator + 1)
+        }
+        return properties
+    }
+
+    /** The one model (namespace to path) a blockstate's variants give a state, or null when none or several. */
+    private fun blockstateVariantModel(root: Path, relative: String, properties: String): Pair<String, String>? {
+        val variants = resourceJsonObject(root, relative)?.get("variants") as? JsonObject ?: return null
+        val state = blockStateProperties(properties) ?: return null
+        val models = variants.entries
+            .filter { (key, _) -> blockStateProperties(key)?.all { (name, value) -> state[name] == value } == true }
+            .flatMap { (_, value) -> if (value is JsonArray) value.toList() else listOf(value) }
+            .mapNotNull { ((it as? JsonObject)?.get("model") as? JsonPrimitive)?.takeIf { model -> model.isString }?.content }
+            .distinct()
+        val model = models.singleOrNull() ?: return null
+        return if (model.contains(':')) model.substringBefore(':') to model.substringAfter(':') else "minecraft" to model
+    }
+
+    private fun resourceFile(projectDir: Path, relative: String): Path? =
+        resourceRoots(projectDir).map { it.resolve(relative) }.firstOrNull { it.exists() }
+
+    private fun resourceJsonObject(projectDir: Path, relative: String): JsonObject? =
+        resourceFile(projectDir, relative)?.let { file ->
+            runCatching { Json.parseToJsonElement(file.readText()) as? JsonObject }.getOrNull()
+        }
+
+    private fun sourceInheritedTextureMipEvidence(
+        line: String,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val match = Regex("""Texture ([a-z0-9_.-]+):([a-z0-9_./-]+) with size (\d+)x(\d+) limits mip level from \d+ to \d+""")
+            .find(line)
+            ?: return null
+        val namespace = match.groupValues[1]
+        val texturePath = match.groupValues[2]
+        val expectedSize = ImageSize(match.groupValues[3].toInt(), match.groupValues[4].toInt())
+        val project = evidenceCache.projectDir ?: return null
+        val sourceDir = evidenceCache.inputSourceDir ?: benchmarkInputSourceDir(project) ?: return null
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (namespace != targetMod) return null
+        val projectSize = resourceTextureSize(project, namespace, texturePath) ?: return null
+        val sourceSize = resourceTextureSize(sourceDir, namespace, texturePath) ?: return null
+        if (projectSize != expectedSize || sourceSize != expectedSize) return null
+        return "input and converted resources contain texture '$namespace:$texturePath' with inherited size ${expectedSize.width}x${expectedSize.height}"
+    }
+
+    private fun sourceInheritedSlowDeferredWorkEvidence(
+        line: String,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val match = Regex("""Mod '([a-z0-9_.-]+)' took ([0-9.]+) s to run a deferred task""")
+            .find(line)
+            ?: return null
+        val modId = match.groupValues[1]
+        val seconds = match.groupValues[2]
+        val project = evidenceCache.projectDir ?: return null
+        val sourceDir = evidenceCache.inputSourceDir ?: benchmarkInputSourceDir(project) ?: return null
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (modId != targetMod) return null
+
+        val convertedFingerprints = commonSetupDeferredWorkFingerprints(project)
+        val sourceFingerprints = commonSetupDeferredWorkFingerprints(sourceDir)
+        for (converted in convertedFingerprints) {
+            for (source in sourceFingerprints) {
+                if (converted.calls.size >= 3 && converted.calls == source.calls) {
+                    val renderedCalls = converted.calls.sorted().take(6).joinToString(", ")
+                    return "input and converted sources retain identical common setup enqueueWork call fingerprint(s) " +
+                        "[$renderedCalls] for mod '$modId' (${seconds}s)"
+                }
+            }
+        }
+        return null
+    }
+
+    private fun commonSetupDeferredWorkFingerprints(projectDir: Path): List<DeferredWorkFingerprint> {
+        if (!projectDir.exists()) return emptyList()
+        return javaAndKotlinSourceFiles(projectDir).flatMap { file ->
+            val active = activeCode(file.readText())
+            if (!active.contains("FMLCommonSetupEvent") || !active.contains("enqueueWork")) {
+                emptyList()
+            } else {
+                extractEnqueueWorkBodies(active).mapNotNull { body ->
+                    val calls = deferredWorkCallFingerprints(body)
+                    if (calls.isEmpty()) null else DeferredWorkFingerprint(calls)
+                }
+            }
+        }
+    }
+
+    private fun extractEnqueueWorkBodies(source: String): List<String> {
+        val bodies = mutableListOf<String>()
+        var searchIndex = 0
+        while (true) {
+            val callIndex = source.indexOf("enqueueWork", searchIndex)
+            if (callIndex < 0) break
+            val openParen = source.indexOf('(', callIndex)
+            if (openParen < 0) break
+            val closeParen = matchingDelimiterIndex(source, openParen, '(', ')')
+            if (closeParen == null) {
+                searchIndex = openParen + 1
+            } else {
+                bodies.add(source.substring(openParen + 1, closeParen))
+                searchIndex = closeParen + 1
+            }
+        }
+        return bodies
+    }
+
+    private fun matchingDelimiterIndex(source: String, openIndex: Int, open: Char, close: Char): Int? {
+        var depth = 0
+        var inString: Char? = null
+        var escaped = false
+        for (index in openIndex until source.length) {
+            val char = source[index]
+            if (inString != null) {
+                if (escaped) {
+                    escaped = false
+                } else if (char == '\\') {
+                    escaped = true
+                } else if (char == inString) {
+                    inString = null
+                }
+                continue
+            }
+            if (char == '"' || char == '\'') {
+                inString = char
+                continue
+            }
+            if (char == open) depth++
+            if (char == close) {
+                depth--
+                if (depth == 0) return index
+            }
+        }
+        return null
+    }
+
+    private fun deferredWorkCallFingerprints(body: String): Set<String> {
+        val methodCallPattern = Regex("""\b([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\s*\(""")
+        val methodReferencePattern = Regex("""\b([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)::([A-Za-z_][A-Za-z0-9_]*)""")
+        return statementFragments(body)
+            .mapNotNull { statement ->
+                methodCallPattern.find(statement)?.groupValues?.get(1)
+                    ?: methodReferencePattern.find(statement)?.let { match ->
+                        val receiver = match.groupValues[1]
+                        val method = match.groupValues[2]
+                        if (receiver.isBlank()) method else "$receiver.$method"
+                    }
+            }
+            .map { it.removePrefix("this.") }
+            .filterNot { it == "event.enqueueWork" }
+            .toSet()
+    }
+
+    private fun statementFragments(source: String): List<String> {
+        val fragments = mutableListOf<String>()
+        var start = 0
+        var parenDepth = 0
+        var bracketDepth = 0
+        var inString: Char? = null
+        var escaped = false
+        for (index in source.indices) {
+            val char = source[index]
+            if (inString != null) {
+                if (escaped) {
+                    escaped = false
+                } else if (char == '\\') {
+                    escaped = true
+                } else if (char == inString) {
+                    inString = null
+                }
+                continue
+            }
+            if (char == '"' || char == '\'') {
+                inString = char
+                continue
+            }
+            when (char) {
+                '(' -> parenDepth++
+                ')' -> if (parenDepth > 0) parenDepth--
+                '[' -> bracketDepth++
+                ']' -> if (bracketDepth > 0) bracketDepth--
+                ';' -> if (parenDepth == 0 && bracketDepth == 0) {
+                    val fragment = source.substring(start, index).trim()
+                    if (fragment.isNotBlank()) fragments += fragment
+                    start = index + 1
+                }
+            }
+        }
+        val tail = source.substring(start).trim()
+        if (tail.isNotBlank()) fragments += tail
+        return fragments
+    }
+
+    private data class DeferredWorkFingerprint(
+        val calls: Set<String>
+    )
+
+    private fun sourceInheritedGameTestServerLagEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val line = lines[index]
+        if (!line.contains("[minecraft/MinecraftServer]: Can't keep up!")) return null
+        if (lines.none { Regex("""GameTestServer.*All \d+ required tests passed""").containsMatchIn(it) }) {
+            return null
+        }
+        val project = evidenceCache.projectDir ?: return null
+        val sourceDir = evidenceCache.inputSourceDir ?: benchmarkInputSourceDir(project) ?: return null
+
+        val commonTemplates = runtimeLogTemplates(project).intersect(runtimeLogTemplates(sourceDir))
+        if (commonTemplates.isEmpty()) return null
+        val windowStart = (index - 64).coerceAtLeast(0)
+        val windowEnd = (index + 16).coerceAtMost(lines.size)
+        val evidenceWindow = lines.subList(windowStart, windowEnd)
+        val matched = commonTemplates
+            .filter { template -> runtimeTemplateMatchesAnyLine(template, evidenceWindow) }
+            .distinct()
+            .sorted()
+        if (matched.size < 3) return null
+        return "GameTest passed and input/converted sources share ${matched.size} runtime log template(s) around the lag: " +
+            matched.take(4).joinToString(", ")
+    }
+
+    private fun runtimeLogTemplates(projectDir: Path): Set<String> {
+        if (!projectDir.exists()) return emptySet()
+        val loggerCallPattern = Regex("""\b(?:LOGGER|logger|LogManager\.getLogger\([^)]*\))\.(?:info|warn)\s*\(\s*"((?:\\"|[^"])*)"""")
+        return javaAndKotlinSourceFiles(projectDir)
+            .asSequence()
+            .flatMap { file ->
+                val active = activeCode(file.readText())
+                loggerCallPattern.findAll(active).map { match ->
+                    match.groupValues[1]
+                        .replace("\\\"", "\"")
+                        .trim()
+                }
+            }
+            .filter { it.length >= 16 && it.contains("{}") }
+            .toSet()
+    }
+
+    private fun runtimeTemplateMatchesAnyLine(template: String, lines: List<String>): Boolean {
+        val regex = Regex(template.split("{}").joinToString(""".+?""") { Regex.escape(it) })
+        return lines.any { line -> regex.containsMatchIn(line) }
+    }
+
+    private fun externalDependencyCreativeTabDuplicateEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val warning = creativeTabDuplicateWarning(lines, index) ?: return null
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (warning.itemIds.any { it.substringBefore(':') == targetMod }) return null
+        if (warning.itemIds.any { evidenceCache.containsText(it) }) return null
+
+        val loadedModIds = loadedRuntimeModIds(lines)
+        val namespaces = warning.itemIds.map { it.substringBefore(':') }.distinct()
+        val namespaceEvidence = namespaces.map { namespace ->
+            val activeDependency = evidenceCache.buildFileContainsDependencyId(namespace)
+            val loadedMod = namespace in loadedModIds
+            when {
+                activeDependency && loadedMod -> "$namespace: active build dependency and loaded runtime mod"
+                activeDependency -> "$namespace: active build dependency"
+                loadedMod -> "$namespace: loaded runtime mod"
+                else -> return null
+            }
+        }
+        return "duplicate item ids [${warning.itemIds.joinToString(", ")}] belong to external dependency namespace(s) " +
+            "${namespaces.joinToString(", ")} with ${namespaceEvidence.joinToString("; ")} and are absent from converted/input project sources"
+    }
+
+    private fun sourceInheritedCreativeTabDuplicateEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val warning = creativeTabDuplicateWarning(lines, index) ?: return null
+        val project = evidenceCache.projectDir ?: return null
+        val sourceDir = evidenceCache.inputSourceDir ?: benchmarkInputSourceDir(project) ?: return null
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (warning.itemIds.any { it.substringBefore(':') != targetMod }) return null
+        if (warning.itemIds.any { !projectHasCreativeDuplicateItemSourceShape(project, it) }) return null
+        if (warning.itemIds.any { !projectHasCreativeDuplicateItemSourceShape(sourceDir, it) }) return null
+        if (warning.itemIds.any { projectRegistersJeiSubtypeForItem(project, it) }) return null
+        return "input and converted sources duplicate creative-tab item id(s) ${warning.itemIds.joinToString(", ")} " +
+            "and converted source has no JEI subtype registration for those item id(s)"
+    }
+
+    private fun creativeTabDuplicateWarning(lines: List<String>, index: Int): CreativeTabDuplicateWarning? {
+        val duplicatePattern = Regex("""(?:\b\d+\s+)?duplicate items were found in '([^']+)' creative tab's: displayItems""")
+        val duplicateIndex = when {
+            duplicatePattern.containsMatchIn(lines[index]) -> index
+            else -> ((index - 3).coerceAtLeast(0) until index)
+                .lastOrNull { duplicatePattern.containsMatchIn(lines[it]) }
+        } ?: return null
+        val tabName = duplicatePattern.find(lines[duplicateIndex])?.groupValues?.get(1) ?: return null
+        val itemLines = if (duplicateIndex == index) {
+            lines.drop(index + 1).take(4)
+        } else {
+            listOf(lines[index])
+        }
+        val itemIdPattern = Regex("""[a-z0-9_.-]+:[a-z0-9_./-]+""")
+        val itemLine = itemLines.firstOrNull { itemIdPattern.containsMatchIn(it) } ?: return null
+        val itemIds = itemIdPattern.findAll(itemLine)
+            .map { it.value }
+            .distinct()
+            .toList()
+        if (itemIds.isEmpty()) return null
+        return CreativeTabDuplicateWarning(tabName, itemIds)
+    }
+
+    private data class CreativeTabDuplicateWarning(
+        val tabName: String,
+        val itemIds: List<String>
+    )
+
+    private inner class RuntimeLogEvidenceCache(
+        val projectDir: Path?,
+        val inputSourceDir: Path?
+    ) {
+        val targetMod: String? by lazy { projectDir?.let { detectBenchmarkModId(it) } }
+        private val fileNameMemo = mutableMapOf<String, Boolean>()
+        private val textMemo = mutableMapOf<String, Boolean>()
+        private val externalConfigMemo = mutableMapOf<String, String?>()
+        private val dependencyIdMemo = mutableMapOf<String, Boolean>()
+        private val journeyMapSepiaMemo = mutableMapOf<String, String?>()
+        private val journeyMapSepiaComputed = mutableSetOf<String>()
+        fun containsFileNamed(fileName: String): Boolean =
+            fileNameMemo.getOrPut(fileName) {
+                projectDir?.let { projectContainsFileNamed(it, fileName) } == true ||
+                    inputSourceDir?.let { projectContainsFileNamed(it, fileName) } == true
+            }
+
+        fun containsText(text: String): Boolean =
+            textMemo.getOrPut(text) {
+                projectDir?.let { projectContainsText(it, text) } == true ||
+                    inputSourceDir?.let { projectContainsText(it, text) } == true
+            }
+
+        fun containsAnyText(vararg texts: String): Boolean =
+            texts.any { containsText(it) }
+
+        fun externalClasspathConfigSource(config: String): String? =
+            externalConfigMemo.getOrPut(config) {
+                val project = projectDir ?: return@getOrPut null
+                val source = runtimeClasspathConfigSource(project, config, targetMod)
+                    ?: return@getOrPut null
+                "config '$config' was found in external runtime jar for dependency '$source' and is absent from converted/input project resources"
+            }
+
+        fun buildFileContainsDependencyId(id: String): Boolean =
+            dependencyIdMemo.getOrPut(id) {
+                projectDir?.let { activeBuildFileContainsDependencyId(it, id) } == true
+            }
+        fun journeyMapSepiaEvidence(
+            lines: List<String>,
+            expectedSha256: String,
+            expectedSize: Long,
+            requirePinnedMapping: Boolean
+        ): String? {
+            val key = "$expectedSha256:$expectedSize:$requirePinnedMapping"
+            if (journeyMapSepiaComputed.add(key)) {
+                journeyMapSepiaMemo[key] = journeyMapSepiaArtifactEvidence(
+                    lines,
+                    expectedSha256,
+                    expectedSize,
+                    requirePinnedMapping
+                )
+            }
+            return journeyMapSepiaMemo[key]
+        }
+    }
+
+    private fun activeBuildFileContainsDependencyId(projectDir: Path, id: String): Boolean {
+        val buildFiles = listOf(
+            projectDir.resolve("build.gradle"),
+            projectDir.resolve("build.gradle.kts")
+        ).filter { it.exists() }
+        val pattern = Regex("""(^|[:'"(,\s])${Regex.escape(id)}($|[:'"),\s])""")
+        for (buildFile in buildFiles) {
+            val activeText = buildFile.readText()
+                .lines()
+                .filterNot { it.trimStart().startsWith("//") }
+                .joinToString("\n")
+            if (pattern.containsMatchIn(activeText)) return true
+        }
+        return false
+    }
+
+    private fun runtimeClasspathConfigSource(projectDir: Path, config: String, targetMod: String?): String? {
+        for (jar in runtimeClasspathJars(projectDir)) {
+            val modId = modIdFromJar(jar)
+            if (targetMod != null && modId == targetMod) continue
+            if (jarContainsEntryNamed(jar, config)) return modId ?: jar.fileName.toString()
+        }
+        return null
+    }
+
+    private fun runtimeClasspathJars(projectDir: Path): List<Path> {
+        val moddev = projectDir.resolve("build/moddev")
+        if (!moddev.exists()) return emptyList()
+
+        val classpathFiles = mutableListOf<Path>()
+        Files.walk(moddev).use { files ->
+            files.filter { Files.isRegularFile(it) && it.fileName.toString().endsWith("Classpath.txt") }
+                .forEach { classpathFiles.add(it) }
+        }
+
+        val jars = linkedSetOf<Path>()
+        for (classpathFile in classpathFiles) {
+            for (line in classpathFile.readText().lines()) {
+                for (entry in line.split(File.pathSeparatorChar)) {
+                    val raw = entry.trim().trim('"')
+                    if (!raw.endsWith(".jar", ignoreCase = true)) continue
+                    val jar = runCatching { Path.of(raw).toAbsolutePath().normalize() }.getOrNull() ?: continue
+                    if (jar.exists()) jars.add(jar)
+                }
+            }
+        }
+        return jars.toList()
+    }
+
+    private fun jarContainsEntryNamed(jar: Path, fileName: String): Boolean =
+        runCatching {
+            ZipFile(jar.toFile()).use { zip ->
+                val entries = zip.entries()
+                while (entries.hasMoreElements()) {
+                    val entry = entries.nextElement()
+                    if (!entry.isDirectory && entry.name.substringAfterLast('/') == fileName) return true
+                }
+            }
+            false
+        }.getOrDefault(false)
+
+    private fun modIdFromJar(jar: Path): String? =
+        readJarEntryText(jar, "META-INF/neoforge.mods.toml")?.let { parseTomlModId(it) }
+            ?: readJarEntryText(jar, "META-INF/mods.toml")?.let { parseTomlModId(it) }
+            ?: readJarEntryText(jar, "fabric.mod.json")?.let { parseJsonModId(it) }
+
+    private fun readJarEntryText(jar: Path, entryName: String): String? =
+        runCatching {
+            ZipFile(jar.toFile()).use { zip ->
+                val entry = zip.getEntry(entryName) ?: return null
+                zip.getInputStream(entry).bufferedReader().use { it.readText() }
+            }
+        }.getOrNull()
+
+    private fun parseTomlModId(text: String): String? =
+        Regex("""(?m)^\s*modId\s*=\s*["']([^"']+)["']""")
+            .find(text)
+            ?.groupValues
+            ?.get(1)
+
+    private fun parseJsonModId(text: String): String? =
+        Regex(""""id"\s*:\s*"([^"]+)"""")
+            .find(text)
+            ?.groupValues
+            ?.get(1)
+
+    private fun projectContainsFileNamed(projectDir: Path, fileName: String): Boolean {
+        if (!projectDir.exists()) return false
+        val roots = listOf(
+            projectDir.resolve("src/main/resources"),
+            projectDir.resolve("src/generated/resources")
+        ).filter { it.exists() }
+        for (root in roots) {
+            Files.walk(root).use { files ->
+                if (files.anyMatch { Files.isRegularFile(it) && it.fileName.toString() == fileName }) return true
+            }
+        }
+        return false
+    }
+
+    private fun projectContainsText(projectDir: Path, text: String): Boolean {
+        if (!projectDir.exists()) return false
+        val roots = listOf(
+            projectDir.resolve("src/main/java"),
+            projectDir.resolve("src/main/kotlin"),
+            projectDir.resolve("src/main/resources"),
+            projectDir.resolve("src/generated/resources")
+        ).filter { it.exists() }
+        for (root in roots) {
+            Files.walk(root).use { files ->
+                if (files.anyMatch { Files.isRegularFile(it) && runCatching { it.readText().contains(text) }.getOrDefault(false) }) {
+                    return true
+                }
+            }
+        }
+        return false
+    }

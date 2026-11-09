@@ -1,7 +1,7 @@
 001-header.ktfrag
 002-common-1-21-signature-migrations-compile-against-holder-and-provider-api.ktfrag
-003-custom-enchantment-data-ignores-registrations-declared-only-in-text-bloc.ktfrag
-004-sakura-effect-particle-fluid-and-nested-event-migrations-compile-against.ktfrag
-005-loot-conditional-function-codec-migration-rejects-member-name-fallbacks.ktfrag
-006-tier-sorting-registry-custom-tiers-migrate-to-simple-tier-incorrect-bloc.ktfrag
-007-dynamic-trees-public-api-classes-migrate-exactly.ktfrag
+003-custom-enchantment-data-rejects-registry-reference-tail-fallback.ktfrag
+004-command-function-cacheable-function-migrates-to-split-cacheable-type.ktfrag
+005-legacy-loot-serializers-migrate-to-map-codec-backed-loot-types.ktfrag
+006-single-item-recipe-result-migration-ignores-comments-and-string-literals.ktfrag
+007-network-hooks-open-screen-resolves-inherited-block-entity-world-position.ktfrag

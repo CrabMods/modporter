@@ -1,0 +1,19 @@
+{
+  "description": "Dependency methods whose NeoForge 1.21.1 build gained a HolderLookup.Provider parameter (javap of the Forge 1.20.1 and NeoForge 1.21.1 jars). providerIndex is the 0-based position the provider takes in the new argument list.",
+  "methods": [
+    {
+      "owner": "net.createmod.catnip.nbt.NBTHelper",
+      "name": "writeItemList",
+      "forgeParameters": ["Iterable"],
+      "providerIndex": 1,
+      "notes": "Catnip (bundled in Ponder-Forge-1.20.1-1.0.91 / ponder-neoforge-1.0.87+mc1.21.1): writeItemList(Iterable<ItemStack>) -> writeItemList(Iterable<ItemStack>, HolderLookup.Provider)"
+    },
+    {
+      "owner": "net.createmod.catnip.nbt.NBTHelper",
+      "name": "readItemList",
+      "forgeParameters": ["ListTag"],
+      "providerIndex": 1,
+      "notes": "Catnip: readItemList(ListTag) -> readItemList(ListTag, HolderLookup.Provider)"
+    }
+  ]
+}

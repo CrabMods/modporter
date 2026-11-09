@@ -1,0 +1,127 @@
+package @PACKAGE@;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Optional;
+import net.minecraft.core.Holder;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.Tag;
+import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.effect.MobEffect;
+import net.minecraft.world.effect.MobEffectInstance;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.alchemy.Potion;
+import net.minecraft.world.item.alchemy.PotionContents;
+
+/** Old potion-tag containers retain their schema; ItemStacks use POTION_CONTENTS. */
+public final class LegacyPotionUtils {
+    public static final Potion EMPTY = new Potion();
+    private LegacyPotionUtils() {}
+
+    public static Potion getPotion(CompoundTag tag) {
+        if (tag == null) return EMPTY;
+        ResourceLocation id = ResourceLocation.tryParse(tag.getString("Potion"));
+        return id == null ? EMPTY : BuiltInRegistries.POTION.getOptional(id).orElse(EMPTY);
+    }
+
+    public static Potion getPotion(ItemStack stack) {
+        return stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY)
+            .potion().map(Holder::value).orElse(EMPTY);
+    }
+
+    public static List<MobEffectInstance> getAllEffects(CompoundTag tag) {
+        return getAllEffects(getPotion(tag), getCustomEffects(tag));
+    }
+
+    public static List<MobEffectInstance> getAllEffects(Potion potion, Collection<MobEffectInstance> custom) {
+        List<MobEffectInstance> result = new ArrayList<>(potion.getEffects());
+        result.addAll(custom);
+        return result;
+    }
+
+    public static List<MobEffectInstance> getMobEffects(ItemStack stack) {
+        List<MobEffectInstance> result = new ArrayList<>();
+        stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getAllEffects().forEach(result::add);
+        return result;
+    }
+
+    public static List<MobEffectInstance> getCustomEffects(ItemStack stack) {
+        return new ArrayList<>(stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).customEffects());
+    }
+
+    public static List<MobEffectInstance> getCustomEffects(CompoundTag tag) {
+        List<MobEffectInstance> result = new ArrayList<>();
+        getCustomEffects(tag, result);
+        return result;
+    }
+
+    public static void getCustomEffects(CompoundTag tag, List<MobEffectInstance> result) {
+        if (tag == null) return;
+        ListTag effects = tag.getList("CustomPotionEffects", Tag.TAG_COMPOUND);
+        for (int index = 0; index < effects.size(); index++) {
+            CompoundTag data = effects.getCompound(index);
+            MobEffectInstance effect = readEffect(data);
+            if (effect != null) result.add(effect);
+        }
+    }
+
+    private static MobEffectInstance readEffect(CompoundTag data) {
+        if (!data.contains("Id", Tag.TAG_ANY_NUMERIC)) return MobEffectInstance.load(data);
+        MobEffect type = BuiltInRegistries.MOB_EFFECT.byId(data.getByte("Id") & 255);
+        if (data.contains("forge:id", Tag.TAG_STRING)) {
+            ResourceLocation key = ResourceLocation.tryParse(data.getString("forge:id"));
+            type = key == null ? null : BuiltInRegistries.MOB_EFFECT.getOptional(key).orElse(null);
+        }
+        if (type == null) return null;
+        boolean ambient = data.getBoolean("Ambient");
+        boolean particles = !data.contains("ShowParticles", Tag.TAG_BYTE) || data.getBoolean("ShowParticles");
+        boolean icon = !data.contains("ShowIcon", Tag.TAG_BYTE) ? particles : data.getBoolean("ShowIcon");
+        MobEffectInstance hidden = data.contains("HiddenEffect", Tag.TAG_COMPOUND) ? readEffect(data.getCompound("HiddenEffect")) : null;
+        return new MobEffectInstance(BuiltInRegistries.MOB_EFFECT.wrapAsHolder(type), data.getInt("Duration"),
+            Math.max(0, data.getByte("Amplifier")), ambient, particles, icon, hidden);
+    }
+
+    public static int getColor(Collection<MobEffectInstance> effects) {
+        return PotionContents.getColor(effects) & 0xFFFFFF;
+    }
+
+    public static int getColor(Potion potion) {
+        return potion == EMPTY ? 16253176 : getColor(potion.getEffects());
+    }
+
+    public static int getColor(ItemStack stack) {
+        return stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor() & 0xFFFFFF;
+    }
+
+    public static String getName(Potion potion, String prefix) {
+        return Potion.getName(potion == EMPTY ? Optional.empty() : Optional.of(BuiltInRegistries.POTION.wrapAsHolder(potion)), prefix);
+    }
+
+    public static ItemStack setPotion(ItemStack stack, Potion potion) {
+        PotionContents old = stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY);
+        stack.set(DataComponents.POTION_CONTENTS, new PotionContents(
+            potion == EMPTY ? Optional.empty() : Optional.of(BuiltInRegistries.POTION.wrapAsHolder(potion)), old.customColor(), old.customEffects()));
+        return stack;
+    }
+
+    public static ItemStack setCustomEffects(ItemStack stack, Collection<MobEffectInstance> effects) {
+        PotionContents old = stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY);
+        List<MobEffectInstance> merged = new ArrayList<>(old.customEffects());
+        merged.addAll(effects);
+        stack.set(DataComponents.POTION_CONTENTS, new PotionContents(old.potion(), old.customColor(), merged));
+        return stack;
+    }
+
+    public static void addPotionTooltip(ItemStack stack, List<Component> tooltip, float factor) {
+        stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).addPotionTooltip(tooltip::add, factor, 20.0F);
+    }
+
+    public static void addPotionTooltip(List<MobEffectInstance> effects, List<Component> tooltip, float factor) {
+        new PotionContents(Optional.empty(), Optional.empty(), effects).addPotionTooltip(tooltip::add, factor, 20.0F);
+    }
+}

@@ -10,7 +10,11 @@
       "struct-nitrogen-"
     ],
     "allowedFiles": [
-      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRules01.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRules02.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRules03.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRules08.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRules09.kt",
       "src/main/kotlin/com/modporter/resources/ResourceMigrator.kt"
     ],
     "rationale": "Nitrogen is a published library API dependency used by source projects; migrations must target its API surface, not an individual benchmark mod."
@@ -25,7 +29,7 @@
       "struct-cumulus-"
     ],
     "allowedFiles": [
-      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt"
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRules04.kt"
     ],
     "rationale": "Cumulus is a published menu API dependency; migrations must be API-surface rules."
   },
@@ -42,8 +46,11 @@
       "struct-curios-"
     ],
     "allowedFiles": [
+      "src/main/kotlin/com/modporter/core/transforms/structural/LegacyCuriosInventoryCapabilities.kt",
       "src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt",
-      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt"
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRules02.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRules03.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRules04.kt"
     ],
     "rationale": "Curios is a public accessory API with Forge to NeoForge package and semantic changes."
   },
@@ -60,8 +67,11 @@
       "jei-"
     ],
     "allowedFiles": [
+      "src/main/kotlin/com/modporter/core/transforms/structural/LegacyRecipeIds.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/LegacyPotionBrewingInstances.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/LegacyJeiRecipeBoundaries.kt",
       "src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt",
-      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRules04.kt",
       "src/main/resources/mappings/forge2neo/text-replacements.json"
     ],
     "rationale": "JEI is a public integration API whose Forge and NeoForge surfaces differ."
@@ -90,7 +100,7 @@
       "struct-quark-"
     ],
     "allowedFiles": [
-      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt"
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRules02.kt"
     ],
     "rationale": "Quark is a public dependency API; any migration must be tied to the API package, not to a benchmark target."
   },
@@ -114,7 +124,10 @@
     ],
     "allowedFiles": [
       "src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt",
-      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRules03.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRules07.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRules09.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRules10.kt",
       "src/main/kotlin/com/modporter/resources/ResourceMigrator.kt"
     ],
     "rationale": "MMLib is a published helper library with removed recipe, fluid, render, and datagen APIs; migrations must be API-surface rules."
@@ -147,7 +160,20 @@
       "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalProviderContracts.kt",
       "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalTagContracts.kt",
       "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalTypeContracts.kt",
-      "src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt"
+      "src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/LibraryInteractionResults.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateCopperStairFactoryMigration.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateEffectComponentSurfaces.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/FinalizedVanillaHooks.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/GuiScrollSignatures.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/KeyBackedDynamicAttributes.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/LegacyClientBaseApiCompat.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/ProviderArityRepair.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/SourceValueTypes.kt",
+      "src/main/resources/mappings/forge2neo/library-class-relocations.json",
+      "src/main/resources/mappings/forge2neo/library-member-relocations.json",
+      "src/main/resources/mappings/forge2neo/library-provider-carriers.json",
+      "src/main/resources/mappings/forge2neo/library-provider-parameters.json"
     ],
     "rationale": "Catnip is a published helper library used by source projects; migration contracts target its public API surface rather than a benchmark mod."
   },
@@ -161,9 +187,16 @@
     "allowedFiles": [
       "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalProviderContracts.kt",
       "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalTypeContracts.kt",
-      "src/main/kotlin/com/modporter/core/transforms/structural/ExactProjectProviderCallMigration.kt"
+      "src/main/kotlin/com/modporter/core/transforms/structural/ExactProjectProviderCallMigration.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/LegacyBlockEntityCapabilityQueries.kt",
+      "src/main/resources/mappings/forge2neo/library-provider-carriers.json",
+      "src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt",
+      "src/main/kotlin/com/modporter/core/transforms/build/DependencyResolver.kt"
     ],
-    "rationale": "Ponder exposes a public scene API whose world facade owns the target registry provider; the contract applies to every Ponder consumer."
+    "rationale": "Ponder exposes a public scene API whose world facade owns the target registry provider; the contract applies to every Ponder consumer.",
+    "coordinatePrefixes": [
+      "net.createmod.ponder:"
+    ]
   },
   {
     "id": "dynamic-trees",
@@ -186,6 +219,37 @@
     "rationale": "Dynamic Trees publishes a renamed NeoForge artifact whose public classes and record surfaces require explicit dependency API contracts."
   },
   {
+    "id": "flywheel-model-builders",
+    "type": "library-api",
+    "packagePrefixes": [
+      "dev.engine_room.flywheel.lib.model.baked."
+    ],
+    "ruleIdPrefixes": [
+      "struct-flywheel-block-model-data"
+    ],
+    "allowedFiles": [
+      "src/main/kotlin/com/modporter/core/transforms/structural/LegacyFlywheelBlockModels.kt"
+    ],
+    "rationale": "Flywheel exposes public baked model builders; the target library moved construction and model-data lookup contracts."
+  },
+  {
+    "id": "journeymap-v2",
+    "type": "library-api",
+    "packagePrefixes": [
+      "journeymap."
+    ],
+    "coordinatePrefixes": [
+      "info.journeymap:"
+    ],
+    "ruleIdPrefixes": [
+      "struct-create-native-journeymap-v2"
+    ],
+    "allowedFiles": [
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateJourneyMapMigration.kt"
+    ],
+    "rationale": "JourneyMap v2 is a published client API; the complete fullscreen plugin migration is restricted to the admitted API family and its source-closed consumer graph."
+  },
+  {
     "id": "dependency-coordinate-normalization",
     "type": "dependency-coordinate-api",
     "packagePrefixes": [
@@ -203,7 +267,6 @@
       "curse.maven:",
       "dev.engine-room.flywheel:",
       "maven.modrinth:",
-      "net.createmod.ponder:",
       "org.valkyrienskies",
       "squeek.appleskin:",
       "vazkii.botania"
@@ -211,8 +274,46 @@
     "ruleIdPrefixes": [],
     "allowedFiles": [
       "src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt",
-      "src/main/kotlin/com/modporter/core/transforms/build/DependencyResolver.kt"
+      "src/main/kotlin/com/modporter/core/transforms/build/DependencyResolver.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/LegacyItemComponentPatchTransport.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/FluidIngredientAmounts.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/DeclaredHolderBuilderArguments.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/SourceOwnedFluidIngredient.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/LegacyBlockEntityCapabilityQueries.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/LegacyMigrationInventoryPrepass.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/LegacyModelDataManagerCompat.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/SourceOwnedSavedDataBackups.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateRecipeConstructionBoundaries.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateLegacyRecipeSerializationBoundaries.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateHighlightCommandResults.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/RegistrySourceBoundaries.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/StainedGlassIngredientBoundaries.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/LegacyClientBaseApiCompat.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/LegacyCompilerSourceBoundaries.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateInteractionCompilerSurfaces.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateItemStackDataFamilies.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateItemStackDataFamilyMigration.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateAnalogLeverShapeAccess.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateCopperStairFactoryMigration.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateMixinSignatureFamilies.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreatePoseAndLootMixinMigration.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateProjectileAndStewSurfaces.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateStationMapDecorationMigration.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateJourneyMapMigration.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateAdvancementTriggerRegistrationMigration.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateCommonMetalTagNamespaceMigration.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateCopperDataMapMigration.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateEnchantmentDatagenBootstrapMigration.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateFilteringEmptyStackSizeMigration.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateFlapDisplaySerializationMigration.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateLegacyTagConventionMigration.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateRegistrateDatagenLifecycleMigration.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/LegacyHelmetOverlays.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/CreateTestCommandMixinMigration.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/LegacyJeiRecipeBoundaries.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRules04.kt",
+      "src/main/resources/mappings/forge2neo/library-provider-carriers.json"
     ],
-    "rationale": "Dependency coordinate handling is metadata-driven resolution, not source-shape migration logic."
+    "rationale": "Dependency coordinates remain metadata-driven. The explicitly admitted IBE source contract, external recipe fluid-list return contract, declared recipe-builder callback arguments, the public FluidIngredient API, and the exact Ponder block-entity callback contract use canonical ABI owners after source/type proof. The nullable model-data manager family and SavedData backup/factory family require exact source owners, complete caller/provider closure, and pinned platform ABI evidence; the prepass only detects those owners and publishes their sealed inventory. Source-owned implementations retain their declarations and behavior. The native Create datagen, filtering, tag, advancement, serialization, overlay, station-map, mounted projectile, stew component, Mixin descriptor, registry-provider, player-pose, and loot families require closed source ownership and target ABI proof before mutation. The admitted project families publish with rollback; none selects a benchmark by name. These are API ownership checks, not benchmark-name switches."
   }
 ]

@@ -1,0 +1,96 @@
+// Init scripts also run for nested builds (a buildSrc build, included builds); only the root build
+// declares and launches the GameTest server run, so nothing here applies to the others.
+if (gradle.parent != null) {
+    return
+}
+def modporterUniverseValue = System.getProperty('modporter.gametest.universe')
+if (!modporterUniverseValue || !new File(modporterUniverseValue).isAbsolute()) {
+    throw new GradleException('GameTest requires an absolute, reserved modporter universe')
+}
+def modporterUniverse = new File(modporterUniverseValue).canonicalFile
+if (!modporterUniverse.isDirectory() || modporterUniverse.list().length != 0) {
+    throw new GradleException('GameTest universe must be a newly reserved empty directory')
+}
+def modporterConfiguredRuns = new LinkedHashSet<String>()
+def modporterGameTestProjects = new LinkedHashSet<Project>()
+allprojects { modporterProject ->
+    // The ModDev extension is looked up once the project is evaluated: a plugin id applied from a
+    // buildSrc classpath (WorldEdit) is invisible to plugins.withId from an init script, and `all`
+    // realizes runs a Kotlin build registered lazily (`runs.register("gameTestServer")`), which
+    // `configureEach` would leave unconfigured until something else realized them.
+    modporterProject.afterEvaluate {
+        def modporterNeoForge = modporterProject.extensions.findByName('neoForge')
+        if (modporterNeoForge == null) {
+            return
+        }
+        modporterNeoForge.runs.all { modporterRun ->
+            if (modporterRun.name == 'gameTestServer') {
+                modporterRun.logLevel = org.slf4j.event.Level.DEBUG
+                modporterRun.systemProperty('forge.logging.markers', 'REGISTRIES')
+                modporterRun.programArguments.addAll([
+                    '--universe', modporterUniverse.absolutePath, '--world', 'world'
+                ])
+                modporterConfiguredRuns.add(modporterProject.path + ':gameTestServer')
+                modporterGameTestProjects.add(modporterProject)
+            }
+        }
+    }
+}
+
+// Without the universe override the GameTest server opens <run>/world, the dedicated server's
+// world, and ServerPacksSource adds that world's datapacks folder to its pack repository; the
+// converted build stages GameTest-only world datapacks there (ModPorter's flat-preset override that
+// adds the mod's own dimensions to the flat test world) before the run task starts. The isolated
+// world must see the same datapacks, so they are mirrored into it right before the server launches:
+// regular files under world/datapacks only, never chunks, level data or dimension folders.
+def modporterStageWorldDatapacks = { Project modporterProject ->
+    def modporterSource = new File(modporterProject.projectDir, 'run/world/datapacks')
+    def modporterTarget = new File(modporterUniverse, 'world/datapacks')
+    if (modporterUniverse.list().length != 0) {
+        throw new GradleException('GameTest universe was populated before the isolated run started')
+    }
+    if (!modporterSource.isDirectory()) {
+        println "[modporter] GameTest world datapacks: none to stage (${modporterSource} is absent)"
+        return
+    }
+    def modporterSourcePath = modporterSource.toPath().toAbsolutePath().normalize()
+    def modporterTargetPath = modporterTarget.toPath()
+    def modporterStaged = 0
+    def modporterStream = java.nio.file.Files.walk(modporterSourcePath)
+    try {
+        modporterStream.sorted().forEach { modporterPath ->
+            def modporterAttributes = java.nio.file.Files.readAttributes(
+                modporterPath, java.nio.file.attribute.BasicFileAttributes, java.nio.file.LinkOption.NOFOLLOW_LINKS
+            )
+            def modporterRelative = modporterSourcePath.relativize(modporterPath).toString().replace(File.separator, '/')
+            if (modporterAttributes.isDirectory()) {
+                java.nio.file.Files.createDirectories(modporterTargetPath.resolve(modporterRelative))
+                return
+            }
+            if (!modporterAttributes.isRegularFile()) {
+                throw new GradleException("GameTest world datapack entry is not a regular file: ${modporterPath}")
+            }
+            def modporterDestination = modporterTargetPath.resolve(modporterRelative)
+            java.nio.file.Files.createDirectories(modporterDestination.parent)
+            java.nio.file.Files.copy(modporterPath, modporterDestination)
+            def modporterDigest = java.security.MessageDigest.getInstance('SHA-256')
+                .digest(java.nio.file.Files.readAllBytes(modporterPath)).encodeHex().toString()
+            println "[modporter] GameTest world datapack staged: world/datapacks/${modporterRelative} sha256=${modporterDigest}"
+            modporterStaged++
+        }
+    } finally {
+        modporterStream.close()
+    }
+    println "[modporter] GameTest world datapacks staged: ${modporterStaged} file(s) from ${modporterSource}"
+}
+
+gradle.projectsEvaluated {
+    if (modporterConfiguredRuns.isEmpty()) {
+        throw new GradleException('No ModDev gameTestServer run accepted the isolated universe')
+    }
+    modporterGameTestProjects.each { modporterProject ->
+        modporterProject.tasks.named('runGameTestServer').configure { modporterTask ->
+            modporterTask.doFirst { modporterStageWorldDatapacks(modporterProject) }
+        }
+    }
+}

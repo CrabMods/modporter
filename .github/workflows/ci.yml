@@ -4,46 +4,112 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "v*"
+      - strict-11
+      - "codex/**"
   pull_request:
     branches:
       - main
+  workflow_call:
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Test and package
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
+    name: Build and test (${{ matrix.id }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: ubuntu
+            os: ubuntu-latest
+          - id: windows
+            os: windows-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Set up Java 21
-        uses: actions/setup-java@v4
+      - name: Set up Java toolchains
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: |
+            17
+            21
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
-      - name: Make Gradle wrapper executable
-        run: chmod +x gradlew
+      - name: Verify build hosts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Get-Command pwsh -CommandType Application -ErrorAction Stop | Out-Null
+          Get-Command python -CommandType Application -ErrorAction Stop | Out-Null
+          if (-not $env:JAVA_HOME_17_X64) {
+            throw "Java 17 toolchain was not installed"
+          }
+          if (-not $env:JAVA_HOME_21_X64) {
+            throw "Java 21 host was not installed"
+          }
+          $javaVersion = (& java -version 2>&1) -join "`n"
+          if ($LASTEXITCODE -ne 0 -or $javaVersion -notmatch 'version "21(?:\.|")') {
+            throw "Java 21 is not the active build host: $javaVersion"
+          }
+          Write-Host $javaVersion
 
-      - name: Run default tests
-        run: ./gradlew test --no-daemon --console=plain
+      - name: Test public build and publication tools
+        run: python -B -m unittest discover -s scripts/tests -p "test_*.py"
 
-      - name: Build fat jar
-        run: ./gradlew shadowJar --no-daemon --console=plain
+      - name: Run canonical build and package fat JAR
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $toolchainPaths = @(
+            $env:JAVA_HOME_17_X64
+            $env:JAVA_HOME_21_X64
+          ) -join ","
+          $toolchainOption = "-Dorg.gradle.java.installations.paths=$toolchainPaths"
+          $env:GRADLE_OPTS = "$($env:GRADLE_OPTS) $toolchainOption".Trim()
+          ./mod-build.ps1 build shadowJar --no-daemon --console=plain
 
-      - name: Upload fat jar
-        uses: actions/upload-artifact@v4
+      - name: Create artifact checksum
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $jars = @(Get-ChildItem "build/libs/modporter-*-all.jar" -File)
+          if ($jars.Count -ne 1) {
+            throw "Expected exactly one ModPorter fat JAR, found $($jars.Count)"
+          }
+          $hash = (Get-FileHash $jars[0] -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $($jars[0].Name)" |
+            Set-Content "build/libs/SHA256SUMS" -Encoding ascii
+
+      - name: Upload package
+        uses: actions/upload-artifact@v7
         with:
-          name: modporter-fat-jar
-          path: build/libs/*-all.jar
+          name: modporter-package-${{ matrix.id }}
+          path: |
+            build/libs/modporter-*-all.jar
+            build/libs/SHA256SUMS
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload test reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: modporter-test-reports-${{ matrix.id }}
+          path: |
+            build/test-results/**
+            build/reports/tests/**
+            build/reports/jacoco/**
+          if-no-files-found: warn
+          retention-days: 7

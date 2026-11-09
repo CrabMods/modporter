@@ -200,6 +200,7 @@ class LegacyNbtProviderMethodMigrationTest {
                 public void writeSafe(CompoundTag tag, HolderLookup.Provider provider) {
                 }
                 void send() {
+                    if (this.getLevel() == null) return;
                     getUpdateTag();
                 }
             }
@@ -294,6 +295,7 @@ class LegacyNbtProviderMethodMigrationTest {
             import net.minecraft.nbt.CompoundTag;
             public class ChildData extends CachedData {
                 void send() {
+                    if (this.getLevel() == null) return;
                     getUpdateTag();
                 }
             }
@@ -320,6 +322,7 @@ class LegacyNbtProviderMethodMigrationTest {
                 }
                 void write(BlockEntity blockEntity, CompoundTag tag) {
                     if (blockEntity instanceof ChildData child) {
+                        if (blockEntity.getLevel() == null) return;
                         child.writeSafe(tag);
                     }
                 }

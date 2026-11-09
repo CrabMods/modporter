@@ -1,0 +1,31 @@
+{
+  "sourceRoot": "fixture://create-c27-converted-output",
+  "capturedAt": "2026-11-02T11:08:00+09:00",
+  "files": [
+    {
+      "relativePath": "src/main/java/com/simibubi/create/foundation/mixin/EntityMixin.java",
+      "sha256": "F1CF5FE58E081A69EC11654BB6918D566A350102B7EB249D5350FC1161D1D797",
+      "length": 1298
+    },
+    {
+      "relativePath": "src/main/java/com/simibubi/create/foundation/mixin/PlayerMixin.java",
+      "sha256": "13EDF1471E54657B81FCB051C15AEBA7415FB832C2D2947E9197E221A9155A57",
+      "length": 1298
+    },
+    {
+      "relativePath": "src/main/java/com/simibubi/create/foundation/mixin/accessor/BlockLootSubProviderAccessor.java",
+      "sha256": "4FE0AA49C165A689EC7C87D510EEB7BDEEEF5735CE8C1CDAA8B8515FA6535018",
+      "length": 485
+    },
+    {
+      "relativePath": "src/main/java/com/simibubi/create/AllBlocks.java",
+      "sha256": "49BE7536F1D43225B7E84BD000CD44DF4AFF8160BE40234B8975248557A18D40",
+      "length": 120538
+    },
+    {
+      "relativePath": "src/main/resources/create.mixins.json",
+      "sha256": "02CF1AE8E857C8B26DD096E6D1409E362CD656F29EC1315255F3CE23A21699C8",
+      "length": 2562
+    }
+  ]
+}

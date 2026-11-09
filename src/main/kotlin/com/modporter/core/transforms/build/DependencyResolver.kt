@@ -21,7 +21,8 @@ import java.time.Duration
  */
 class DependencyResolver(
     private val offlineMode: Boolean = false,
-    private val mappingsPrefix: String = "/mappings/forge2neo"
+    private val mappingsPrefix: String = "/mappings/forge2neo",
+    private val onlineLookup: ((slug: String, configuration: String) -> DepResolution)? = null
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
     private val json = Json { ignoreUnknownKeys = true }
@@ -77,7 +78,7 @@ class DependencyResolver(
 
         onlineCache[slug]?.let { return it }
 
-        val result = queryModrinth(slug)
+        val result = lookupModrinth(slug)
         onlineCache[slug] = result
         return result
     }
@@ -90,7 +91,10 @@ class DependencyResolver(
                     DepResolution.Resolved(
                         coords = known.neoforgeCoords,
                         mavenUrl = known.mavenUrl,
-                        notes = known.notes
+                        notes = known.notes,
+                        runtimeArtifactStaging = known.runtimeArtifactStaging?.also {
+                            it.validateAgainst(known.neoforgeCoords)
+                        }
                     )
                 } else {
                     log.warn("Dep ${known.forgePrefix} marked ${known.status} but no coords specified")
@@ -134,14 +138,33 @@ class DependencyResolver(
 
         if (artifactId.isBlank()) return DepResolution.Unknown
 
-        onlineCache[artifactId]?.let { return it }
+        val configuration = modrinthConfiguration(coordinate.configuration)
+        val cacheKey = "$artifactId@$configuration"
+        onlineCache[cacheKey]?.let { return it }
 
-        val result = queryModrinth(artifactId)
-        onlineCache[artifactId] = result
+        val result = lookupModrinth(artifactId, configuration)
+        onlineCache[cacheKey] = result
         return result
     }
 
-    private fun queryModrinth(slug: String): DepResolution {
+    private fun lookupModrinth(
+        slug: String,
+        configuration: String = "implementation"
+    ): DepResolution =
+        onlineLookup?.invoke(slug, configuration)
+            ?: queryModrinth(slug, configuration)
+
+    /**
+     * A dependency resolved through Modrinth keeps the configuration it was declared with: a Forge
+     * `compileOnly` compat API stays compile-only on NeoForge instead of becoming a runtime mod.
+     */
+    internal fun modrinthConfiguration(configuration: String?): String =
+        when (configuration) {
+            "compileOnly", "runtimeOnly", "implementation", "api", "compileOnlyApi" -> configuration
+            else -> "implementation"
+        }
+
+    private fun queryModrinth(slug: String, configuration: String = "implementation"): DepResolution {
         return try {
             log.info("Querying Modrinth for NeoForge 1.21.1 version of '$slug'...")
             val client = HttpClient.newBuilder()
@@ -161,7 +184,7 @@ class DependencyResolver(
             val response = client.send(request, HttpResponse.BodyHandlers.ofString())
 
             if (response.statusCode() == 200) {
-                parseModrinthResponse(slug, response.body())
+                parseModrinthResponse(slug, response.body(), configuration)
             } else if (response.statusCode() == 404) {
                 log.info("Modrinth: project '$slug' not found")
                 DepResolution.Unavailable("Not found on Modrinth")
@@ -175,7 +198,7 @@ class DependencyResolver(
         }
     }
 
-    private fun parseModrinthResponse(slug: String, body: String): DepResolution {
+    internal fun parseModrinthResponse(slug: String, body: String, configuration: String = "implementation"): DepResolution {
         try {
             val versions = json.decodeFromString<List<ModrinthVersion>>(body)
             if (versions.isEmpty()) {
@@ -191,7 +214,7 @@ class DependencyResolver(
 
             // Construct Modrinth Maven coordinates
             val coord = NeoForgeCoord(
-                config = "implementation",
+                config = configuration,
                 coord = "maven.modrinth:$slug:$versionNumber"
             )
 
@@ -235,14 +258,37 @@ class DependencyResolver(
         return null
     }
 
+    /** The known dependency a whole dependency statement declares, or null. */
+    fun knownDependencyForStatement(statement: String): KnownDep? =
+        extractDependencyCoordinate(statement)?.let { coordinate -> knownDeps.find { it.matches(coordinate) } }
+
+    /** The known dependency declared for a `group:artifact` notation, or null. */
+    fun knownDependencyFor(group: String, artifact: String): KnownDep? =
+        knownDeps.find { it.matches(GradleDependencyCoordinate(null, group, artifact, null, null, "$group:$artifact")) }
+
+    /** True only for an exact target coordinate already pinned by the dependency catalog. */
+    fun isKnownTargetNotation(notation: String): Boolean =
+        knownDeps.any { known -> known.neoforgeCoords.any { coord -> coord.coord == notation } }
+
+    /** True only when a whole dependency statement names an exact catalog target coordinate. */
+    fun isKnownTargetStatement(statement: String): Boolean =
+        extractDependencyCoordinate(statement)?.notation?.let(::isKnownTargetNotation) == true
+
+    /** Validated staging policies used to audit managed blocks on later conversion passes. */
+    fun runtimeArtifactStagingPolicies(): List<RuntimeArtifactStagingPolicy> =
+        knownDeps.mapNotNull { known ->
+            known.runtimeArtifactStaging?.also { policy ->
+                policy.validateAgainst(known.neoforgeCoords)
+            }
+        }
+
     private fun gradleDependencyDeclarationBlocks(text: String): List<String> {
-        val depKeywords = listOf("compileOnly", "runtimeOnly", "implementation", "annotationProcessor", "def ")
         val lines = text.lines()
         val blocks = mutableListOf<String>()
         var i = 0
         while (i < lines.size) {
             val trimmed = lines[i].trim()
-            if (trimmed.startsWith("//") || depKeywords.none { trimmed.startsWith(it) }) {
+            if (trimmed.startsWith("//") || !GradleDependencyNotations.startsDependencyStatement(trimmed)) {
                 i++
                 continue
             }
@@ -335,7 +381,8 @@ sealed class DepResolution {
     data class Resolved(
         val coords: List<NeoForgeCoord>,
         val mavenUrl: String?,
-        val notes: String
+        val notes: String,
+        val runtimeArtifactStaging: RuntimeArtifactStagingPolicy? = null
     ) : DepResolution()
 
     data class Unavailable(val reason: String) : DepResolution()
@@ -357,11 +404,26 @@ data class KnownDep(
     val modrinthSlug: String? = null,
     val packagePrefixes: List<String> = emptyList(),
     val neoforgeCoords: List<NeoForgeCoord> = emptyList(),
+    /**
+     * Stages the exact runtime artifact under a URLDecoder-safe filename while keeping the public
+     * coordinate on the compile classpath. This policy is intentionally fail-closed: the resolved
+     * module must contain only its root artifact, and every expected nested jar must remain inside
+     * the byte-identical staged copy.
+     */
+    val runtimeArtifactStaging: RuntimeArtifactStagingPolicy? = null,
+    /** Forge artifact-id prefixes and the NeoForge prefixes that replace them inside kept notations. */
+    val artifactRenames: List<ArtifactRename> = emptyList(),
     val versionProperties: List<KnownDepVersionProperty> = emptyList(),
     val removeConfigurations: List<String> = emptyList(),
     val mavenUrl: String? = null,
     val status: String = "unavailable",
     val notes: String = ""
+)
+
+@Serializable
+data class ArtifactRename(
+    val from: String,
+    val to: String
 )
 
 @Serializable
@@ -378,6 +440,43 @@ data class NeoForgeCoord(
     val transitive: Boolean = true,
     val wrapper: String? = null
 )
+
+@Serializable
+data class RuntimeArtifactStagingPolicy(
+    val id: String,
+    val coordinate: String,
+    val sha256: String,
+    val runtimeFileName: String,
+    val expectedNestedJars: List<String> = emptyList()
+) {
+    internal fun validateAgainst(coords: List<NeoForgeCoord>) {
+        require(id.matches(Regex("[a-z][a-z0-9]*"))) {
+            "Runtime artifact staging id must be a lowercase Gradle-safe identifier: $id"
+        }
+        require(sha256.matches(Regex("[0-9a-fA-F]{64}"))) {
+            "Runtime artifact staging SHA-256 must contain exactly 64 hexadecimal characters: $id"
+        }
+        require(coordinate.matches(Regex("[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+:[A-Za-z0-9_.+\\-]+"))) {
+            "Runtime artifact staging coordinate must be a literal group:artifact:version: $coordinate"
+        }
+        require(runtimeFileName.matches(Regex("[A-Za-z0-9._-]+")) &&
+            '+' !in runtimeFileName &&
+            '%' !in runtimeFileName
+        ) {
+            "Runtime artifact staging filename must be URLDecoder-safe ASCII: $runtimeFileName"
+        }
+        require(coords.count { it.config == "runtimeOnly" && it.coord == coordinate } == 1) {
+            "Runtime artifact staging coordinate must name exactly one runtimeOnly dependency: $coordinate"
+        }
+        require(expectedNestedJars.distinct().size == expectedNestedJars.size &&
+            expectedNestedJars.all {
+                it.matches(Regex("META-INF/jarjar/[A-Za-z0-9._+\\-]+\\.jar"))
+            }
+        ) {
+            "Runtime artifact staging nested jars must be unique META-INF/jarjar entries: $id"
+        }
+    }
+}
 
 data class GradleDependencyCoordinate(
     val configuration: String?,

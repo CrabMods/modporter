@@ -1369,7 +1369,9 @@ internal class ExactProjectProviderCallMigration {
                                 index.isTypeAssignableTo(screenOwner, ABSTRACT_CONTAINER_SCREEN)
                         }
                     } else {
-                        providerExpression("this.${field.first}", field.second, index)
+                        providerExpression("this.${field.first}", field.second, index).takeIf {
+                            exactInstanceFieldProvenNonNullAt(field.first, method, use, index)
+                        }
                     }
                     provider?.let(candidates::add)
                 }
@@ -1447,6 +1449,23 @@ internal class ExactProjectProviderCallMigration {
         }
     }
 
+    private fun exactInstanceFieldProvenNonNullAt(
+        fieldName: String,
+        method: MethodDeclaration,
+        use: com.github.javaparser.ast.Node,
+        index: JavaProjectTypeIndex
+    ): Boolean {
+        val expressions = listOf(fieldName, "this.$fieldName")
+        if (expressions.any { expression ->
+                ExactNullabilityProof.expressionProvenNonNullAt(expression, method, use)
+            }
+        ) return true
+        if (!index.exactInstanceFieldIsFinal(use, fieldName)) return false
+        return expressions.any { expression ->
+            ExactNullabilityProof.stableExpressionProvenNonNullAt(expression, method, use)
+        }
+    }
+
     private fun parameterProvenNonNullAt(
         parameter: Parameter,
         method: MethodDeclaration,
@@ -1509,7 +1528,7 @@ internal class ExactProjectProviderCallMigration {
                         return@mapIndexedNotNull null
                     }
                     if (index.isExactInstanceFieldReference(argument) &&
-                        !expressionProvenNonNullAt(argument.nameAsString, callerMethod, call)
+                        !exactInstanceFieldProvenNonNullAt(argument.nameAsString, callerMethod, call, index)
                     ) {
                         return@mapIndexedNotNull null
                     }

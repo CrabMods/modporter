@@ -1,0 +1,1107 @@
+
+    @Test
+    fun `migrates block entity fluid capability override to RegisterCapabilitiesEvent`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    BlockEntitiesRegister.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/BathtubBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.compat.Capability;
+            import com.modporter.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.fluids.FluidStack;
+            import net.neoforged.neoforge.fluids.capability.IFluidHandler;
+            import net.neoforged.neoforge.fluids.capability.templates.FluidTank;
+            import org.jetbrains.annotations.NotNull;
+            import org.jetbrains.annotations.Nullable;
+
+            public class BathtubBlockEntity extends BlockEntity {
+                private final FluidTank fluidTank = new FluidTank(1000);
+                private final LazyOptional<IFluidHandler> fluidHandler = LazyOptional.of(() -> fluidTank);
+
+                public BathtubBlockEntity(BlockPos pos, BlockState state) {
+                    super(BlockEntitiesRegister.BATHTUB_BLOCK_ENTITY.get(), pos, state);
+                }
+
+                @NotNull
+                public <T> LazyOptional<T> getCapability(@NotNull Capability<T> cap, @Nullable net.minecraft.core.Direction side) {
+                    if (cap == Capabilities.FluidHandler.BLOCK) {
+                        return fluidHandler.cast();
+                    }
+                    return LazyOptional.empty();
+                }
+
+                public void invalidateCaps() {
+                    fluidHandler.invalidate();
+                }
+
+                public int fill(FluidStack stack) {
+                    return fluidTank.fill(stack, IFluidHandler.FluidAction.EXECUTE);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/BlockEntitiesRegister.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+
+            public class BlockEntitiesRegister {
+                public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<BathtubBlockEntity>> BATHTUB_BLOCK_ENTITY = null;
+                public static void register(IEventBus eventBus) {}
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val blockEntity = tempDir.resolve("src/main/java/com/example/BathtubBlockEntity.java").readText()
+        val mod = tempDir.resolve("src/main/java/com/example/ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-blockentity-fluid-capability" })
+        assertTrue(result.changes.any { it.ruleId == "struct-blockentity-fluid-capability-listener" })
+        assertTrue(blockEntity.contains("public static void registerCapabilities(RegisterCapabilitiesEvent event)"))
+        assertTrue(blockEntity.contains("event.registerBlockEntity("))
+        assertTrue(blockEntity.contains("Capabilities.FluidHandler.BLOCK"))
+        assertTrue(blockEntity.contains("BlockEntitiesRegister.BATHTUB_BLOCK_ENTITY.get()"))
+        assertTrue(blockEntity.contains("blockEntity.getFluidTank()"))
+        assertTrue(blockEntity.contains("public FluidTank getFluidTank()"))
+        assertTrue(blockEntity.contains("import net.neoforged.neoforge.fluids.capability.IFluidHandler;"), blockEntity)
+        assertTrue(blockEntity.contains("IFluidHandler.FluidAction.EXECUTE"), blockEntity)
+        assertTrue(!blockEntity.contains("getCapability("))
+        assertTrue(!blockEntity.contains("LazyOptional"))
+        assertTrue(mod.contains("modEventBus.addListener(BathtubBlockEntity::registerCapabilities);"))
+    }
+
+    @Test
+    fun `does not invent block entity fluid providers for no-op multi tank capability overrides`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/MultiTankBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.fluids.capability.IFluidHandler;
+            import net.neoforged.neoforge.fluids.capability.templates.FluidTank;
+            import org.jetbrains.annotations.NotNull;
+            import org.jetbrains.annotations.Nullable;
+
+            public class MultiTankBlockEntity extends BlockEntity {
+                private FluidTank inputTank;
+                private FluidTank outputTank;
+                private final LazyOptional<IFluidHandler> inputHolder = LazyOptional.of(() -> inputTank);
+                private final LazyOptional<IFluidHandler> outputHolder = LazyOptional.of(() -> outputTank);
+
+                public MultiTankBlockEntity(BlockPos pos, BlockState state) {
+                    super(BlockEntitiesRegister.MULTI_TANK.get(), pos, state);
+                    inputTank = new FluidTank(1000);
+                    outputTank = new FluidTank(1000);
+                }
+
+                @NotNull
+                public <T> LazyOptional<T> getCapability(@NotNull Capability<T> capability, @Nullable Direction facing) {
+                    if (capability == Capabilities.FluidHandler.BLOCK) {
+                        // return inputHolder.cast();
+                    }
+                    return super.getCapability(capability, facing);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/BlockEntitiesRegister.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class BlockEntitiesRegister {
+                public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<MultiTankBlockEntity>> MULTI_TANK = null;
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val blockEntity = tempDir.resolve("src/main/java/com/example/MultiTankBlockEntity.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-blockentity-noop-capability-override" })
+        assertFalse(blockEntity.contains("getCapability("), blockEntity)
+        assertFalse(blockEntity.contains("registerCapabilities(RegisterCapabilitiesEvent"), blockEntity)
+        assertFalse(blockEntity.contains("getFluidTank()"), blockEntity)
+        assertFalse(blockEntity.contains("LazyOptional"), blockEntity)
+        assertTrue(blockEntity.contains("private FluidTank inputTank;"), blockEntity)
+        assertTrue(blockEntity.contains("private FluidTank outputTank;"), blockEntity)
+    }
+
+    @Test
+    fun `block entity capability cleanup preserves unproven lazy cache invalidations`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    BlockEntityRegistry.BLOCK_ENTITIES.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/GearBenchBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.items.IItemHandler;
+            import net.neoforged.neoforge.items.ItemStackHandler;
+
+            public class GearBenchBlockEntity extends BlockEntity {
+                private final ItemStackHandler inputItemHandler = new ItemStackHandler(16);
+                private final LazyOptional<IItemHandler> lazyInputItemHandler = LazyOptional.of(() -> inputItemHandler);
+                private final ItemStackHandler outputItemHandler = new ItemStackHandler(1);
+                private final LazyOptional<IItemHandler> lazyOutputItemHandler = LazyOptional.of(() -> outputItemHandler);
+
+                public GearBenchBlockEntity(BlockPos pos, BlockState state) {
+                    super(BlockEntityRegistry.GEAR_BENCH.get(), pos, state);
+                }
+
+                public ItemStack getCraftItem(int slot) {
+                    return lazyInputItemHandler.resolve().get().getStackInSlot(slot);
+                }
+
+                @Override
+                public void setRemoved() {
+                    super.setRemoved();
+                    lazyInputItemHandler.invalidate();
+                    lazyOutputItemHandler.invalidate();
+                }
+
+                public <T> LazyOptional<T> getCapability(Capability<T> capability, Direction side) {
+                    if (capability == Capabilities.ItemHandler.BLOCK) {
+                        return lazyOutputItemHandler.cast();
+                    }
+                    return super.getCapability(capability, side);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/BlockEntityRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockEntityRegistry {
+                public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES = null;
+                public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<GearBenchBlockEntity>> GEAR_BENCH = null;
+                public static void register(IEventBus eventBus) {}
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val blockEntity = tempDir.resolve("src/main/java/com/example/GearBenchBlockEntity.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-blockentity-capability-provider" })
+        assertTrue(blockEntity.contains("registerCapabilities(RegisterCapabilitiesEvent event)"), blockEntity)
+        assertTrue(blockEntity.contains("lazyInputItemHandler.invalidate();"), blockEntity)
+        assertTrue(blockEntity.contains("lazyOutputItemHandler.invalidate();"), blockEntity)
+        assertTrue(blockEntity.contains("private final LazyOptional<IItemHandler> lazyOutputItemHandler"), blockEntity)
+        assertTrue(blockEntity.contains("blockEntity.lazyOutputItemHandler.orElse(null)"), blockEntity)
+    }
+
+    @Test
+    fun `removes recursive duplicate shaped recipe dimension accessors`() {
+        val projectDir = createFile("GearBenchRecipe.java", """
+            package com.example;
+
+            public class GearBenchRecipe {
+                private final int width = 4;
+                private final int height = 4;
+
+                public int getWidth() {
+                    return this.width;
+                }
+
+                public int getWidth() {
+                    return getWidth();
+                }
+
+                public int getHeight() {
+                    return this.height;
+                }
+
+                public int getHeight() {
+                    return getHeight();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val recipe = tempDir.resolve("src/main/java/com/example/GearBenchRecipe.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-recipe-recursive-dimension-accessor-cleanup" })
+        assertEquals(1, Regex("""public int getWidth\s*\(""").findAll(recipe).count(), recipe)
+        assertEquals(1, Regex("""public int getHeight\s*\(""").findAll(recipe).count(), recipe)
+        assertFalse(recipe.contains("return getWidth();"), recipe)
+        assertFalse(recipe.contains("return getHeight();"), recipe)
+        assertTrue(recipe.contains("return this.width;"), recipe)
+        assertTrue(recipe.contains("return this.height;"), recipe)
+    }
+
+    @Test
+    fun `migrates CraftingInput recipe assemble RegistryAccess parameter to HolderLookup provider`() {
+        val projectDir = createFile("UpgradeRecipe.java", """
+            package com.example;
+
+            import net.minecraft.core.RegistryAccess;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.CraftingBookCategory;
+            import net.minecraft.world.item.crafting.CraftingInput;
+            import net.minecraft.world.item.crafting.CustomRecipe;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public class UpgradeRecipe extends CustomRecipe {
+                public UpgradeRecipe(CraftingBookCategory category) {
+                    super(category);
+                }
+
+                @Override
+                public ItemStack assemble(CraftingInput input, RegistryAccess registryAccess) {
+                    return ItemStack.EMPTY;
+                }
+
+                @Override
+                public boolean matches(CraftingInput input, net.minecraft.world.level.Level level) {
+                    return false;
+                }
+
+                @Override
+                public boolean canCraftInDimensions(int width, int height) {
+                    return true;
+                }
+
+                @Override
+                public RecipeSerializer<?> getSerializer() {
+                    return null;
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val recipe = tempDir.resolve("src/main/java/com/example/UpgradeRecipe.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(recipe.contains("import net.minecraft.core.HolderLookup;"))
+        assertTrue(recipe.contains("public ItemStack assemble(CraftingInput input, HolderLookup.Provider registryAccess)"))
+        assertFalse(recipe.contains("RegistryAccess"))
+    }
+
+    @Test
+    fun `migrates RecipeManager byKey RecipeHolder lambda access to value`() {
+        val projectDir = createFile("RecipeXp.java", """
+            package com.example;
+
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeHolder;
+            import net.minecraft.world.level.Level;
+
+            public class RecipeXp {
+                public void grant(Level world, java.util.Map.Entry<ResourceLocation, Integer> entry) {
+                    world.getRecipeManager().byKey(entry.getKey()).ifPresent(recipe -> use(((CookingRecipe) recipe.get()).getExperience()));
+                }
+
+                public void grantAlreadyHolderValue(Level world, java.util.Map.Entry<ResourceLocation, Integer> entry) {
+                    world.getRecipeManager().byKey(entry.getKey()).ifPresent(recipe -> use(((CookingRecipe) recipe.value().get()).getExperience()));
+                }
+
+                public void collect(Level world, java.util.List<java.util.Optional<? extends Recipe<?>>> recipes, ResourceLocation key) {
+                    recipes.add(world.getRecipeManager().byKey(key).map(RecipeHolder::value).map(RecipeHolder::value));
+                }
+
+                private void use(float value) {}
+
+                interface CookingRecipe extends Recipe<net.minecraft.world.item.crafting.RecipeInput> {
+                    float getExperience();
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val recipe = tempDir.resolve("src/main/java/com/example/RecipeXp.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(recipe.contains("((CookingRecipe) recipe.value()).getExperience()"))
+        assertFalse(recipe.contains("recipe.get()).getExperience()"))
+        assertFalse(recipe.contains("recipe.value().get()).getExperience()"))
+        assertTrue(recipe.contains("recipes.add(world.getRecipeManager().byKey(key).map(RecipeHolder::value));"), recipe)
+        assertFalse(recipe.contains(".map(RecipeHolder::value).map(RecipeHolder::value)"), recipe)
+    }
+
+    @Test
+    fun `migrates source shaped block entity item and fluid capabilities to RegisterCapabilitiesEvent`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    BlockEntityRegistry.BLOCK_ENTITIES.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/MachineBlockEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public abstract class MachineBlockEntity extends BlockEntity {
+                public MachineBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/CookingBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.fluids.capability.templates.FluidTank;
+            import net.neoforged.neoforge.items.IItemHandler;
+
+            public class CookingBlockEntity extends MachineBlockEntity {
+                private LazyOptional<IItemHandler> inputHandler;
+                private LazyOptional<IItemHandler> outputHandler;
+                private LazyOptional<FluidTank> fluidTank;
+
+                public CookingBlockEntity(BlockPos pos, BlockState state) {
+                    super(BlockEntityRegistry.COOKING.get(), pos, state);
+                    this.inputHandler = LazyOptional.of(() -> createInput());
+                    this.outputHandler = LazyOptional.of(() -> createOutput());
+                    this.fluidTank = LazyOptional.of(() -> createTank());
+                }
+
+                public <T> LazyOptional<T> getCapability(Capability<T> cap, Direction side) {
+                    if (!this.isRemoved()) {
+                        if (cap.equals(Capabilities.ItemHandler.BLOCK)) {
+                            if (side == null || side.equals(Direction.UP)) {
+                                return inputHandler.cast();
+                            } else {
+                                return outputHandler.cast();
+                            }
+                        }
+                        if (cap.equals(Capabilities.FluidHandler.BLOCK)) {
+                            return this.fluidTank.cast();
+                        }
+                    }
+                    return super.getCapability(cap, side);
+                }
+
+                @Override
+                public void reviveCaps() {
+                    super.reviveCaps();
+                    inputHandler = LazyOptional.of(() -> createInput());
+                    outputHandler = LazyOptional.of(() -> createOutput());
+                    fluidTank = LazyOptional.of(() -> createTank());
+                }
+
+                private IItemHandler createInput() { return null; }
+                private IItemHandler createOutput() { return null; }
+                private FluidTank createTank() { return null; }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/BlockEntityRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockEntityRegistry {
+                public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES = null;
+                public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<CookingBlockEntity>> COOKING = null;
+                public static void register(IEventBus eventBus) {}
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val blockEntity = tempDir.resolve("src/main/java/com/example/CookingBlockEntity.java").readText()
+        val mod = tempDir.resolve("src/main/java/com/example/ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-blockentity-capability-provider" })
+        assertTrue(result.changes.any { it.ruleId == "struct-blockentity-capability-provider-listener" })
+        assertTrue(blockEntity.contains("event.registerBlockEntity(\n                Capabilities.ItemHandler.BLOCK,\n                BlockEntityRegistry.COOKING.get(),"))
+        assertTrue(blockEntity.contains("side == null || side.equals(Direction.UP) ? blockEntity.inputHandler.orElse(null) : blockEntity.outputHandler.orElse(null)"), blockEntity)
+        assertTrue(blockEntity.contains("event.registerBlockEntity(\n                Capabilities.FluidHandler.BLOCK,\n                BlockEntityRegistry.COOKING.get(),"))
+        assertTrue(blockEntity.contains("blockEntity.fluidTank.orElse(null)"), blockEntity)
+        assertTrue(blockEntity.contains("(!blockEntity.isRemoved()) ?"), blockEntity)
+        assertFalse(blockEntity.contains("getCapability("))
+        assertFalse(blockEntity.contains("super.getCapability"))
+        assertFalse(blockEntity.contains("reviveCaps("))
+        assertTrue(blockEntity.contains("public void clearRemoved()"), blockEntity)
+        assertTrue(blockEntity.contains("LazyOptional"), blockEntity)
+        assertFalse(blockEntity.contains("import com.modporter.generated.example.compat.Capability;"))
+        assertTrue(mod.contains("modEventBus.addListener(CookingBlockEntity::registerCapabilities);"))
+    }
+
+    @Test
+    fun `block entity capability reviveCaps migration ignores comments and strings`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    BlockEntityRegistry.BLOCK_ENTITIES.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/MachineBlockEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public abstract class MachineBlockEntity extends BlockEntity {
+                public MachineBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/CommentedReviveBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.items.IItemHandler;
+
+            public class CommentedReviveBlockEntity extends MachineBlockEntity {
+                private LazyOptional<IItemHandler> handler = LazyOptional.of(() -> createHandler());
+                private static final String DOC = "public void reviveCaps() { super.reviveCaps(); }";
+
+                /*
+                public void reviveCaps() {
+                    super.reviveCaps();
+                    handler = LazyOptional.of(() -> createHandler());
+                }
+                */
+
+                public CommentedReviveBlockEntity(BlockPos pos, BlockState state) {
+                    super(BlockEntityRegistry.COMMENTED.get(), pos, state);
+                }
+
+                public <T> LazyOptional<T> getCapability(Capability<T> cap, Direction side) {
+                    if (cap.equals(Capabilities.ItemHandler.BLOCK)) {
+                        return handler.cast();
+                    }
+                    return super.getCapability(cap, side);
+                }
+
+                private IItemHandler createHandler() {
+                    return null;
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/BlockEntityRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockEntityRegistry {
+                public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES = null;
+                public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<CommentedReviveBlockEntity>> COMMENTED = null;
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val blockEntity = tempDir.resolve("src/main/java/com/example/CommentedReviveBlockEntity.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(blockEntity.contains("registerCapabilities(RegisterCapabilitiesEvent event)"), blockEntity)
+        assertFalse(blockEntity.contains("getCapability(Capability<T> cap"), blockEntity)
+        assertTrue(blockEntity.contains("private static final String DOC = \"public void reviveCaps() { super.reviveCaps(); }\";"), blockEntity)
+        assertTrue(blockEntity.contains("public void reviveCaps() {\n        super.reviveCaps();\n        handler = LazyOptional.of(() -> createHandler());\n    }"), blockEntity)
+        assertFalse(blockEntity.contains("clearRemoved"), blockEntity)
+    }
+
+    @Test
+    fun `migrates unbraced single statement block entity item capability providers`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    BlockEntityRegistry.BLOCK_ENTITIES.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/BasinBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.items.IItemHandler;
+            import net.neoforged.neoforge.items.ItemStackHandler;
+            import org.jetbrains.annotations.NotNull;
+            import org.jetbrains.annotations.Nullable;
+
+            public class BasinBlockEntity extends BlockEntity {
+                private final ItemStackHandler stackHandler = new ItemStackHandler();
+                private final LazyOptional<IItemHandler> stackHolder = LazyOptional.of(() -> stackHandler);
+
+                public BasinBlockEntity(BlockPos pos, BlockState state) {
+                    super(BlockEntityRegistry.BASIN.get(), pos, state);
+                }
+
+                @Override
+                @NotNull
+                public <T> LazyOptional<T> getCapability(@NotNull Capability<T> capability, @Nullable Direction facing) {
+                    if (capability == Capabilities.ItemHandler.BLOCK)
+                        return stackHolder.cast();
+                    return super.getCapability(capability, facing);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/BlockEntityRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockEntityRegistry {
+                public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES = null;
+                public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<BasinBlockEntity>> BASIN = null;
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val blockEntity = tempDir.resolve("src/main/java/com/example/BasinBlockEntity.java").readText()
+        val mod = tempDir.resolve("src/main/java/com/example/ExampleMod.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-blockentity-capability-provider" })
+        assertTrue(blockEntity.contains("event.registerBlockEntity(\n                Capabilities.ItemHandler.BLOCK,\n                BlockEntityRegistry.BASIN.get(),"))
+        assertTrue(blockEntity.contains("blockEntity.stackHandler"), blockEntity)
+        assertFalse(blockEntity.contains("getCapability("), blockEntity)
+        assertFalse(blockEntity.contains("super.getCapability"), blockEntity)
+        assertFalse(blockEntity.contains("LazyOptional"), blockEntity)
+        assertTrue(mod.contains("modEventBus.addListener(BasinBlockEntity::registerCapabilities);"))
+    }
+
+    @Test
+    fun `migrates lazy initialized block entity item capability from delegating constructor registry`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    BlockEntityRegistry.BLOCK_ENTITIES.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/TreasureBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.entity.RandomizableContainerBlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.items.IItemHandler;
+            import javax.annotation.Nullable;
+
+            public class TreasureBlockEntity extends RandomizableContainerBlockEntity {
+                @Nullable
+                private LazyOptional<IItemHandler> chestHandler;
+
+                public TreasureBlockEntity(BlockPos pos, BlockState state) {
+                    this(BlockEntityRegistry.TREASURE.get(), pos, state);
+                }
+
+                protected TreasureBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+
+                @Override
+                public <T> LazyOptional<T> getCapability(Capability<T> capability, Direction side) {
+                    if (!this.remove && capability == Capabilities.ItemHandler.BLOCK) {
+                        if (this.chestHandler == null) {
+                            this.chestHandler = LazyOptional.of(this::createHandler);
+                        }
+                        return this.chestHandler.cast();
+                    }
+                    return super.getCapability(capability, side);
+                }
+
+                private IItemHandler createHandler() {
+                    return null;
+                }
+
+                public void invalidateCaps() {
+                    super.invalidateCapabilities();
+                    if (this.chestHandler != null) {
+                        this.chestHandler.invalidate();
+                        this.chestHandler = null;
+                    }
+                }
+
+                @Override
+                public void setBlockState(BlockState state) {
+                    super.setBlockState(state);
+                    if (this.chestHandler != null) {
+                        LazyOptional<?> oldHandler = this.chestHandler;
+                        this.chestHandler = null;
+                        oldHandler.invalidate();
+                    }
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/BlockEntityRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockEntityRegistry {
+                public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES = null;
+                public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<TreasureBlockEntity>> TREASURE = null;
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val blockEntity = tempDir.resolve("src/main/java/com/example/TreasureBlockEntity.java").readText()
+        val mod = tempDir.resolve("src/main/java/com/example/ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-blockentity-capability-provider" })
+        assertTrue(blockEntity.contains("event.registerBlockEntity(\n                Capabilities.ItemHandler.BLOCK,\n                BlockEntityRegistry.TREASURE.get(),"))
+        assertTrue(blockEntity.contains("(!blockEntity.isRemoved()) ? blockEntity.createHandler() : null"), blockEntity)
+        assertFalse(blockEntity.contains("getCapability("), blockEntity)
+        assertFalse(blockEntity.contains("LazyOptional"), blockEntity)
+        assertFalse(blockEntity.contains("chestHandler"), blockEntity)
+        assertFalse(blockEntity.contains("invalidateCaps"), blockEntity)
+        assertFalse(blockEntity.contains("oldHandler"), blockEntity)
+        assertTrue(mod.contains("modEventBus.addListener(TreasureBlockEntity::registerCapabilities);"))
+    }
+
+    @Test
+    fun `migrates sided inventory wrapper arrays to direct block entity capability providers`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    BlockEntityRegistry.BLOCK_ENTITIES.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/IncubatorBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.block.entity.BaseContainerBlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.items.IItemHandler;
+            import net.neoforged.neoforge.items.wrapper.SidedInvWrapper;
+            import javax.annotation.Nullable;
+
+            public class IncubatorBlockEntity extends BaseContainerBlockEntity {
+                private LazyOptional<? extends IItemHandler>[] handlers = SidedInvWrapper.create(this, Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST);
+
+                public IncubatorBlockEntity(BlockPos pos, BlockState state) {
+                    super(BlockEntityRegistry.INCUBATOR.get(), pos, state);
+                }
+
+                @Override
+                public <T> LazyOptional<T> getCapability(Capability<T> capability, @Nullable Direction direction) {
+                    if (!this.remove && direction != null && capability == Capabilities.ItemHandler.BLOCK) {
+                        if (direction == Direction.NORTH) {
+                            return handlers[0].cast();
+                        } else if (direction == Direction.SOUTH) {
+                            return handlers[1].cast();
+                        } else if (direction == Direction.EAST) {
+                            return handlers[2].cast();
+                        } else {
+                            return handlers[3].cast();
+                        }
+                    }
+                    return super.getCapability(capability, direction);
+                }
+
+                public void invalidateCaps() {
+                    super.invalidateCapabilities();
+                    for (LazyOptional<? extends IItemHandler> handler : this.handlers) {
+                        handler.invalidate();
+                    }
+                }
+
+                @Override
+                public void reviveCaps() {
+                    super.reviveCaps();
+                    this.handlers = SidedInvWrapper.create(this, Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/BlockEntityRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockEntityRegistry {
+                public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES = null;
+                public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<IncubatorBlockEntity>> INCUBATOR = null;
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val blockEntity = tempDir.resolve("src/main/java/com/example/IncubatorBlockEntity.java").readText()
+        val mod = tempDir.resolve("src/main/java/com/example/ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-blockentity-capability-provider" })
+        assertTrue(blockEntity.contains("(!blockEntity.isRemoved() && side != null) ?"), blockEntity)
+        assertTrue(blockEntity.contains("side == Direction.NORTH ? new SidedInvWrapper(blockEntity, Direction.NORTH)"), blockEntity)
+        assertTrue(blockEntity.contains("side == Direction.SOUTH ? new SidedInvWrapper(blockEntity, Direction.SOUTH)"), blockEntity)
+        assertTrue(blockEntity.contains("side == Direction.EAST ? new SidedInvWrapper(blockEntity, Direction.EAST)"), blockEntity)
+        assertTrue(blockEntity.contains("new SidedInvWrapper(blockEntity, Direction.WEST)"), blockEntity)
+        assertFalse(blockEntity.contains("getCapability("), blockEntity)
+        assertFalse(blockEntity.contains("LazyOptional"), blockEntity)
+        assertFalse(blockEntity.contains("handlers"), blockEntity)
+        assertFalse(blockEntity.contains("reviveCaps"), blockEntity)
+        assertTrue(mod.contains("modEventBus.addListener(IncubatorBlockEntity::registerCapabilities);"))
+    }
+
+    @Test
+    fun `migrates additional NeoForge 121 block entity and client API surfaces`() {
+        val projectDir = createFile("BaseInventoryEntity.java", """
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.entity.player.Inventory;
+            import net.minecraft.world.inventory.AbstractContainerMenu;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.block.entity.BaseContainerBlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public abstract class BaseInventoryEntity extends BaseContainerBlockEntity {
+                protected NonNullList<ItemStack> items;
+                public BaseInventoryEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                    this.items = NonNullList.withSize(1, ItemStack.EMPTY);
+                }
+                @Override
+                protected Component getDefaultName() { return Component.literal("x"); }
+                @Override
+                protected AbstractContainerMenu createMenu(int id, Inventory inventory) { return null; }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/SyncEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.Connection;
+            import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class SyncEntity extends BaseInventoryEntity {
+                public SyncEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+                @Override
+                public CompoundTag getUpdateTag() {
+                    CompoundTag tag = super.getUpdateTag();
+                    saveAdditional(tag);
+                    return tag;
+                }
+                @Override
+                public net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket getUpdatePacket() {
+                    return net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket.create(this);
+                }
+                @Override
+                public void onDataPacket(net.minecraft.network.Connection net, net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket pkt) {
+                    net.minecraft.nbt.CompoundTag tag = pkt.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag();
+                    if (tag != null) {
+                        this.load(tag);
+                    }
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/TooltipBlock.java").writeText("""
+            package com.example;
+
+            import java.util.List;
+            import javax.annotation.Nullable;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.item.BlockItem;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.TooltipFlag;
+            import net.minecraft.world.level.BlockGetter;
+
+            public class TooltipBlock {
+                public void appendHoverText(ItemStack stack, @Nullable BlockGetter level, List<Component> tooltip, TooltipFlag flag) {
+                    CompoundTag tag = BlockItem.getBlockEntityData(stack);
+                    super.appendHoverText(stack, level, tooltip, flag);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/WaterRenderer.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.VertexConsumer;
+            import org.joml.Matrix4f;
+
+            public class WaterRenderer {
+                void add(VertexConsumer builder, Matrix4f matrix, int packedLight, float r, float g, float b, float a, float nx, float ny, float nz) {
+                    builder.addVertex(matrix, 0, 0, 0)
+                           .color(r, g, b, a)
+                           .setUv(0, 0)
+                           .overlayCoords(0, 10)
+                           .uv2(packedLight)
+                           .normal(nx, ny, nz);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/SeatEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.network.protocol.Packet;
+            import net.minecraft.network.protocol.game.ClientGamePacketListener;
+            import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
+            import net.minecraft.world.entity.Entity;
+
+            public class SeatEntity extends Entity {
+                @Override
+                public Packet<ClientGamePacketListener> getAddEntityPacket() {
+                    return new ClientboundAddEntityPacket(this);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/FacingBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.HorizontalDirectionalBlock;
+
+            public class FacingBlock extends HorizontalDirectionalBlock {
+                public FacingBlock(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val inventory = tempDir.resolve("src/main/java/com/example/BaseInventoryEntity.java").readText()
+        val sync = tempDir.resolve("src/main/java/com/example/SyncEntity.java").readText()
+        val tooltip = tempDir.resolve("src/main/java/com/example/TooltipBlock.java").readText()
+        val renderer = tempDir.resolve("src/main/java/com/example/WaterRenderer.java").readText()
+        val entity = tempDir.resolve("src/main/java/com/example/SeatEntity.java").readText()
+        val block = tempDir.resolve("src/main/java/com/example/FacingBlock.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-base-container-items-accessors" })
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(result.changes.any { it.ruleId == "struct-remove-legacy-entity-spawn-packet" })
+        assertTrue(result.changes.any { it.ruleId == "struct-base-entity-block-codec" })
+        assertTrue(inventory.contains("protected NonNullList<ItemStack> getItems()"))
+        assertTrue(inventory.contains("protected void setItems(NonNullList<ItemStack> items)"))
+        assertTrue(sync.contains("getUpdateTag(HolderLookup.Provider registries)"))
+        assertTrue(sync.contains("saveAdditional(tag, registries);"))
+        assertTrue(sync.contains("onDataPacket(net.minecraft.network.Connection net, net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket pkt, HolderLookup.Provider lookupProvider)"))
+        assertTrue(sync.contains("CompoundTag tag = pkt.getTag();"))
+        assertTrue(sync.contains("loadWithComponents(tag, lookupProvider);"), sync)
+        assertTrue(tooltip.contains("Item.TooltipContext level"))
+        assertTrue(tooltip.contains("stack.getOrDefault(net.minecraft.core.component.DataComponents.BLOCK_ENTITY_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()"))
+        assertTrue(renderer.contains(".setColor(r, g, b, a)"))
+        assertTrue(renderer.contains(".setOverlay(OverlayTexture.NO_OVERLAY)"))
+        assertTrue(renderer.contains(".setLight(packedLight)"))
+        assertTrue(renderer.contains(".setNormal(nx, ny, nz)"))
+        assertTrue(!entity.contains("getAddEntityPacket"))
+        assertTrue(block.contains("MapCodec<FacingBlock> CODEC = simpleCodec(FacingBlock::new);"))
+        assertTrue(block.contains("MapCodec<? extends net.minecraft.world.level.block.HorizontalDirectionalBlock> codec()"))
+    }
+
+    @Test
+    fun `obsolete entity method cleanup ignores comments strings and text blocks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LegacyEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.network.protocol.Packet;
+            import net.minecraft.network.protocol.game.ClientGamePacketListener;
+            import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
+            import net.minecraft.world.entity.Entity;
+
+            public class LegacyEntity extends Entity {
+                private static final String DOC = "super.onAddedToWorld(); this.onRemovedFromWorld(); getAddEntityPacket";
+                private static final String SAMPLE = ""${'"'}
+                    public void onAddedToWorld() {
+                        super.onAddedToWorld();
+                    }
+
+                    public Packet<ClientGamePacketListener> getAddEntityPacket() {
+                        return new ClientboundAddEntityPacket(this);
+                    }
+                ""${'"'};
+
+                /*
+                public void onRemovedFromWorld() {
+                    super.onRemovedFromWorld();
+                }
+
+                public Packet<ClientGamePacketListener> getAddEntityPacket() {
+                    return new ClientboundAddEntityPacket(this);
+                }
+                */
+
+                @Override
+                public void onAddedToWorld() {
+                    super.onAddedToWorld();
+                    this.onRemovedFromWorld();
+                }
+
+                @Override
+                public void onRemovedFromWorld() {
+                    super.onRemovedFromWorld();
+                }
+
+                @Override
+                public Packet<ClientGamePacketListener> getAddEntityPacket() {
+                    return new ClientboundAddEntityPacket(this);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val entity = srcDir.resolve("LegacyEntity.java").readText().replace("\r\n", "\n")
+
+        assertTrue(result.changes.any { it.ruleId == "struct-rename-lifecycle-method" })
+        assertTrue(result.changes.any { it.ruleId == "struct-remove-legacy-entity-spawn-packet" })
+        assertTrue(entity.contains("public void onAddedToLevel()"), entity)
+        assertTrue(entity.contains("super.onAddedToLevel();"), entity)
+        assertTrue(entity.contains("this.onRemovedFromLevel();"), entity)
+        assertTrue(entity.contains("public void onRemovedFromLevel()"), entity)
+        assertFalse(Regex("""(?s)@Override\s+public Packet<ClientGamePacketListener> getAddEntityPacket\(""").containsMatchIn(entity), entity)
+        assertTrue(entity.contains("private static final String DOC = \"super.onAddedToWorld(); this.onRemovedFromWorld(); getAddEntityPacket\";"), entity)
+        assertTrue(Regex("""(?s)public void onAddedToWorld\(\)\s*\{\s*super\.onAddedToWorld\(\);""").containsMatchIn(entity), entity)
+        assertTrue(Regex("""(?s)public void onRemovedFromWorld\(\)\s*\{\s*super\.onRemovedFromWorld\(\);""").containsMatchIn(entity), entity)
+        assertFalse(entity.contains("import net.minecraft.network.protocol.Packet;"), entity)
+        assertFalse(entity.contains("import net.minecraft.network.protocol.game.ClientGamePacketListener;"), entity)
+        assertFalse(entity.contains("import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;"), entity)
+    }

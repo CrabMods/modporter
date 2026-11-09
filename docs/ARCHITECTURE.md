@@ -173,10 +173,12 @@ forge2neo/
 │   │   │   │   ├── RegistryObjectTransform.kt
 │   │   │   │   └── EventAnnotationTransform.kt
 │   │   │   ├── structural/
-│   │   │   │   ├── StructuralRefactorPass.kt
-│   │   │   │   ├── CapabilityMigration.kt
-│   │   │   │   ├── NetworkingMigration.kt
-│   │   │   │   └── ConfigMigration.kt
+│   │   │   │   ├── StructuralRefactorPass.kt   # state, orchestration (processFiles), parse checks
+│   │   │   │   ├── StructuralRules<NN>.kt      # the rules as `internal fun StructuralRefactorPass.<rule>` extensions,
+│   │   │   │   │                               # in pipeline order; each rule is followed by the helpers it uses and
+│   │   │   │   │                               # each file's banner lists the entry points processFiles calls
+│   │   │   │   └── <Topic>.kt                  # self-contained project-level rules (NbtHookFamilies, PacketTablePayloads,
+│   │   │   │                                   #  LegacyBlockEntityCapabilities, DistExecutorCompat, ...)
 │   │   │   └── ai/
 │   │   │       ├── AiAssistPass.kt
 │   │   │       └── PromptTemplates.kt

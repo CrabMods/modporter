@@ -10,7 +10,10 @@
         "com.aetherteam.nitrogen."
       ],
       "neoforgeCoords": [
-        { "config": "implementation", "coord": "com.aetherteam.nitrogen:nitrogen_internals:1.21.1-1.1.25-neoforge" }
+        {
+          "config": "implementation",
+          "coord": "com.aetherteam.nitrogen:nitrogen_internals:1.21.1-1.1.25-neoforge"
+        }
       ],
       "versionProperties": [
         {
@@ -30,7 +33,10 @@
         "com.aetherteam.cumulus."
       ],
       "neoforgeCoords": [
-        { "config": "implementation", "coord": "com.aetherteam.cumulus:cumulus_menus:1.21.1-2.0.8-neoforge" }
+        {
+          "config": "implementation",
+          "coord": "com.aetherteam.cumulus:cumulus_menus:1.21.1-2.0.8-neoforge"
+        }
       ],
       "versionProperties": [
         {
@@ -47,9 +53,18 @@
       "forgePrefix": "mezz.jei",
       "modrinthSlug": "jei",
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "mezz.jei:jei-1.21.1-common-api:19.21.2.313" },
-        { "config": "compileOnly", "coord": "mezz.jei:jei-1.21.1-neoforge:19.21.2.313" },
-        { "config": "runtimeOnly", "coord": "mezz.jei:jei-1.21.1-neoforge:19.21.2.313" }
+        {
+          "config": "compileOnly",
+          "coord": "mezz.jei:jei-1.21.1-common-api:19.21.2.313"
+        },
+        {
+          "config": "compileOnly",
+          "coord": "mezz.jei:jei-1.21.1-neoforge:19.21.2.313"
+        },
+        {
+          "config": "runtimeOnly",
+          "coord": "mezz.jei:jei-1.21.1-neoforge:19.21.2.313"
+        }
       ],
       "mavenUrl": "https://maven.blamejared.com",
       "status": "available",
@@ -59,9 +74,18 @@
       "forgePrefix": "curse.maven:jei-238222",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "mezz.jei:jei-1.21.1-common-api:19.21.2.313" },
-        { "config": "compileOnly", "coord": "mezz.jei:jei-1.21.1-neoforge:19.21.2.313" },
-        { "config": "runtimeOnly", "coord": "mezz.jei:jei-1.21.1-neoforge:19.21.2.313" }
+        {
+          "config": "compileOnly",
+          "coord": "mezz.jei:jei-1.21.1-common-api:19.21.2.313"
+        },
+        {
+          "config": "compileOnly",
+          "coord": "mezz.jei:jei-1.21.1-neoforge:19.21.2.313"
+        },
+        {
+          "config": "runtimeOnly",
+          "coord": "mezz.jei:jei-1.21.1-neoforge:19.21.2.313"
+        }
       ],
       "mavenUrl": "https://maven.blamejared.com",
       "status": "replacement",
@@ -73,7 +97,11 @@
       "forgePrefix": "com.simibubi.create",
       "modrinthSlug": "create",
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "com.simibubi.create:create-1.21.1:6.0.4-build.42+mc1.21.1:slim", "transitive": false }
+        {
+          "config": "compileOnly",
+          "coord": "com.simibubi.create:create-1.21.1:6.0.4-build.42+mc1.21.1:slim",
+          "transitive": false
+        }
       ],
       "mavenUrl": "https://maven.createmod.net",
       "status": "unavailable",
@@ -83,7 +111,10 @@
       "forgePrefix": "curse.maven:create-328085",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "curse.maven:create-328085:7408951" }
+        {
+          "config": "compileOnly",
+          "coord": "curse.maven:create-328085:7408951"
+        }
       ],
       "mavenUrl": null,
       "status": "available",
@@ -93,7 +124,10 @@
       "forgePrefix": "curse.maven:cold-sweat-506194",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "curse.maven:cold-sweat-506194:7492465" }
+        {
+          "config": "compileOnly",
+          "coord": "curse.maven:cold-sweat-506194:7492465"
+        }
       ],
       "mavenUrl": null,
       "status": "available",
@@ -103,7 +137,10 @@
       "forgePrefix": "curse.maven:alexs-mobs-426558",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "curse.maven:alexs-mobs-1-21-1-port-1415721:7391745" }
+        {
+          "config": "compileOnly",
+          "coord": "curse.maven:alexs-mobs-1-21-1-port-1415721:7391745"
+        }
       ],
       "mavenUrl": null,
       "status": "compile_only_compat",
@@ -113,7 +150,10 @@
       "forgePrefix": "curse.maven:citadel-331936",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "curse.maven:citadel-331936:7476597" }
+        {
+          "config": "compileOnly",
+          "coord": "curse.maven:citadel-331936:7476597"
+        }
       ],
       "mavenUrl": null,
       "status": "available",
@@ -126,7 +166,10 @@
         "com.github.alexmodguy.alexscaves."
       ],
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "curse.maven:alexs-caves-unofficial-port-1420348:7485074" }
+        {
+          "config": "compileOnly",
+          "coord": "curse.maven:alexs-caves-unofficial-port-1420348:7485074"
+        }
       ],
       "mavenUrl": null,
       "status": "compile_only_compat",
@@ -136,7 +179,10 @@
       "forgePrefix": "curse.maven:epic-fight-mod-405076",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "curse.maven:epic-fight-mod-405076:8175609" }
+        {
+          "config": "compileOnly",
+          "coord": "curse.maven:epic-fight-mod-405076:8175609"
+        }
       ],
       "mavenUrl": null,
       "status": "available",
@@ -146,8 +192,14 @@
       "forgePrefix": "curse.maven:farmers-delight-398521",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "curse.maven:farmers-delight-398521:8083481" },
-        { "config": "runtimeOnly", "coord": "curse.maven:farmers-delight-398521:8083481" }
+        {
+          "config": "compileOnly",
+          "coord": "curse.maven:farmers-delight-398521:8083481"
+        },
+        {
+          "config": "runtimeOnly",
+          "coord": "curse.maven:farmers-delight-398521:8083481"
+        }
       ],
       "mavenUrl": null,
       "status": "available",
@@ -159,14 +211,19 @@
       "neoforgeCoords": [],
       "mavenUrl": null,
       "status": "runtime_absent",
-      "removeConfigurations": ["runtimeOnly"],
+      "removeConfigurations": [
+        "runtimeOnly"
+      ],
       "notes": "Construction Wand has no declared NeoForge 1.21.1 runtime coordinate; remove only optional runtimeOnly declarations and leave compile/API use unresolved"
     },
     {
       "forgePrefix": "curse.maven:better-combat-by-daedelus-639842",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "runtimeOnly", "coord": "maven.modrinth:better-combat:2.3.2+1.21.1-neoforge" }
+        {
+          "config": "runtimeOnly",
+          "coord": "maven.modrinth:better-combat:2.3.2+1.21.1-neoforge"
+        }
       ],
       "mavenUrl": "https://api.modrinth.com/maven",
       "status": "replacement",
@@ -178,7 +235,10 @@
       "forgePrefix": "curse.maven:cloth-config-348521",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "runtimeOnly", "coord": "maven.modrinth:cloth-config:15.0.140+neoforge" }
+        {
+          "config": "runtimeOnly",
+          "coord": "maven.modrinth:cloth-config:15.0.140+neoforge"
+        }
       ],
       "mavenUrl": "https://api.modrinth.com/maven",
       "status": "replacement",
@@ -190,7 +250,10 @@
       "forgePrefix": "curse.maven:worldedit-225608",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "runtimeOnly", "coord": "maven.modrinth:worldedit:7.3.8" }
+        {
+          "config": "runtimeOnly",
+          "coord": "maven.modrinth:worldedit:7.3.8"
+        }
       ],
       "mavenUrl": "https://api.modrinth.com/maven",
       "status": "replacement",
@@ -204,14 +267,19 @@
       "neoforgeCoords": [],
       "mavenUrl": null,
       "status": "runtime_absent",
-      "removeConfigurations": ["runtimeOnly"],
+      "removeConfigurations": [
+        "runtimeOnly"
+      ],
       "notes": "World Preview has no declared NeoForge 1.21.1 runtime coordinate; remove only optional runtimeOnly declarations and leave compile/API use unresolved"
     },
     {
       "forgePrefix": "curse.maven:glitchcore-955399",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "curse.maven:glitchcore-955399:5660740" }
+        {
+          "config": "compileOnly",
+          "coord": "curse.maven:glitchcore-955399:5660740"
+        }
       ],
       "mavenUrl": null,
       "status": "available",
@@ -221,7 +289,10 @@
       "forgePrefix": "curse.maven:tough-as-nails-246391",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "curse.maven:tough-as-nails-246391:5766204" }
+        {
+          "config": "compileOnly",
+          "coord": "curse.maven:tough-as-nails-246391:5766204"
+        }
       ],
       "mavenUrl": null,
       "status": "available",
@@ -231,7 +302,10 @@
       "forgePrefix": "curse.maven:legendary-survival-overhaul-840254",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "curse.maven:legendary-survival-overhaul-840254:7254309" }
+        {
+          "config": "compileOnly",
+          "coord": "curse.maven:legendary-survival-overhaul-840254:7254309"
+        }
       ],
       "mavenUrl": null,
       "status": "available",
@@ -241,7 +315,10 @@
       "forgePrefix": "curse.maven:the-twilight-forest-227639",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "curse.maven:the-twilight-forest-227639:7398100" }
+        {
+          "config": "compileOnly",
+          "coord": "curse.maven:the-twilight-forest-227639:7398100"
+        }
       ],
       "mavenUrl": null,
       "status": "available",
@@ -251,7 +328,10 @@
       "forgePrefix": "team-twilight:crossdimcommands",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "runtimeOnly", "coord": "com.telepathicgrunt:CommandStructures-Neoforge:4.3.2+1.20.6" }
+        {
+          "config": "runtimeOnly",
+          "coord": "com.telepathicgrunt:CommandStructures-Neoforge:4.3.2+1.20.6"
+        }
       ],
       "mavenUrl": "https://nexus.resourcefulbees.com/repository/maven-public/",
       "status": "replacement",
@@ -263,7 +343,10 @@
       "forgePrefix": "curse.maven:jade-324717",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "curse.maven:jade-324717:5813144" }
+        {
+          "config": "compileOnly",
+          "coord": "curse.maven:jade-324717:5813144"
+        }
       ],
       "versionProperties": [
         {
@@ -280,7 +363,10 @@
       "forgePrefix": "curse.maven:lootr-361276",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "curse.maven:lootr-361276:5832064" }
+        {
+          "config": "compileOnly",
+          "coord": "curse.maven:lootr-361276:5832064"
+        }
       ],
       "versionProperties": [
         {
@@ -297,7 +383,10 @@
       "forgePrefix": "curse.maven:jeed-532286",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "runtimeOnly", "coord": "curse.maven:jeed-532286:6550600" }
+        {
+          "config": "runtimeOnly",
+          "coord": "curse.maven:jeed-532286:6550600"
+        }
       ],
       "mavenUrl": null,
       "status": "available",
@@ -309,7 +398,9 @@
       "neoforgeCoords": [],
       "mavenUrl": null,
       "status": "runtime_absent",
-      "removeConfigurations": ["runtimeOnly"],
+      "removeConfigurations": [
+        "runtimeOnly"
+      ],
       "notes": "Museum Curator has no declared NeoForge 1.21.1 runtime coordinate; remove only optional runtimeOnly declarations and leave compile/API use unresolved"
     },
     {
@@ -319,7 +410,10 @@
         "sereneseasons."
       ],
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "curse.maven:serene-seasons-291874:6182596" }
+        {
+          "config": "compileOnly",
+          "coord": "curse.maven:serene-seasons-291874:6182596"
+        }
       ],
       "mavenUrl": null,
       "status": "available",
@@ -329,70 +423,123 @@
       "forgePrefix": "curse.maven:patchouli-306770",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "curse.maven:patchouli-306770:6842247" }
+        {
+          "config": "compileOnly",
+          "coord": "curse.maven:patchouli-306770:6842247"
+        }
       ],
       "mavenUrl": null,
       "status": "available",
       "notes": "Patchouli CurseMaven: 6842247 contains META-INF/neoforge.mods.toml for NeoForge 1.21.1"
     },
     {
+      "forgePrefix": "curse.maven:journeymap-32274",
+      "modrinthSlug": "journeymap",
+      "neoforgeCoords": [
+        {
+          "config": "compileOnly",
+          "coord": "info.journeymap:journeymap-api-neoforge:2.0.0-1.21.1-20260205.200232-15",
+          "transitive": false
+        },
+        {
+          "config": "compileOnly",
+          "coord": "maven.modrinth:journeymap:1.21.1-6.0.0-beta.54+neoforge"
+        },
+        {
+          "config": "runtimeOnly",
+          "coord": "maven.modrinth:journeymap:1.21.1-6.0.0-beta.54+neoforge"
+        }
+      ],
+      "runtimeArtifactStaging": {
+        "id": "journeymap",
+        "coordinate": "maven.modrinth:journeymap:1.21.1-6.0.0-beta.54+neoforge",
+        "sha256": "121d84332dba09100ea8c654a8c5b75bdf1257639d00aca1210c5dc31f36cb38",
+        "runtimeFileName": "journeymap-121d84332dba0910.jar",
+        "expectedNestedJars": [
+          "META-INF/jarjar/common-networking-neoforge-1.0.18-1.21.1.jar",
+          "META-INF/jarjar/journeymap-api-neoforge-2.0.0-1.21.1-SNAPSHOT.jar",
+          "META-INF/jarjar/pngj-2.1.0.jar"
+        ]
+      },
+      "mavenUrl": "https://jm.gserv.me/repository/maven-public",
+      "status": "replacement",
+      "replacementFor": "curse.maven:journeymap-32274",
+      "replacementPolicy": "public-artifact-successor",
+      "notes": "JourneyMap 6.0.0 beta 54 is Create's native NeoForge 1.21.1 dependency; keep the full mod on compile and runtime classpaths because Create references JourneyMap internal UI classes"
+    },
+    {
       "forgePrefix": "dev.engine-room.flywheel",
       "modrinthSlug": "flywheel",
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "dev.engine-room.flywheel:flywheel-neoforge-api-1.21.1:1.0.6" },
-        { "config": "runtimeOnly", "coord": "dev.engine-room.flywheel:flywheel-neoforge-1.21.1:1.0.6", "wrapper": "jarJar" }
+        {
+          "config": "compileOnly",
+          "coord": "dev.engine-room.flywheel:flywheel-neoforge-api-1.21.1:1.0.6"
+        },
+        {
+          "config": "runtimeOnly",
+          "coord": "dev.engine-room.flywheel:flywheel-neoforge-1.21.1:1.0.6",
+          "wrapper": "jarJar"
+        }
+      ],
+      "artifactRenames": [
+        {
+          "from": "flywheel-forge-api-",
+          "to": "flywheel-neoforge-api-"
+        },
+        {
+          "from": "flywheel-forge-",
+          "to": "flywheel-neoforge-"
+        }
+      ],
+      "versionProperties": [
+        {
+          "name": "flywheel_version",
+          "value": "1.0.6",
+          "notes": "Flywheel 1.0.6 for NeoForge 1.21.1 on maven.createmod.net (Create 6 pins the same)"
+        }
       ],
       "mavenUrl": "https://maven.createmod.net",
       "status": "available",
-      "notes": "Flywheel publishes separate NeoForge 1.21.1 API and runtime artifacts"
-    },
-    {
-      "forgePrefix": "net.createmod.ponder",
-      "modrinthSlug": null,
-      "neoforgeCoords": [
-        { "config": "implementation", "coord": "net.createmod.ponder:ponder-neoforge:1.0.82+mc1.21.1", "wrapper": "jarJar" }
-      ],
-      "mavenUrl": "https://maven.createmod.net",
-      "status": "available",
-      "notes": "Ponder publishes a loader-specific NeoForge artifact with the Minecraft version encoded in its version"
-    },
-    {
-      "forgePrefix": "com.tterrag.registrate:Registrate",
-      "modrinthSlug": null,
-      "neoforgeCoords": [
-        { "config": "implementation", "coord": "com.tterrag.registrate:Registrate:MC1.21-1.3.0+67", "wrapper": "jarJar" }
-      ],
-      "mavenUrl": "https://maven.ithundxr.dev/snapshots",
-      "status": "available",
-      "notes": "Registrate publishes its Minecraft 1.21 line in the public snapshots repository"
+      "notes": "Flywheel 1.0: NeoForge 1.21.1 api and runtime jars on maven.createmod.net; the artifact id swaps -forge- for -neoforge-"
     },
     {
       "forgePrefix": "dev.engine-room.vanillin",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "runtimeOnly", "coord": "dev.engine-room.vanillin:vanillin-neoforge-1.21.1:1.1.3-41" }
+        {
+          "config": "runtimeOnly",
+          "coord": "dev.engine-room.vanillin:vanillin-neoforge-1.21.1:1.1.3-41"
+        }
+      ],
+      "artifactRenames": [
+        {
+          "from": "vanillin-forge-",
+          "to": "vanillin-neoforge-"
+        }
+      ],
+      "versionProperties": [
+        {
+          "name": "vanillin_version",
+          "value": "1.1.3-41",
+          "notes": "Vanillin version paired with Flywheel 1.0.6 by Create's native NeoForge 1.21.1 build"
+        }
       ],
       "mavenUrl": "https://maven.createmod.net",
       "status": "available",
-      "notes": "Vanillin publishes a loader-specific NeoForge 1.21.1 runtime artifact"
-    },
-    {
-      "forgePrefix": "cc.tweaked:cc-tweaked",
-      "modrinthSlug": "cc-tweaked",
-      "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "cc.tweaked:cc-tweaked-1.21.1-core-api:1.116.1" },
-        { "config": "compileOnly", "coord": "cc.tweaked:cc-tweaked-1.21.1-forge-api:1.116.1" },
-        { "config": "runtimeOnly", "coord": "cc.tweaked:cc-tweaked-1.21.1-forge:1.116.1" }
-      ],
-      "mavenUrl": "https://maven.squiddev.cc",
-      "status": "available",
-      "notes": "CC:Tweaked 1.21.1 retains separate core API, Forge-compatible API, and runtime artifacts"
+      "notes": "Vanillin: runtime-only Flywheel companion; artifact id swaps -forge- for -neoforge-"
     },
     {
       "forgePrefix": "com.ferreusveritas.dynamictrees:DynamicTrees",
       "modrinthSlug": "dynamic-trees",
+      "packagePrefixes": [
+        "com.ferreusveritas.dynamictrees.",
+        "com.dtteam.dynamictrees."
+      ],
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "com.dtteam.dynamictrees:dynamictrees-neoforge-1.21.1:1.7.2" }
+        {
+          "config": "compileOnly",
+          "coord": "com.dtteam.dynamictrees:dynamictrees-neoforge-1.21.1:1.7.2"
+        }
       ],
       "mavenUrl": "https://harleyoconnor.com/maven",
       "status": "replacement",
@@ -401,58 +548,225 @@
       "notes": "Dynamic Trees moved to the com.dtteam.dynamictrees group and publishes a loader-specific NeoForge 1.21.1 artifact"
     },
     {
+      "forgePrefix": "net.createmod.ponder",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        {
+          "config": "implementation",
+          "coord": "net.createmod.ponder:ponder-neoforge:1.0.87+mc1.21.1"
+        }
+      ],
+      "artifactRenames": [
+        {
+          "from": "Ponder-Forge-${minecraft_version}",
+          "to": "ponder-neoforge"
+        },
+        {
+          "from": "Ponder-Forge-1.21.1",
+          "to": "ponder-neoforge"
+        },
+        {
+          "from": "Ponder-Forge-1.20.1",
+          "to": "ponder-neoforge"
+        }
+      ],
+      "versionProperties": [
+        {
+          "name": "ponder_version",
+          "value": "1.0.87+mc1.21.1",
+          "notes": "Ponder for NeoForge 1.21.1 publishes as ponder-neoforge:<version>+mc1.21.1 (Create 6 uses the same scheme)"
+        }
+      ],
+      "mavenUrl": "https://maven.createmod.net",
+      "status": "available",
+      "notes": "Ponder: NeoForge 1.21.1 artifact ponder-neoforge on maven.createmod.net"
+    },
+    {
+      "forgePrefix": "com.tterrag.registrate:Registrate",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        {
+          "config": "implementation",
+          "coord": "com.tterrag.registrate:Registrate:MC1.21-1.3.0+67"
+        }
+      ],
+      "mavenUrl": "https://maven.ithundxr.dev/snapshots",
+      "status": "available",
+      "notes": "Registrate: same artifact id, MC1.21 version line on maven.ithundxr.dev/snapshots",
+      "versionProperties": [
+        {
+          "name": "registrate_version",
+          "value": "MC1.21-1.3.0+67",
+          "notes": "Registrate for NeoForge 1.21 on maven.ithundxr.dev/snapshots (Create 6 pins the same)"
+        }
+      ]
+    },
+    {
+      "forgePrefix": "com.tterrag.registrate",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        {
+          "config": "implementation",
+          "coord": "com.tterrag.registrate:Registrate:MC1.21-1.3.0+67"
+        }
+      ],
+      "versionProperties": [
+        {
+          "name": "registrate_version",
+          "value": "MC1.21-1.3.0+67",
+          "notes": "Registrate for NeoForge 1.21 on maven.ithundxr.dev/snapshots (Create 6 pins the same)"
+        }
+      ],
+      "mavenUrl": "https://maven.ithundxr.dev/snapshots",
+      "status": "available",
+      "notes": "Registrate: same artifact id, MC1.21 version line on maven.ithundxr.dev/snapshots"
+    },
+    {
+      "forgePrefix": "cc.tweaked:cc-tweaked",
+      "modrinthSlug": "cc-tweaked",
+      "neoforgeCoords": [
+        {
+          "config": "compileOnly",
+          "coord": "cc.tweaked:cc-tweaked-1.21.1-core-api:1.116.1"
+        },
+        {
+          "config": "compileOnly",
+          "coord": "cc.tweaked:cc-tweaked-1.21.1-forge-api:1.116.1"
+        },
+        {
+          "config": "runtimeOnly",
+          "coord": "cc.tweaked:cc-tweaked-1.21.1-forge:1.116.1"
+        }
+      ],
+      "mavenUrl": "https://maven.squiddev.cc",
+      "status": "available",
+      "notes": "CC: Tweaked: 1.21.1 core-api, forge-api and forge (NeoForge) jars on maven.squiddev.cc",
+      "packagePrefixes": [
+        "dan200.computercraft."
+      ],
+      "versionProperties": [
+        {
+          "name": "cc_tweaked_version",
+          "value": "1.116.1",
+          "notes": "CC: Tweaked 1.116.1 for 1.21.1 on maven.squiddev.cc; its NeoForge build keeps the -forge artifact names (Create 6 pins the same)"
+        }
+      ]
+    },
+    {
+      "forgePrefix": "cc.tweaked",
+      "modrinthSlug": "cc-tweaked",
+      "packagePrefixes": [
+        "dan200.computercraft."
+      ],
+      "neoforgeCoords": [
+        {
+          "config": "compileOnly",
+          "coord": "cc.tweaked:cc-tweaked-1.21.1-core-api:1.116.1"
+        },
+        {
+          "config": "compileOnly",
+          "coord": "cc.tweaked:cc-tweaked-1.21.1-forge-api:1.116.1"
+        },
+        {
+          "config": "runtimeOnly",
+          "coord": "cc.tweaked:cc-tweaked-1.21.1-forge:1.116.1"
+        }
+      ],
+      "versionProperties": [
+        {
+          "name": "cc_tweaked_version",
+          "value": "1.116.1",
+          "notes": "CC: Tweaked 1.116.1 for 1.21.1 on maven.squiddev.cc; its NeoForge build keeps the -forge artifact names (Create 6 pins the same)"
+        }
+      ],
+      "mavenUrl": "https://maven.squiddev.cc",
+      "status": "available",
+      "notes": "CC: Tweaked: 1.21.1 core-api, forge-api and forge (NeoForge) jars on maven.squiddev.cc"
+    },
+    {
       "forgePrefix": "dev.architectury:architectury-forge",
       "modrinthSlug": "architectury-api",
+      "packagePrefixes": [
+        "dev.architectury."
+      ],
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "dev.architectury:architectury-neoforge:13.0.8" }
+        {
+          "config": "compileOnly",
+          "coord": "dev.architectury:architectury-neoforge:13.0.6",
+          "transitive": false
+        }
       ],
       "mavenUrl": "https://maven.architectury.dev",
-      "status": "replacement",
+      "status": "compile_only_compat",
+      "notes": "Architectury API 13.0.x for NeoForge 1.21.1 on maven.architectury.dev; compile-only integration surface",
       "replacementFor": "dev.architectury:architectury-forge",
-      "replacementPolicy": "official-loader-artifact-rename",
-      "notes": "Architectury publishes a loader-specific NeoForge 1.21.1 artifact"
+      "replacementPolicy": "official-loader-artifact-rename"
     },
     {
       "forgePrefix": "dev.ftb.mods:ftb-chunks-forge",
       "modrinthSlug": "ftb-chunks",
+      "packagePrefixes": [
+        "dev.ftb.mods.ftbchunks."
+      ],
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "dev.ftb.mods:ftb-chunks-neoforge:2101.1.1" }
+        {
+          "config": "compileOnly",
+          "coord": "dev.ftb.mods:ftb-chunks-neoforge:2101.1.1",
+          "transitive": false
+        }
       ],
       "mavenUrl": "https://maven.ftb.dev/releases",
-      "status": "replacement",
+      "status": "compile_only_compat",
+      "notes": "FTB Chunks 2101.1.x for NeoForge 1.21.1 on maven.ftb.dev; non-transitive so KubeJS and friends are not pulled in for a compile-only surface",
       "replacementFor": "dev.ftb.mods:ftb-chunks-forge",
-      "replacementPolicy": "official-loader-artifact-rename",
-      "notes": "FTB Chunks publishes a loader-specific NeoForge 1.21.1 artifact"
+      "replacementPolicy": "official-loader-artifact-rename"
     },
     {
       "forgePrefix": "dev.ftb.mods:ftb-teams-forge",
       "modrinthSlug": "ftb-teams",
+      "packagePrefixes": [
+        "dev.ftb.mods.ftbteams."
+      ],
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "dev.ftb.mods:ftb-teams-neoforge:2101.1.0" }
+        {
+          "config": "compileOnly",
+          "coord": "dev.ftb.mods:ftb-teams-neoforge:2101.1.0",
+          "transitive": false
+        }
       ],
       "mavenUrl": "https://maven.ftb.dev/releases",
-      "status": "replacement",
+      "status": "compile_only_compat",
+      "notes": "FTB Teams 2101.1.x for NeoForge 1.21.1 on maven.ftb.dev; compile-only: the mod is provided at runtime by the pack",
       "replacementFor": "dev.ftb.mods:ftb-teams-forge",
-      "replacementPolicy": "official-loader-artifact-rename",
-      "notes": "FTB Teams publishes a loader-specific NeoForge 1.21.1 artifact"
+      "replacementPolicy": "official-loader-artifact-rename"
     },
     {
       "forgePrefix": "dev.ftb.mods:ftb-library-forge",
       "modrinthSlug": "ftb-library",
+      "packagePrefixes": [
+        "dev.ftb.mods.ftblibrary."
+      ],
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "dev.ftb.mods:ftb-library-neoforge:2101.1.3" }
+        {
+          "config": "compileOnly",
+          "coord": "dev.ftb.mods:ftb-library-neoforge:2101.1.3",
+          "transitive": false
+        }
       ],
       "mavenUrl": "https://maven.ftb.dev/releases",
-      "status": "replacement",
+      "status": "compile_only_compat",
+      "notes": "FTB Library 2101.1.x for NeoForge 1.21.1 on maven.ftb.dev; compile-only: the mod is provided at runtime by the pack",
       "replacementFor": "dev.ftb.mods:ftb-library-forge",
-      "replacementPolicy": "official-loader-artifact-rename",
-      "notes": "FTB Library publishes a loader-specific NeoForge 1.21.1 artifact"
+      "replacementPolicy": "official-loader-artifact-rename"
     },
     {
       "forgePrefix": "curse.maven:playeranimator-658587",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "runtimeOnly", "coord": "maven.modrinth:playeranimator:2.0.4+1.21.1-forge" }
+        {
+          "config": "runtimeOnly",
+          "coord": "maven.modrinth:playeranimator:2.0.4+1.21.1-forge"
+        }
       ],
       "mavenUrl": "https://api.modrinth.com/maven",
       "status": "replacement",
@@ -464,7 +778,10 @@
       "forgePrefix": "curse.maven:playeranimator",
       "modrinthSlug": "playeranimator",
       "neoforgeCoords": [
-        { "config": "implementation", "coord": "dev.kosmx.player-anim:player-animation-lib-forge:2.0.1+1.21.1" }
+        {
+          "config": "implementation",
+          "coord": "dev.kosmx.player-anim:player-animation-lib-forge:2.0.1+1.21.1"
+        }
       ],
       "mavenUrl": "https://maven.kosmx.dev",
       "status": "unavailable",
@@ -482,7 +799,10 @@
       "forgePrefix": "vazkii.botania",
       "modrinthSlug": "botania",
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "vazkii.botania:botania-neoforge-1.21.1:452-SNAPSHOT" }
+        {
+          "config": "compileOnly",
+          "coord": "vazkii.botania:botania-neoforge-1.21.1:452-SNAPSHOT"
+        }
       ],
       "mavenUrl": "https://maven.blamejared.com",
       "status": "available",
@@ -503,7 +823,10 @@
         "terrablender."
       ],
       "neoforgeCoords": [
-        { "config": "implementation", "coord": "com.github.glitchfiend:TerraBlender-neoforge:1.21.1-4.1.0.8" }
+        {
+          "config": "implementation",
+          "coord": "com.github.glitchfiend:TerraBlender-neoforge:1.21.1-4.1.0.8"
+        }
       ],
       "versionProperties": [
         {
@@ -523,10 +846,23 @@
         "top.theillusivec4.curios."
       ],
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1:api" },
-        { "config": "compileOnly", "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1" },
-        { "config": "compileOnly", "coord": "net.fabricmc:fabric-loader:0.16.14", "role": "compile-support" },
-        { "config": "runtimeOnly", "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1" }
+        {
+          "config": "compileOnly",
+          "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1:api"
+        },
+        {
+          "config": "compileOnly",
+          "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1"
+        },
+        {
+          "config": "compileOnly",
+          "coord": "net.fabricmc:fabric-loader:0.16.14",
+          "role": "compile-support"
+        },
+        {
+          "config": "runtimeOnly",
+          "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1"
+        }
       ],
       "versionProperties": [
         {
@@ -546,10 +882,23 @@
         "top.theillusivec4.curios."
       ],
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1:api" },
-        { "config": "compileOnly", "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1" },
-        { "config": "compileOnly", "coord": "net.fabricmc:fabric-loader:0.16.14", "role": "compile-support" },
-        { "config": "runtimeOnly", "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1" }
+        {
+          "config": "compileOnly",
+          "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1:api"
+        },
+        {
+          "config": "compileOnly",
+          "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1"
+        },
+        {
+          "config": "compileOnly",
+          "coord": "net.fabricmc:fabric-loader:0.16.14",
+          "role": "compile-support"
+        },
+        {
+          "config": "runtimeOnly",
+          "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1"
+        }
       ],
       "versionProperties": [
         {
@@ -572,8 +921,14 @@
         "com.illusivesoulworks.caelus."
       ],
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "curse.maven:caelus-308989:5694215" },
-        { "config": "runtimeOnly", "coord": "curse.maven:caelus-308989:5694215" }
+        {
+          "config": "compileOnly",
+          "coord": "curse.maven:caelus-308989:5694215"
+        },
+        {
+          "config": "runtimeOnly",
+          "coord": "curse.maven:caelus-308989:5694215"
+        }
       ],
       "mavenUrl": null,
       "status": "available",
@@ -583,7 +938,10 @@
       "forgePrefix": "com.blamejared.crafttweaker",
       "modrinthSlug": "crafttweaker",
       "neoforgeCoords": [
-        { "config": "implementation", "coord": "com.blamejared.crafttweaker:CraftTweaker-neoforge-1.21.1:21.0.38" }
+        {
+          "config": "implementation",
+          "coord": "com.blamejared.crafttweaker:CraftTweaker-neoforge-1.21.1:21.0.38"
+        }
       ],
       "mavenUrl": "https://maven.blamejared.com",
       "status": "available",

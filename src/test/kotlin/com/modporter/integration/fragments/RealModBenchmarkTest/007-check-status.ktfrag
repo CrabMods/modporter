@@ -1,0 +1,523 @@
+    enum class CheckStatus { PASS, FAIL, NOT_RUN }
+
+    companion object {
+        private const val CLIENT_SMOKE_WORLD = "modporter_smoke_world"
+
+        private val BENCHMARK_EMPTY_GAMETEST_STRUCTURE_SNBT = """
+{
+  DataVersion: 3953,
+  size: [1, 1, 1],
+  entities: [],
+  blocks: [],
+  palette: []
+}
+""".trimIndent()
+
+        private fun clientWorldHarnessSource(harnessPackage: String): String = """
+            package $harnessPackage;
+
+            import java.util.ArrayList;
+            import java.util.HashSet;
+            import java.util.List;
+            import java.util.Locale;
+            import java.util.Set;
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.client.gui.components.Button;
+            import net.minecraft.client.gui.components.events.GuiEventListener;
+            import net.minecraft.client.gui.screens.Screen;
+            import net.minecraft.client.gui.screens.TitleScreen;
+            import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.CreativeModeTab;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.neoforge.client.gui.CreativeTabsScreenPage;
+            import net.neoforged.neoforge.client.event.ClientTickEvent;
+            import net.neoforged.neoforge.common.CreativeModeTabRegistry;
+
+            @EventBusSubscriber(value = Dist.CLIENT)
+            public final class ModPorterClientWorldHarness {
+                private static boolean attempted;
+                private static int ticks;
+                private static int titleTicks;
+                private static int confirmTicks;
+                private static String lastWaitingScreen = "";
+                private static BrowseState browseState = BrowseState.WAITING_FOR_WORLD;
+                private static List<CreativeModeTab> targetTabs = List.of();
+                private static int targetTabIndex;
+                private static int browseRow;
+                private static Set<Integer> expectedItems = Set.of();
+                private static Set<Integer> observedItems = Set.of();
+                private static Set<Integer> stableMenuItems = Set.of();
+                private static int stableMenuTicks;
+                private static int browsePass;
+                private static String currentTabName = "";
+                private static boolean strictSpawnWaitLogged;
+
+                private enum BrowseState {
+                    WAITING_FOR_WORLD,
+                    OPEN_SCREEN,
+                    DISCOVER_TABS,
+                    SELECT_TAB,
+                    BROWSE_TAB,
+                    COMPLETE,
+                    FAILED
+                }
+
+                private ModPorterClientWorldHarness() {
+                }
+
+                @SubscribeEvent
+                public static void onClientTick(ClientTickEvent.Post event) {
+                    String world = System.getProperty("modporter.benchmark.clientWorld");
+                    if (world == null || world.isBlank()) {
+                        return;
+                    }
+
+                    Minecraft minecraft = Minecraft.getInstance();
+                    if (minecraft.level != null && minecraft.player != null && minecraft.gameMode != null) {
+                        runCreativeInventoryBrowse(minecraft);
+                        return;
+                    }
+
+                    ticks++;
+                    Screen screen = minecraft.screen;
+                    if (screen == null) {
+                        return;
+                    }
+
+                    if (!attempted) {
+                        if (dismissInitialScreen(screen)) {
+                            return;
+                        }
+
+                        if (confirmBlockingScreen(screen)) {
+                            return;
+                        }
+
+                        if (!(screen instanceof TitleScreen)) {
+                            logWaitingScreen(screen, "Waiting for TitleScreen before opening world");
+                            return;
+                        }
+
+                        titleTicks++;
+                        if (titleTicks < 20) {
+                            return;
+                        }
+
+                        attempted = true;
+                        minecraft.execute(() -> {
+                            try {
+                                Screen currentScreen = minecraft.screen;
+                                String screenName = currentScreen == null ? "<none>" : currentScreen.getClass().getName();
+                                System.out.println("[ModPorterBenchmark] Opening client smoke world from screen " + screenName + ": " + world);
+                                minecraft.createWorldOpenFlows().openWorld(world, () -> {});
+                            } catch (Throwable throwable) {
+                                System.err.println("[ModPorterBenchmark] Failed to request client smoke world load");
+                                throwable.printStackTrace();
+                            }
+                        });
+                        return;
+                    }
+
+                    autoConfirm(screen);
+                }
+
+                private static void runCreativeInventoryBrowse(Minecraft minecraft) {
+                    if (browseState == BrowseState.COMPLETE || browseState == BrowseState.FAILED) {
+                        stopAfterStrictSpawn(minecraft);
+                        return;
+                    }
+
+                    if (!minecraft.gameMode.hasInfiniteItems()) {
+                        fail("client smoke world is not in creative mode; gameMode=" + minecraft.gameMode.getPlayerMode());
+                        return;
+                    }
+
+                    if (browseState == BrowseState.WAITING_FOR_WORLD) {
+                        ticks++;
+                        if (ticks < 40) {
+                            return;
+                        }
+                        browseState = BrowseState.OPEN_SCREEN;
+                    }
+
+                    if (browseState == BrowseState.OPEN_SCREEN) {
+                        if (!(minecraft.screen instanceof CreativeModeInventoryScreen)) {
+                            System.out.println("[ModPorterBenchmark] Opening creative inventory screen");
+                            minecraft.setScreen(new CreativeModeInventoryScreen(
+                                minecraft.player,
+                                minecraft.player.connection.enabledFeatures(),
+                                minecraft.options.operatorItemsTab().get()
+                            ));
+                            return;
+                        }
+                        browseState = BrowseState.DISCOVER_TABS;
+                    }
+
+                    if (!(minecraft.screen instanceof CreativeModeInventoryScreen screen)) {
+                        return;
+                    }
+
+                    if (browseState == BrowseState.DISCOVER_TABS) {
+                        String modId = System.getProperty("modporter.benchmark.modId", "").trim();
+                        if (modId.isEmpty()) {
+                            fail("missing modporter.benchmark.modId system property");
+                            return;
+                        }
+
+                        targetTabs = CreativeModeTabRegistry.getSortedCreativeModeTabs().stream()
+                            .filter(CreativeModeTab::hasAnyItems)
+                            .filter(tab -> tabContainsNamespace(tab, modId))
+                            .toList();
+                        if (targetTabs.isEmpty()) {
+                            // a mod without items of its own (WorldEdit's wand is the vanilla axe) has no tab to browse
+                            boolean registersItems = net.minecraft.core.registries.BuiltInRegistries.ITEM.keySet().stream()
+                                .anyMatch(key -> key.getNamespace().equals(modId));
+                            if (!registersItems) {
+                                browseState = BrowseState.COMPLETE;
+                                System.out.println("[ModPorterBenchmark] Creative tab browse complete: tabs=0 (no items registered in namespace " + modId + ")");
+                            System.setProperty("modporter.benchmark.clientBrowse.completed", "true");
+                                stopAfterStrictSpawn(minecraft);
+                                return;
+                            }
+                            fail("no non-empty creative tabs found containing item namespace '" + modId + "'");
+                            return;
+                        }
+
+                        System.out.println("[ModPorterBenchmark] Found " + targetTabs.size() + " creative tab(s) containing item namespace " + modId);
+                        targetTabIndex = 0;
+                        browseState = BrowseState.SELECT_TAB;
+                    }
+
+                    if (browseState == BrowseState.SELECT_TAB) {
+                        CreativeModeTab tab = targetTabs.get(targetTabIndex);
+                        if (!selectCreativeTab(screen, tab)) {
+                            return;
+                        }
+                        observedItems = new HashSet<>();
+                        expectedItems = Set.of();
+                        stableMenuItems = Set.of();
+                        stableMenuTicks = 0;
+                        browseRow = 0;
+                        browsePass = 0;
+                        browseState = BrowseState.BROWSE_TAB;
+                        return;
+                    }
+
+                    if (browseState == BrowseState.BROWSE_TAB) {
+                        browseSelectedTab(minecraft, screen);
+                    }
+                }
+
+                private static boolean selectCreativeTab(CreativeModeInventoryScreen screen, CreativeModeTab tab) {
+                    List<CreativeModeTab> sortedTabs = CreativeModeTabRegistry.getSortedCreativeModeTabs().stream()
+                        .filter(CreativeModeTab::hasAnyItems)
+                        .toList();
+                    int tabIndex = sortedTabs.indexOf(tab);
+                    if (tabIndex < 0) {
+                        fail("target creative tab disappeared before selection: " + describeTab(tab));
+                        return false;
+                    }
+
+                    int pageStart = (tabIndex / 10) * 10;
+                    int pageEnd = Math.min(pageStart + 10, sortedTabs.size());
+                    CreativeTabsScreenPage page = new CreativeTabsScreenPage(new ArrayList<>(sortedTabs.subList(pageStart, pageEnd)));
+                    screen.setCurrentPage(page);
+
+                    currentTabName = describeTab(tab);
+                    int tabX = tab.isAlignedRight() ? screen.getXSize() - 27 * (7 - page.getColumn(tab)) + 1 : 27 * page.getColumn(tab);
+                    int tabY = page.isTop(tab) ? -32 : screen.getYSize();
+                    double mouseX = screen.getGuiLeft() + tabX + 13.0D;
+                    double mouseY = screen.getGuiTop() + tabY + 16.0D;
+                    screen.mouseReleased(mouseX, mouseY, 0);
+                    System.out.println("[ModPorterBenchmark] Selected creative tab " + currentTabName + " with " + tab.getDisplayItems().size() + " item stack(s)");
+                    return true;
+                }
+
+                private static boolean tabContainsNamespace(CreativeModeTab tab, String namespace) {
+                    ResourceLocation tabName = CreativeModeTabRegistry.getName(tab);
+                    if (tabName != null && namespace.equals(tabName.getNamespace())) {
+                        return true;
+                    }
+                    for (ItemStack stack : tab.getDisplayItems()) {
+                        if (stack.isEmpty()) {
+                            continue;
+                        }
+                        ResourceLocation itemName = BuiltInRegistries.ITEM.getKey(stack.getItem());
+                        if (itemName != null && namespace.equals(itemName.getNamespace())) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+
+                private static void browseSelectedTab(Minecraft minecraft, CreativeModeInventoryScreen screen) {
+                    CreativeModeInventoryScreen.ItemPickerMenu menu = screen.getMenu();
+                    if (expectedItems.isEmpty()) {
+                        Set<Integer> currentItems = itemKeys(menu.items);
+                        if (currentItems.isEmpty()) {
+                            fail("creative tab has no displayed menu items after selection: " + currentTabName);
+                            return;
+                        }
+                        if (!currentItems.equals(stableMenuItems)) {
+                            stableMenuItems = currentItems;
+                            stableMenuTicks = 0;
+                            return;
+                        }
+                        stableMenuTicks++;
+                        if (stableMenuTicks < 2) {
+                            return;
+                        }
+                        expectedItems = itemKeys(menu.items);
+                    }
+                    int totalRows = Math.max(1, (menu.items.size() + 8) / 9);
+                    int maxRow = Math.max(0, totalRows - 5);
+                    if (browseRow <= maxRow) {
+                        float scroll = maxRow == 0 ? 0.0F : (float) browseRow / (float) maxRow;
+                        menu.scrollTo(scroll);
+                        observeMenuItems(menu, browseRow);
+                        if (browseRow == 0 || browseRow == maxRow || browseRow % 5 == 0) {
+                            System.out.println("[ModPorterBenchmark] Browsed creative tab " + currentTabName + " row " + browseRow + "/" + maxRow);
+                        }
+                        browseRow++;
+                        return;
+                    }
+
+                    if (!observedItems.containsAll(expectedItems)) {
+                        Set<Integer> missing = new HashSet<>(expectedItems);
+                        missing.removeAll(observedItems);
+                        if (browsePass == 0) {
+                            browsePass++;
+                            browseRow = 0;
+                            System.out.println("[ModPorterBenchmark] Creative tab browse retry: " + currentTabName + " missed " + missing.size() + " item stack(s) on pass 1");
+                            return;
+                        }
+                        fail("creative tab browse missed " + missing.size() + " item stack(s) in " + currentTabName);
+                        return;
+                    }
+
+                    System.out.println("[ModPorterBenchmark] Creative tab verified: " + currentTabName + " items=" + expectedItems.size() + " passes=" + (browsePass + 1));
+                    targetTabIndex++;
+                    if (targetTabIndex >= targetTabs.size()) {
+                        browseState = BrowseState.COMPLETE;
+                        System.out.println("[ModPorterBenchmark] Creative tab browse complete: tabs=" + targetTabs.size());
+                        System.setProperty("modporter.benchmark.clientBrowse.completed", "true");
+                        stopAfterStrictSpawn(minecraft);
+                    } else {
+                        browseState = BrowseState.SELECT_TAB;
+                    }
+                }
+
+                private static void observeMenuItems(CreativeModeInventoryScreen.ItemPickerMenu menu, int firstRow) {
+                    for (int slot = 0; slot < Math.min(45, menu.slots.size()); slot++) {
+                        observeStack(menu.getSlot(slot).getItem());
+                    }
+
+                    int firstIndex = Math.max(0, firstRow * 9);
+                    int lastIndex = Math.min(menu.items.size(), firstIndex + 45);
+                    for (int index = firstIndex; index < lastIndex; index++) {
+                        observeStack(menu.items.get(index));
+                    }
+                }
+
+                private static void observeStack(ItemStack stack) {
+                    if (!stack.isEmpty()) {
+                        observedItems.add(ItemStack.hashItemAndComponents(stack));
+                    }
+                }
+
+                private static Set<Integer> itemKeys(Iterable<ItemStack> stacks) {
+                    Set<Integer> keys = new HashSet<>();
+                    for (ItemStack stack : stacks) {
+                        if (!stack.isEmpty()) {
+                            keys.add(ItemStack.hashItemAndComponents(stack));
+                        }
+                    }
+                    return keys;
+                }
+
+                private static String describeTab(CreativeModeTab tab) {
+                    ResourceLocation name = CreativeModeTabRegistry.getName(tab);
+                    return name == null ? tab.getDisplayName().getString() : name.toString();
+                }
+
+                private static void fail(String message) {
+                    if (browseState == BrowseState.FAILED) {
+                        return;
+                    }
+                    browseState = BrowseState.FAILED;
+                    System.err.println("[ModPorterBenchmark] Creative tab browse failed: " + message);
+                    stopAfterStrictSpawn(Minecraft.getInstance());
+                }
+
+                private static void stopAfterStrictSpawn(Minecraft minecraft) {
+                    if (Boolean.getBoolean("modporter.clientWorldValidation.enabled")
+                        && !Boolean.getBoolean("modporter.clientWorldValidation.completed")) {
+                        if (!strictSpawnWaitLogged) {
+                            strictSpawnWaitLogged = true;
+                            System.out.println("[ModPorterBenchmark] Waiting for client-world coordinator before client exit");
+                        }
+                        return;
+                    }
+                    if (Boolean.getBoolean("modporter.strictSpawn.enabled")
+                        && !Boolean.getBoolean("modporter.strictSpawn.completed")) {
+                        if (!strictSpawnWaitLogged) {
+                            strictSpawnWaitLogged = true;
+                            System.out.println("[ModPorterBenchmark] Waiting for strict spawn receipt before client exit");
+                        }
+                        return;
+                    }
+                    minecraft.stop();
+                }
+
+                private static boolean dismissInitialScreen(Screen screen) {
+                    String screenName = screen.getClass().getName();
+                    if ("net.minecraft.client.gui.screens.AccessibilityOnboardingScreen".equals(screenName)) {
+                        logWaitingScreen(screen, "Closing first-run accessibility onboarding");
+                        screen.onClose();
+                        return true;
+                    }
+                    return false;
+                }
+
+                private static void autoConfirm(Screen screen) {
+                    confirmTicks++;
+                    if (confirmTicks % 20 != 1) {
+                        return;
+                    }
+
+                    System.out.println("[ModPorterBenchmark] Client world load screen: " + screen.getClass().getName());
+                    Button button = selectProceedButton(screen);
+                    if (button != null) {
+                        press(button);
+                    }
+                }
+
+                private static boolean confirmBlockingScreen(Screen screen) {
+                    String screenName = screen.getClass().getName();
+                    if (!"net.minecraft.client.gui.screens.BackupConfirmScreen".equals(screenName)) {
+                        return false;
+                    }
+
+                    confirmTicks++;
+                    if (confirmTicks % 20 != 1) {
+                        return true;
+                    }
+
+                    logWaitingScreen(screen, "Confirming backup/experimental world screen");
+                    Button button = selectProceedButton(screen);
+                    if (button != null) {
+                        press(button);
+                    }
+                    return true;
+                }
+
+                private static Button selectProceedButton(Screen screen) {
+                    java.util.List<Button> buttons = new java.util.ArrayList<>();
+                    for (GuiEventListener child : screen.children()) {
+                        if (child instanceof Button button && button.active) {
+                            buttons.add(button);
+                        }
+                    }
+                    if (buttons.isEmpty()) {
+                        return null;
+                    }
+
+                    String screenName = screen.getClass().getName();
+                    if ("net.minecraft.client.gui.screens.BackupConfirmScreen".equals(screenName)) {
+                        for (Button button : buttons) {
+                            String message = normalized(button);
+                            if (message.contains("i know") || message.contains("skip") || message.contains("proceed")) {
+                                return button;
+                            }
+                        }
+                        return buttons.size() > 1 ? buttons.get(1) : buttons.get(0);
+                    }
+
+                    for (Button button : buttons) {
+                        String message = normalized(button);
+                        if (message.contains("cancel") || message.contains("backup")) {
+                            continue;
+                        }
+                        if (message.contains("continue") || message.contains("done") || message.contains("proceed") ||
+                            message.contains("yes") || message.contains("load") || message.contains("play")) {
+                            return button;
+                        }
+                    }
+
+                    for (Button button : buttons) {
+                        String message = normalized(button);
+                        if (!message.contains("cancel") && !message.contains("backup")) {
+                            return button;
+                        }
+                    }
+                    return null;
+                }
+
+                private static String normalized(Button button) {
+                    return button.getMessage().getString().toLowerCase(Locale.ROOT);
+                }
+
+                private static void press(Button button) {
+                    System.out.println("[ModPorterBenchmark] Auto-confirming client world load screen via button: " + button.getMessage().getString());
+                    button.onPress();
+                }
+
+                private static void logWaitingScreen(Screen screen, String message) {
+                    String screenName = screen.getClass().getName();
+                    if (!screenName.equals(lastWaitingScreen) || ticks % 100 == 0) {
+                        lastWaitingScreen = screenName;
+                        System.out.println("[ModPorterBenchmark] " + message + "; current screen: " + screenName);
+                    }
+                }
+            }
+        """.trimIndent() + "\n"
+
+        private val clientStartChecks = listOf(
+            RuntimeMarkerCheck("client resources loaded", listOf(Regex("""Reloading ResourceManager"""))),
+            RuntimeMarkerCheck("client audio initialized", listOf(Regex("""OpenAL initialized"""))),
+            RuntimeMarkerCheck("client sound engine started", listOf(Regex("""Sound engine started""")))
+        )
+
+        private val runtimeFatalPatterns = listOf(
+            Regex("""\[[^\]]*/(?:ERROR|FATAL)]"""),
+            Regex("""---- Minecraft Crash Report ----"""),
+            Regex("""Crash report saved"""),
+            Regex("""Failed to start the minecraft server"""),
+            Regex("""Failed to start Minecraft server"""),
+            Regex("""Starting integrated server"""),
+            Regex("""ModLoadingException"""),
+            Regex("""Mod loading has failed"""),
+            Regex("""has failed to load correctly"""),
+            Regex("""encountered an error while dispatching"""),
+            Regex("""Exception caught during firing event"""),
+            Regex("""\[ModPorterBenchmark] Failed to request client smoke world load"""),
+            Regex("""\[ModPorterBenchmark] Creative tab browse failed:""")
+        )
+
+        private val runtimeWarningPatterns = listOf(
+            Regex("""\[[^\]]*/WARN]"""),
+            Regex("""^WARN\s""")
+        )
+
+        private val allowedRuntimeLogFragments = listOf(
+            "Advanced terminal features are not available in this environment",
+            "[minecraft/Commands]: Ambiguity between arguments",
+            "could not be read. If this is a development environment you can ignore this message",
+            "Assets URL 'union:",
+            "Failed to process update information",
+            "Class version 65 required is higher than the class version supported by the current version of Mixin",
+            "Missing sound for event: minecraft:item.goat_horn.play",
+            "Missing sound for event: minecraft:entity.goat.screaming.horn_break",
+            "Shader rendertype_entity_translucent_emissive could not find sampler named Sampler2",
+            "[mojang/YggdrasilMinecraftSessionService]: Couldn't look up profile properties",
+            "Deprecated Gradle features were used in this build",
+            "You can use '--warning-mode all'",
+            "For more on this, please refer to https://docs.gradle.org/"
+        )
+    }
+}

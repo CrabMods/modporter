@@ -1,6 +1,7 @@
 package com.modporter.core.transforms.build
 
 import com.modporter.core.pipeline.*
+import com.modporter.core.transforms.structural.FinalCapabilityCompatMigration
 import com.modporter.core.transforms.shared.HolderLookupProviderPropagationMigration
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
@@ -28,10 +29,13 @@ private val logger = KotlinLogging.logger {}
  */
 class BuildSystemPass(
     val offlineMode: Boolean = true,
-    val mappingsPrefix: String = "/mappings/forge2neo"
+    val mappingsPrefix: String = "/mappings/forge2neo",
+    private val dependencyResolverFactory: (offlineMode: Boolean, mappingsPrefix: String) -> DependencyResolver =
+        { offline, prefix -> DependencyResolver(offlineMode = offline, mappingsPrefix = prefix) }
 ) : Pass {
     override val name = "Build System"
     override val order = 4
+    override val migratesBuildRoot = true
 
     private val targetNeoForgeVersion = "21.1.230"
     private val reflectionFieldMappings: List<ReflectionFieldMapping> by lazy(::loadReflectionFieldMappings)
@@ -39,18 +43,207 @@ class BuildSystemPass(
         ::loadAccessTransformerMemberMappings
     )
 
+    /** Java package prefixes of dependencies removed from this project's build (no 1.21.1 artifact). */
+    private val removedDependencyPackages = linkedSetOf<String>()
+
     override fun analyze(projectDir: Path): PassResult = processBuildFiles(projectDir, dryRun = true)
     override fun apply(projectDir: Path): PassResult = processBuildFiles(projectDir, dryRun = false)
 
-    private fun processBuildFiles(projectDir: Path, dryRun: Boolean): PassResult {
+    /**
+     * Prepares a producer-owned target stage for dependency resolution without running the
+     * unrelated Java migrations, reflection rewrites, or runtime hard gates of the normal pass.
+     * Resolved source components come from the producer's source graph; build declarations alone
+     * are not accepted as proof of source-closure identity.
+     */
+    internal fun prepareDependencies(
+        ownedStagedProject: Path,
+        sourceDependencies: List<BuildResolvedSourceDependency>
+    ): BuildDependencyPreparationReceipt {
+        val projectDir = requireOwnedDependencyStage(ownedStagedProject)
+        require(sourceDependencies.isNotEmpty()) {
+            "Dependency preparation requires the resolved source dependency graph"
+        }
+        require(sourceDependencies.distinct().size == sourceDependencies.size) {
+            "Resolved source dependency inputs contain duplicates"
+        }
+        val beforeBuild = snapshotBuildFiles(projectDir)
+        val beforeResources = snapshotResourceFiles(projectDir)
+        val beforeSource = snapshotSourceFiles(projectDir)
+        val catalog = dependencyCatalog()
+        val decisions = dependencyDecisions(sourceDependencies, catalog)
+        val context = DependencyOnlyContext()
+        val result = processBuildFiles(projectDir, dryRun = false, dependencyOnly = context)
+        require(result.errors.isEmpty()) {
+            "Dependency-only BuildSystem preparation failed: ${result.errors.joinToString()}"
+        }
+        val afterBuild = snapshotBuildFiles(projectDir)
+        val afterResources = snapshotResourceFiles(projectDir)
+        val afterSource = snapshotSourceFiles(projectDir)
+        val changedSource = fileTransitions(beforeSource, afterSource)
+        val stubSources = context.stubResults.flatMap(RemovedDependencyStubResult::sources)
+        val stubHashes = stubSources.associate {
+            it.path to (it.beforeSourceSha256 to it.afterSourceSha256)
+        }
+        require(stubHashes.size == stubSources.size) {
+            "A source file was rewritten by more than one removed-dependency stub pass"
+        }
+        require(changedSource.associate {
+            it.path to (it.beforeSha256 to it.afterSha256)
+        } == stubHashes) {
+            "Dependency-only preparation changed source outside receipt-bound dependency stubs"
+        }
+
+        val removals = decisions.filter {
+            it.kind == BuildDependencyDecisionKind.REMOVE
+        }.mapNotNull { decision ->
+            val decisionPrefixes = decision.packagePrefixes.map { it.trimEnd('.') }.toSet()
+            val sources = stubSources.filter { source ->
+                source.packagePrefixes.any { it.trimEnd('.') in decisionPrefixes }
+            }
+            if (sources.isEmpty()) return@mapNotNull null
+            require(sources.all { source ->
+                source.packagePrefixes.all { it.trimEnd('.') in decisionPrefixes }
+            }) {
+                "A removed-dependency source file mixes package ownership across decisions"
+            }
+            val remaining = findRemovedPackageReferences(projectDir, decision.packagePrefixes)
+            require(remaining.isEmpty()) {
+                "Removed dependency still has project source references: $remaining"
+            }
+            BuildRemovedDependencyReceipt(
+                sourceComponent = decision.source.component,
+                sourceArtifactSha256 = decision.source.artifactSha256,
+                decisionSha256 = decision.sha256,
+                packagePrefixes = decision.packagePrefixes,
+                changedSourceHashes = sources.associate {
+                    it.path to (it.beforeSourceSha256 to it.afterSourceSha256)
+                },
+                inertRewrites = sources.flatMap(RemovedDependencySourceReceipt::inertRewrites),
+                remainingRemovedPackageReferences = remaining
+            )
+        }
+        val removalSourcePaths = removals.flatMap { it.changedSourceHashes.keys }
+        require(removalSourcePaths.size == removalSourcePaths.distinct().size &&
+            removalSourcePaths.toSet() == stubHashes.keys
+        ) {
+            "Every strict dependency stub must belong to exactly one source-graph removal decision"
+        }
+        return BuildDependencyPreparationReceipt(
+            result = result,
+            mappingResourceSha256 = catalog.resourceSha256,
+            decisions = decisions,
+            removals = removals,
+            buildFilesBefore = beforeBuild,
+            buildFilesAfter = afterBuild,
+            resourceFilesBefore = beforeResources,
+            resourceFilesAfter = afterResources,
+            sourceFilesBefore = beforeSource,
+            sourceFilesAfter = afterSource,
+            changedBuildFiles = fileTransitions(beforeBuild, afterBuild),
+            changedResourceFiles = fileTransitions(beforeResources, afterResources),
+            changedSourceFiles = changedSource
+        )
+    }
+
+    private fun processBuildFiles(
+        projectDir: Path,
+        dryRun: Boolean,
+        dependencyOnly: DependencyOnlyContext? = null
+    ): PassResult {
+        val result = processBuildFilesBeforeRuntime(projectDir, dryRun, dependencyOnly)
+        if (dependencyOnly != null || result.errors.isNotEmpty()) return result
+        val normalized = try {
+            val capabilities = FinalCapabilityCompatMigration.migrate(projectDir, dryRun)
+            result.copy(
+                changes = result.changes + capabilities.changes,
+                errors = result.errors + capabilities.gates
+            )
+        } catch (e: Exception) {
+            result.copy(errors = result.errors + "Final capability compatibility migration error: ${e.message}")
+        }
+        if (normalized.errors.isNotEmpty()) return normalized
+        return try {
+            normalized.copy(changes = normalized.changes + BuildSystemLegacyPlantCompat.install(projectDir, dryRun))
+        } catch (e: Exception) {
+            normalized.copy(errors = normalized.errors + "Failed to install shared legacy plant runtime: ${e.message}")
+        }
+    }
+
+    private fun processBuildFilesBeforeRuntime(
+        projectDir: Path,
+        dryRun: Boolean,
+        dependencyOnly: DependencyOnlyContext?
+    ): PassResult {
+        val moduleDir = GradleModLayout.modModule(projectDir)
+        if (moduleDir == projectDir) {
+            return processModuleBuildFiles(
+                projectDir,
+                dryRun,
+                standalone = true,
+                dependencyOnly = dependencyOnly
+            )
+        }
+        // A multi-project build: the mod module is migrated like a project of its own, the root keeps
+        // the settings, plugin classpath (buildSrc) and wrapper every module builds with.
+        val module = processModuleBuildFiles(
+            moduleDir,
+            dryRun,
+            standalone = false,
+            dependencyOnly = dependencyOnly
+        )
+        val changes = module.changes.toMutableList()
+        val errors = module.errors.toMutableList()
+        for (settingsFile in listOf("settings.gradle", "settings.gradle.kts")) {
+            val path = projectDir.resolve(settingsFile)
+            if (!path.exists()) continue
+            try {
+                val result = transformSettingsGradle(path, dryRun)
+                changes.addAll(result.first)
+                errors.addAll(result.second)
+            } catch (e: Exception) {
+                errors.add("Failed to transform $settingsFile: ${e.message}")
+            }
+        }
+        updateGradleWrapper(projectDir, dryRun, changes)
+        if (dependencyOnly == null) {
+            try {
+                changes.addAll(BuildSrcPlugins.migrate(projectDir, dryRun))
+            } catch (e: Exception) {
+                errors.add("Failed to migrate buildSrc plugins: ${e.message}")
+            }
+        }
+        val gradleProperties = projectDir.resolve("gradle.properties")
+        if (gradleProperties.exists()) {
+            try {
+                val result = transformGradleProperties(gradleProperties, dryRun)
+                changes.addAll(result.first)
+                errors.addAll(result.second)
+            } catch (e: Exception) {
+                errors.add("Failed to transform gradle.properties: ${e.message}")
+            }
+        }
+        return PassResult(name, changes, errors, module.skipped)
+    }
+
+    private fun processModuleBuildFiles(
+        projectDir: Path,
+        dryRun: Boolean,
+        standalone: Boolean,
+        dependencyOnly: DependencyOnlyContext?
+    ): PassResult {
         val changes = mutableListOf<Change>()
         val errors = mutableListOf<String>()
+        removedDependencyPackages.clear()
 
         // Handle build.gradle (Groovy)
         val buildGradle = projectDir.resolve("build.gradle")
         if (buildGradle.exists()) {
             try {
-                val result = transformBuildGradle(buildGradle, dryRun)
+                val result = transformBuildGradle(
+                    buildGradle,
+                    dryRun,
+                    dependencyOnly = dependencyOnly != null
+                )
                 changes.addAll(result.first)
                 errors.addAll(result.second)
             } catch (e: Exception) {
@@ -60,9 +253,19 @@ class BuildSystemPass(
 
         // Handle build.gradle.kts (Kotlin DSL)
         val buildGradleKts = projectDir.resolve("build.gradle.kts")
-        if (buildGradleKts.exists()) {
+        val kotlinModuleModId = if (!standalone && buildGradleKts.exists() && ForgeGradleKotlinModule.applies(buildGradleKts.readText())) {
+            detectModId(projectDir) ?: declaredModId(projectDir)
+        } else null
+        if (kotlinModuleModId != null) {
+            // a module script of a multi-project build is migrated statement by statement
+            changes.addAll(ForgeGradleKotlinModule.migrate(buildGradleKts, kotlinModuleModId, targetNeoForgeVersion, dryRun))
+        } else if (buildGradleKts.exists()) {
             try {
-                val result = transformBuildGradle(buildGradleKts, dryRun)
+                val result = transformBuildGradle(
+                    buildGradleKts,
+                    dryRun,
+                    dependencyOnly = dependencyOnly != null
+                )
                 changes.addAll(result.first)
                 errors.addAll(result.second)
             } catch (e: Exception) {
@@ -87,7 +290,7 @@ class BuildSystemPass(
         }
         // Create settings.gradle if missing (required for standalone project with plugins { } block)
         val hasBuildFile = buildGradle.exists() || buildGradleKts.exists()
-        if (!hasSettings && hasBuildFile) {
+        if (standalone && !hasSettings && hasBuildFile) {
             val settingsPath = projectDir.resolve("settings.gradle")
             val projectName = projectDir.fileName.toString()
             changes.add(Change(
@@ -103,38 +306,43 @@ class BuildSystemPass(
             }
         }
 
+        updateGradleWrapper(projectDir, dryRun, changes)
+
         try {
             changes.addAll(GradleJavaVersionMigration().migrate(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Failed to migrate Java targets in Gradle build scripts: ${e.message}")
         }
 
-        // Update Gradle wrapper if too old (ModDevGradle 2.x requires Gradle 8.8+).
-        val wrapperProps = projectDir.resolve("gradle/wrapper/gradle-wrapper.properties")
-        if (wrapperProps.exists()) {
-            val wrapperContent = wrapperProps.readText()
-            val versionMatch = Regex("""gradle-(\d+)\.(\d+)""").find(wrapperContent)
-            val majorVersion = versionMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
-            val minorVersion = versionMatch?.groupValues?.get(2)?.toIntOrNull() ?: 0
-            val needsUpdate = majorVersion < 8 || (majorVersion == 8 && minorVersion < 8)
-            if (needsUpdate) {
-                changes.add(Change(
-                    file = wrapperProps, line = 0,
-                    description = "Update Gradle wrapper from $majorVersion.$minorVersion to 8.14.4 (NeoForge ModDev 2.x requires Gradle 8.8+)",
-                    before = "gradle-${majorVersion}.${minorVersion}.x",
-                    after = "gradle-8.14.4",
-                    confidence = Confidence.HIGH,
-                    ruleId = "build-gradle-wrapper"
-                ))
-                if (!dryRun) {
-                    wrapperProps.writeText(
-                        wrapperContent.replace(
-                            Regex("""gradle-[\d.]+-(?:bin|all)\.zip"""),
-                            "gradle-8.14.4-bin.zip"
-                        )
-                    )
+        if (dependencyOnly != null) {
+            try {
+                changes.addAll(migrateAccessTransformers(projectDir, dryRun))
+                changes.addAll(configureAccessTransformers(projectDir, dryRun))
+            } catch (e: Exception) {
+                errors.add("Failed to migrate access transformers: ${e.message}")
+            }
+            try {
+                val stubResult = RemovedDependencyStubs.stubWithReceipts(
+                    projectDir,
+                    removedDependencyPackages,
+                    dryRun
+                )
+                dependencyOnly.stubResults += stubResult
+                changes += stubResult.changes
+            } catch (e: Exception) {
+                errors.add("Failed strict removed-dependency receipt admission: ${e.message}")
+            }
+            val gradleProperties = projectDir.resolve("gradle.properties")
+            if (gradleProperties.exists()) {
+                try {
+                    val result = transformGradleProperties(gradleProperties, dryRun)
+                    changes.addAll(result.first)
+                    errors.addAll(result.second)
+                } catch (e: Exception) {
+                    errors.add("Failed to transform gradle.properties: ${e.message}")
                 }
             }
+            return PassResult(name, changes, errors)
         }
 
         try {
@@ -382,6 +590,12 @@ class BuildSystemPass(
         }
 
         try {
+            changes.addAll(RemovedDependencyStubs.stub(projectDir, removedDependencyPackages, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to stub the bridging classes of removed dependencies: ${e.message}")
+        }
+
+        try {
             changes.addAll(migrateCoremodScripts(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Failed to migrate coremod scripts: ${e.message}")
@@ -394,12 +608,19 @@ class BuildSystemPass(
         }
 
         try {
+            changes.addAll(migrateTestFixtureResources(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to attach test fixture resources: ${e.message}")
+        }
+
+        try {
             changes.addAll(removeMainSourceBuildExcludes(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Failed to remove main source/resource excludes: ${e.message}")
         }
 
         try {
+            changes.addAll(migrateSrgReflectionLiterals(projectDir, dryRun))
             errors.addAll(detectForbiddenReflection(projectDir))
             errors.addAll(ResidualRemovedApiGate.scan(projectDir))
             if (!dryRun) {
@@ -422,6 +643,210 @@ class BuildSystemPass(
         }
 
         return PassResult(name, changes, errors)
+    }
+
+    private data class DependencyOnlyContext(
+        val stubResults: MutableList<RemovedDependencyStubResult> = mutableListOf()
+    )
+
+    private data class DependencyCatalogEntry(
+        val forgePrefix: String,
+        val sha256: String
+    )
+
+    private data class DependencyCatalogSnapshot(
+        val resourceSha256: String,
+        val entries: List<DependencyCatalogEntry>
+    )
+
+    private fun requireOwnedDependencyStage(projectDir: Path): Path {
+        require(projectDir.isDirectory()) {
+            "Dependency preparation stage does not exist: $projectDir"
+        }
+        val real = projectDir.toRealPath()
+        val parts = (0 until real.nameCount).map { real.getName(it).toString() }
+        val ownedIndex = parts.indices.firstOrNull { index ->
+            parts[index] == ".modporter" &&
+                parts.getOrNull(index + 1) == "tmp"
+        } ?: -1
+        require(ownedIndex >= 0 && ownedIndex + 3 < parts.size) {
+            "Dependency preparation may only mutate a producer-owned .modporter/tmp stage: $real"
+        }
+        return real
+    }
+
+    private fun dependencyCatalog(): DependencyCatalogSnapshot {
+        val resource = "${mappingsPrefix.trimEnd('/')}/neoforge-deps.json"
+            .let { if (it.startsWith('/')) it else "/$it" }
+        val bytes = BuildSystemPass::class.java.getResourceAsStream(resource)?.use {
+            it.readBytes()
+        } ?: error("Dependency mapping resource not found: $resource")
+        val root = Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)).jsonObject
+        val entries = root.getValue("dependencies").jsonArray.map { element ->
+            val entry = element.jsonObject
+            DependencyCatalogEntry(
+                forgePrefix = entry.getValue("forgePrefix").jsonPrimitive.content,
+                sha256 = buildReceiptSha256(element.toString())
+            )
+        }
+        require(entries.map(DependencyCatalogEntry::forgePrefix).distinct().size == entries.size) {
+            "Dependency mapping catalog contains duplicate forgePrefix entries"
+        }
+        return DependencyCatalogSnapshot(buildReceiptSha256(bytes), entries)
+    }
+
+    private fun dependencyDecisions(
+        sourceDependencies: List<BuildResolvedSourceDependency>,
+        catalog: DependencyCatalogSnapshot
+    ): List<BuildDependencyDecisionReceipt> {
+        val resolver = DependencyResolver(offlineMode = true, mappingsPrefix = mappingsPrefix)
+        val decisions = sourceDependencies.mapNotNull { source ->
+            val known = resolver.knownDependencyFor(source.group, source.artifact)
+                ?: return@mapNotNull null
+            // Use the same ordered catalog selection as the build rewrite. A specific
+            // artifact mapping may intentionally precede a broader group fallback.
+            val entry = catalog.entries.singleOrNull { it.forgePrefix == known.forgePrefix }
+            require(entry != null) {
+                "Resolved KnownDep has no unique catalog entry: ${source.component}"
+            }
+            if (known.packagePrefixes.isEmpty()) return@mapNotNull null
+            val kind = when (known.status) {
+                "available", "compile_only_compat", "replacement" -> {
+                    require(known.neoforgeCoords.isNotEmpty()) {
+                        "Mapped KnownDep has no target coordinates: ${known.forgePrefix}"
+                    }
+                    BuildDependencyDecisionKind.MAPPED
+                }
+                "remove" -> BuildDependencyDecisionKind.REMOVE
+                "runtime_absent" -> {
+                    val removable = source.configurations.filter {
+                        it in known.removeConfigurations
+                    }.toSet()
+                    if (removable.isEmpty()) return@mapNotNull null
+                    require(removable == source.configurations) {
+                        "Resolved source component mixes removable and retained configurations: " +
+                            source.component
+                    }
+                    BuildDependencyDecisionKind.REMOVE
+                }
+                else -> return@mapNotNull null
+            }
+            BuildDependencyDecisionReceipt(
+                source = source,
+                sourceSelector = known.forgePrefix,
+                kind = kind,
+                targetCoordinates = if (kind == BuildDependencyDecisionKind.MAPPED) {
+                    known.neoforgeCoords.map(BuildTargetCoordinate::from)
+                } else {
+                    emptyList()
+                },
+                packagePrefixes = known.packagePrefixes.distinct(),
+                catalogEntrySha256 = entry.sha256
+            )
+        }
+        val duplicateComponents = decisions.groupBy { it.source.component }
+            .filterValues { it.size != 1 }
+            .keys
+        require(duplicateComponents.isEmpty()) {
+            "Actionable source components have ambiguous resolved variants: $duplicateComponents"
+        }
+        return decisions.sortedBy { it.source.component }
+    }
+
+    private fun snapshotBuildFiles(projectDir: Path): Map<String, String> =
+        snapshotFiles(projectDir) { relative, path ->
+            val name = path.fileName.toString()
+            name.endsWith(".gradle") ||
+                name.endsWith(".gradle.kts") ||
+                name in setOf("gradle.properties", "gradle-wrapper.properties") ||
+                relative == "gradle/libs.versions.toml" ||
+                relative.startsWith("buildSrc/")
+        }
+
+    private fun snapshotSourceFiles(projectDir: Path): Map<String, String> {
+        val sourceRoot = projectDir.resolve("src/main/java")
+        if (!sourceRoot.isDirectory()) return emptyMap()
+        return snapshotFiles(projectDir) { relative, path ->
+            relative.startsWith("src/main/java/") &&
+                path.fileName.toString().endsWith(".java")
+        }
+    }
+
+    private fun snapshotResourceFiles(projectDir: Path): Map<String, String> =
+        snapshotFiles(projectDir) { relative, _ ->
+            relative.startsWith("src/main/resources/") ||
+                relative.contains("/src/main/resources/")
+        }
+
+    private fun snapshotFiles(
+        projectDir: Path,
+        include: (String, Path) -> Boolean
+    ): Map<String, String> {
+        if (!projectDir.isDirectory()) return emptyMap()
+        return Files.walk(projectDir).use { paths ->
+            paths.filter { it.isRegularFile() }
+                .map { path ->
+                    path to path.relativeTo(projectDir).toString().replace('\\', '/')
+                }
+                .filter { (path, relative) -> include(relative, path) }
+                .toList()
+                .sortedBy { it.second }
+                .associate { (path, relative) ->
+                    relative to buildReceiptSha256(path.readBytes())
+                }
+        }
+    }
+
+    private fun findRemovedPackageReferences(
+        projectDir: Path,
+        packagePrefixes: List<String>
+    ): List<String> {
+        val sourceRoot = projectDir.resolve("src/main/java")
+        if (!sourceRoot.isDirectory()) return emptyList()
+        val prefixes = packagePrefixes.map { it.trimEnd('.') }
+        val references = mutableListOf<String>()
+        Files.walk(sourceRoot).use { paths ->
+            paths.filter { it.isRegularFile() && it.fileName.toString().endsWith(".java") }
+                .forEach { file ->
+                    val relative = file.relativeTo(projectDir).toString().replace('\\', '/')
+                    file.readText().lineSequence().forEachIndexed { index, line ->
+                        prefixes.firstOrNull { line.contains(it) }?.let {
+                            references += "$relative:${index + 1} ($it)"
+                        }
+                    }
+                }
+        }
+        return references.sorted()
+    }
+
+    /** Updates a Gradle wrapper older than ModDevGradle 2.x needs (Gradle 8.8+). */
+    private fun updateGradleWrapper(projectDir: Path, dryRun: Boolean, changes: MutableList<Change>) {
+        val wrapperProps = projectDir.resolve("gradle/wrapper/gradle-wrapper.properties")
+        if (wrapperProps.exists()) {
+            val wrapperContent = wrapperProps.readText()
+            val versionMatch = Regex("""gradle-(\d+)\.(\d+)""").find(wrapperContent)
+            val majorVersion = versionMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            val minorVersion = versionMatch?.groupValues?.get(2)?.toIntOrNull() ?: 0
+            val needsUpdate = majorVersion < 8 || (majorVersion == 8 && minorVersion < 8)
+            if (needsUpdate) {
+                changes.add(Change(
+                    file = wrapperProps, line = 0,
+                    description = "Update Gradle wrapper from $majorVersion.$minorVersion to 8.14.4 (NeoForge ModDev 2.x requires Gradle 8.8+)",
+                    before = "gradle-${majorVersion}.${minorVersion}.x",
+                    after = "gradle-8.14.4",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-gradle-wrapper"
+                ))
+                if (!dryRun) {
+                    wrapperProps.writeText(
+                        wrapperContent.replace(
+                            Regex("""gradle-[\d.]+-(?:bin|all)\.zip"""),
+                            "gradle-8.14.4-bin.zip"
+                        )
+                    )
+                }
+            }
+        }
     }
 
     private fun removeMainSourceBuildExcludes(projectDir: Path, dryRun: Boolean): List<Change> {
@@ -486,12 +911,15 @@ class BuildSystemPass(
     }
 
     private fun transformBuildGradle(
-        file: Path, dryRun: Boolean
+        file: Path,
+        dryRun: Boolean,
+        dependencyOnly: Boolean
     ): Pair<List<Change>, List<String>> {
         val changes = mutableListOf<Change>()
         val errors = mutableListOf<String>()
         var content = file.readText()
         val original = content
+        val isKts = file.fileName.toString().endsWith(".kts")
 
         val forgeGradleImportPattern = Regex("""(?m)^[ \t]*import\s+net\.minecraftforge\.gradle\.[^\r\n]+(?:\r?\n)?""")
         val forgeGradleImport = forgeGradleImportPattern.find(content)
@@ -567,6 +995,7 @@ class BuildSystemPass(
                 Regex("""^\s*id\s*\(\s*['"]org\.parchmentmc\.librarian\.forgegradle['"]\s*\)\s*version\s*['"][^'"]+['"]\s*$""", RegexOption.MULTILINE),
                 Regex("""^\s*id\s+['"]org\.spongepowered\.mixin['"]\s*version\s*['"][^'"]+['"]\s*$""", RegexOption.MULTILINE),
                 Regex("""^\s*id\s*\(\s*['"]org\.spongepowered\.mixin['"]\s*\)\s*version\s*['"][^'"]+['"]\s*$""", RegexOption.MULTILINE),
+                Regex("""^[ \t]*apply\s+plugin:\s*['"]org\.spongepowered\.mixin['"][ \t]*$""", RegexOption.MULTILINE),
                 Regex("""^\s*id\s+['"]net\.neoforged\.gradle['"]\s*version\s*['"][^'"]+['"]\s*$""", RegexOption.MULTILINE),
                 Regex("""^\s*id\s*\(\s*['"]net\.neoforged\.gradle['"]\s*\)\s*version\s*['"][^'"]+['"]\s*$""", RegexOption.MULTILINE),
             )
@@ -713,6 +1142,9 @@ class BuildSystemPass(
         content = content.replace("legacyForge.", "neoForge.")
         content = content.replace("legacyForge {", "neoForge {")
 
+        // 4d. Run-scoped mod sources declared outside the minecraft { } block
+        content = migrateTopLevelRunModSources(content, changes, errors, file)
+
         // 5. Replace maven repository URLs
         val forgeRepoPatterns = listOf(
             Pair(
@@ -756,21 +1188,9 @@ class BuildSystemPass(
 
         content = addMavenRepositoryContentFilters(content, file, changes)
 
-        // 6. Update Java toolchain from 17 to 21
-        val java17Pattern = Regex("""JavaLanguageVersion\.of\s*\(\s*17\s*\)""")
-        if (java17Pattern.containsMatchIn(content)) {
-            changes.add(Change(
-                file = file, line = 0,
-                description = "Update Java toolchain from 17 to 21 (NeoForge 1.21.1 requires Java 21)",
-                before = "JavaLanguageVersion.of(17)",
-                after = "JavaLanguageVersion.of(21)",
-                confidence = Confidence.HIGH,
-                ruleId = "build-java-version"
-            ))
-            content = java17Pattern.replace(content, "JavaLanguageVersion.of(21)")
-        }
-
-        // 7. Replace forge version property references (careful not to double-prefix)
+        // 6. Replace forge version property references (careful not to double-prefix).
+        // GradleJavaVersionMigration owns Java target updates for this build and every applied or
+        // subproject script so comments and string literals remain untouched.
         // Handle forge_version_range -> neoforge_version_range first (more specific)
         content = content.replace("forge_version_range", "neoforge_version_range")
         // Then forge_version -> neo_forge_version (avoid matching neo_forge_version again)
@@ -834,38 +1254,60 @@ class BuildSystemPass(
             fgMatch = Regex("""fg\.deobf\(""").find(content)
         }
 
-        // 10a. ForgeGradle contributes mod* dependency configurations; ModDev does not.
-        val forgeModConfigurations = mapOf(
+        // 10a. ForgeGradle contributes mod* dependency configurations; ModDev does not. They also
+        // appear nested inside wrappers (jarJar(modImplementation(...))), so the rename is not
+        // anchored to the start of a line. Run the notation helper over the executable mask so
+        // documentation and string literals stay byte-for-byte unchanged.
+        val executableDependencies = maskJavaCommentsAndLiterals(content)
+        val (_, callConfigurationRenames) =
+            GradleDependencyNotations.renameForgeModConfigurations(executableDependencies)
+        val callConfigurationPattern = Regex(
+            """\b(?:modCompileOnlyApi|modCompileOnly|modRuntimeOnly|modImplementation|modApi)\b(?=\s*\()"""
+        )
+        val callConfigurationMatches = callConfigurationPattern.findAll(executableDependencies).toList()
+        val configurationRenames = callConfigurationRenames.toMutableList()
+        if (callConfigurationMatches.size != callConfigurationRenames.size) {
+            errors += "Cannot safely align ForgeGradle dependency configuration rewrites in $file"
+        } else {
+            for (index in callConfigurationMatches.indices.reversed()) {
+                content = content.replaceRange(
+                    callConfigurationMatches[index].range,
+                    callConfigurationRenames[index].to
+                )
+            }
+        }
+
+        val forgeModConfigurations = linkedMapOf(
+            "modCompileOnlyApi" to "compileOnlyApi",
             "modCompileOnly" to "compileOnly",
             "modRuntimeOnly" to "runtimeOnly",
             "modImplementation" to "implementation",
             "modApi" to "api",
         )
         for ((fromConfig, toConfig) in forgeModConfigurations) {
-            val patterns = listOf(
-                Regex("""\b${Regex.escape(fromConfig)}\b(?=\s*\()"""),
-                Regex("""(?m)^(\s*)${Regex.escape(fromConfig)}\b""")
-            )
-            for (configPattern in patterns) {
-                val matches = configPattern.findAll(maskJavaCommentsAndLiterals(content)).toList()
-                if (matches.isEmpty()) continue
-                for (configMatch in matches.asReversed()) {
-                    val replacement = if (configMatch.groups.size > 1) {
-                        "${configMatch.groupValues[1]}$toConfig"
-                    } else {
-                        toConfig
-                    }
-                    changes.add(Change(
-                        file = file, line = content.lineNumberAt(configMatch.range.first),
-                        description = "Replace ForgeGradle dependency configuration $fromConfig",
-                        before = configMatch.value,
-                        after = replacement,
-                        confidence = Confidence.HIGH,
-                        ruleId = "build-mod-dependency-configuration"
-                    ))
-                    content = content.replaceRange(configMatch.range, replacement)
-                }
+            val executable = maskJavaCommentsAndLiterals(content)
+            val bareStatementPattern = Regex("""(?m)^(\s*)${Regex.escape(fromConfig)}\b(?!\s*\()""")
+            for (match in bareStatementPattern.findAll(executable).toList().asReversed()) {
+                val replacement = "${match.groupValues[1]}$toConfig"
+                configurationRenames += GradleDependencyNotations.ConfigurationRename(
+                    from = fromConfig,
+                    to = toConfig,
+                    line = content.lineNumberAt(match.range.first)
+                )
+                content = content.replaceRange(match.range, replacement)
             }
+        }
+        configurationRenames.groupBy { it.from }.forEach { (fromConfig, renames) ->
+            changes.add(Change(
+                file = file, line = renames.first().line,
+                description = "Replace ForgeGradle dependency configuration $fromConfig",
+                before = fromConfig,
+                after = renames.first().to,
+                confidence = Confidence.HIGH,
+                ruleId = "build-mod-dependency-configuration"
+            ))
+        }
+        for (fromConfig in forgeModConfigurations.keys) {
             if (Regex("""\b${Regex.escape(fromConfig)}\b""")
                     .containsMatchIn(maskJavaCommentsAndLiterals(content))) {
                 errors += "Unmigrated ForgeGradle dependency configuration $fromConfig remains in $file"
@@ -873,10 +1315,34 @@ class BuildSystemPass(
         }
 
         // 10b. Resolve third-party dependencies: check for NeoForge 1.21.1 versions
-        val resolver = DependencyResolver(offlineMode = offlineMode, mappingsPrefix = mappingsPrefix)
+        val resolver = dependencyResolverFactory(offlineMode, mappingsPrefix)
         val resolvedPrefixes = mutableSetOf<String>()
         val newMavenRepos = mutableSetOf<String>()
-        content = resolveDependencies(content, resolver, resolvedPrefixes, newMavenRepos, changes, file)
+        val runtimeArtifactStagings = linkedMapOf<String, RuntimeArtifactStagingPolicy>()
+        validateExistingRuntimeArtifactStaging(content, resolver, isKts)
+        val wrapped = GradleDependencyNotations.rewriteWrappedKnownNotations(content, resolver)
+        wrapped.rewrites.forEach { rewrite ->
+            changes.add(Change(
+                file = file, line = rewrite.line,
+                description = "Move a wrapped or templated dependency notation to its NeoForge artifact",
+                before = rewrite.before,
+                after = rewrite.after,
+                confidence = Confidence.HIGH,
+                ruleId = "build-dependency-wrapped-notation"
+            ))
+        }
+        newMavenRepos.addAll(wrapped.mavenUrls)
+        content = wrapped.content
+        content = resolveDependencies(
+            content,
+            resolver,
+            resolvedPrefixes,
+            newMavenRepos,
+            runtimeArtifactStagings,
+            isKts,
+            changes,
+            file
+        )
         content = addReflectedOptionalApiDependencies(
             content,
             file.parent,
@@ -891,10 +1357,19 @@ class BuildSystemPass(
         if (newMavenRepos.isNotEmpty()) {
             content = addMavenRepositories(content, newMavenRepos, changes, file)
         }
+        if (runtimeArtifactStagings.isNotEmpty()) {
+            content = installRuntimeArtifactStaging(
+                content,
+                runtimeArtifactStagings.values.toList(),
+                isKts,
+                changes,
+                file
+            )
+        }
 
         // 10d. NeoForge bundles Mixin/MixinExtras; old standalone processors can break Mojmap remapping.
         content = removeBundledMixinDependencies(content, changes, file)
-        content = normalizeJarJarRangePinDsl(content, changes, file)
+        content = normalizeJarJarRangePinDsl(content, changes, file, resolver)
 
         // 11. Keep unresolved dependencies active while removing ForgeGradle-only wrappers.
         content = normalizeOldDependencyWrappers(content)
@@ -915,9 +1390,19 @@ class BuildSystemPass(
             ))
             content = prepareGameTestTaskPattern.replace(content, replacement)
         }
-        content = ensureGameTestDimensionDataPackTask(content, file.parent, changes, file)
+        if (!dependencyOnly) {
+            content = ensureGameTestDimensionDataPackTask(content, file.parent, changes, file)
+        }
 
-        // 13. ModDev remaps archive tasks itself; preserve publication semantics while removing ForgeGradle hooks.
+        // 13. ModDev remaps archive tasks itself. Create's project.publishing block already publishes
+        // components.java, so its duplicate reobfJar artifact closure disappears; other publication
+        // blocks keep their authored classifier and are retargeted to the ModDev jar task.
+        val executableReobfuscationDsl = maskJavaCommentsAndLiterals(content)
+        if (executableReobfuscationDsl.contains("project.publishing") &&
+            executableReobfuscationDsl.contains("artifactId base.archivesName.get()") &&
+            executableReobfuscationDsl.contains("from components.java")) {
+            content = removeReobfArtifactBlocks(content)
+        }
         content = migrateForgeGradleReobfuscationDsl(content, changes, errors, file)
 
         // 14. Replace old property references in build.gradle body
@@ -930,15 +1415,10 @@ class BuildSystemPass(
         // 15. Remove MixinConfigs from jar manifest
         content = content.replace(Regex("""^\s*"MixinConfigs"\s*:.*$""", RegexOption.MULTILINE), "")
 
-        // 16. Deduplicate sourceSets.main.resources blocks
-        val srcSetPattern = Regex("""sourceSets\.main\.resources\s*\{[^}]*\}\s*\n?""")
-        val srcSetMatches = srcSetPattern.findAll(content).toList()
-        if (srcSetMatches.size > 1) {
-            // Keep only the first occurrence
-            for (m in srcSetMatches.drop(1).reversed()) {
-                content = content.removeRange(m.range)
-            }
-        }
+        // 16. The replacement neoForge block contributes the generated-resource directory for
+        // simple Forge projects. Preserve an authored nested sourceSets.main { resources { ... } }
+        // declaration instead of registering the same directory twice with processResources.
+        content = deduplicateGeneratedResourceSourceDirs(content)
 
         // 17. Update processResources filesMatching to use neoforge.mods.toml
         val modsTomlPattern = Regex("""META-INF/mods\.toml""")
@@ -963,6 +1443,36 @@ class BuildSystemPass(
         }
 
         return changes to errors
+    }
+
+    private fun deduplicateGeneratedResourceSourceDirs(content: String): String {
+        val generatedSrcDirPattern = Regex(
+            """srcDir\s*(?:\(\s*)?(['"])src/generated/resources/?\1\s*\)?"""
+        )
+        val declarations = generatedSrcDirPattern.findAll(content).toList()
+        if (declarations.size <= 1) return content
+
+        val simpleTopLevelBlocks = Regex(
+            """(?ms)^[ \t]*sourceSets\.main\.resources\s*\{\s*""" +
+                generatedSrcDirPattern.pattern +
+                """\s*\}\s*"""
+        ).findAll(content).toList()
+        if (simpleTopLevelBlocks.isEmpty()) return content
+
+        val hasAuthoredDeclarationOutsideSimpleBlocks = declarations.any { declaration ->
+            simpleTopLevelBlocks.none { declaration.range.first in it.range }
+        }
+        val blocksToRemove = if (hasAuthoredDeclarationOutsideSimpleBlocks) {
+            simpleTopLevelBlocks
+        } else {
+            simpleTopLevelBlocks.drop(1)
+        }
+
+        var result = content
+        for (block in blocksToRemove.asReversed()) {
+            result = result.removeRange(block.range)
+        }
+        return result
     }
 
     private fun migrateForgeGradleReobfuscationDsl(
@@ -4162,13 +4672,60 @@ public interface $invokerName {
         return "$modId.modporter.mixins.json"
     }
 
+    /**
+     * `src/testFixtures/resources` is Gradle's test-fixtures source set location. Mods that keep their
+     * game tests in the main source set (excluded from the jar) put the data packs those tests read
+     * there (ShowerCore: Hot Bath's example fluids, documented in its README as regression fixtures),
+     * so the run configurations load that tree with the mod while the jar stays without it.
+     */
+    private fun migrateTestFixtureResources(projectDir: Path, dryRun: Boolean): List<Change> {
+        val fixtures = projectDir.resolve("src/testFixtures/resources")
+        if (!fixtures.isDirectory()) return emptyList()
+        val hasFiles = java.nio.file.Files.walk(fixtures).use { paths -> paths.anyMatch { it.isRegularFile() } }
+        if (!hasFiles) return emptyList()
+        val buildFile = projectDir.resolve("build.gradle").takeIf { it.exists() } ?: return emptyList()
+        val original = buildFile.readText()
+        if (Regex("""\btestFixtures\b""").containsMatchIn(original) || original.contains("java-test-fixtures")) return emptyList()
+        if (!original.contains("neoForge {")) return emptyList()
+        val newline = if (original.contains("\r\n")) "\r\n" else "\n"
+        val block = """
+
+// Gradle test-fixture resources: the data packs the game tests read (kept out of the jar, loaded with the mod in every run)
+sourceSets {
+    testFixtures {
+        resources.setSrcDirs(['src/testFixtures/resources'])
+    }
+}
+neoForge {
+    mods {
+        "${'$'}{project.mod_id}" {
+            sourceSet(sourceSets.testFixtures)
+        }
+    }
+}
+""".trimEnd().replace("\n", newline)
+        val modified = original.trimEnd() + block + newline
+        if (!dryRun) buildFile.writeText(modified)
+        return listOf(Change(
+            file = buildFile,
+            line = original.lines().size,
+            description = "Load src/testFixtures/resources with the mod in the run configurations",
+            before = "src/testFixtures/resources not on any run classpath",
+            after = "sourceSets.testFixtures resources attached to neoForge.mods",
+            confidence = Confidence.HIGH,
+            ruleId = "build-test-fixture-resources"
+        ))
+    }
+
     private fun registerExistingMixinConfigs(projectDir: Path, dryRun: Boolean): List<Change> {
         val resourcesDir = projectDir.resolve("src/main/resources")
         if (!resourcesDir.exists()) return emptyList()
 
         val configNames = java.nio.file.Files.walk(resourcesDir).use { paths ->
             paths
-                .filter { it.isRegularFile() && it.fileName.toString().endsWith(".mixins.json") }
+                // Forge MDK projects name the config mixins.<modid>.json (ShowerCore) as often as <modid>.mixins.json;
+                // the content check below decides, the name only narrows the walk
+                .filter { it.isRegularFile() && it.fileName.toString().let { name -> name.endsWith(".json") && name.contains("mixin", ignoreCase = true) } }
                 .map { mixinConfig ->
                     val source = mixinConfig.readText()
                     val isConfig = Regex(""""package"\s*:\s*"[^"]+"""").containsMatchIn(source) &&
@@ -4246,30 +4803,6 @@ config="$configName"
             )
         }
     }
-
-    private fun containsJavaIdentifier(source: String, identifier: String): Boolean {
-        var index = source.indexOf(identifier)
-        while (index >= 0) {
-            val before = source.getOrNull(index - 1)
-            val after = source.getOrNull(index + identifier.length)
-            if ((before == null || !Character.isJavaIdentifierPart(before)) &&
-                (after == null || !Character.isJavaIdentifierPart(after))) {
-                return true
-            }
-            index = source.indexOf(identifier, index + identifier.length)
-        }
-        return false
-    }
-
-    private fun hasTickEventImportLine(executableSource: String): Boolean =
-        executableSource.lineSequence().any { line ->
-            when (line.trim()) {
-                "import net.minecraftforge.event.TickEvent;",
-                "import net.neoforged.neoforge.event.TickEvent;",
-                "import net.neoforged.neoforge.event.tick.TickEvent;" -> true
-                else -> false
-            }
-        }
 
     private fun migrateRemovedTitleScreenAccessors(projectDir: Path, dryRun: Boolean): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")
@@ -4486,6 +5019,17 @@ config="$configName"
         for ((originalLine, line) in normalizedLines) {
             if (line != originalLine) {
                 lineChanged = true
+            }
+            if (line.isEmpty() && normalizeAccessTransformerEntry(originalLine) != null) {
+                changes.add(Change(
+                    file = atFile,
+                    line = original.lines().indexOf(originalLine) + 1,
+                    description = "Drop an access transformer whose target no longer exists on NeoForge 1.21.1",
+                    before = originalLine.trim(),
+                    after = "",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-access-transformer-missing-target"
+                ))
             }
             val entry = normalizeAccessTransformerEntry(line)
             if (entry != null) {
@@ -4714,8 +5258,12 @@ config="$configName"
                 "public net.minecraft.client.renderer.entity.player.PlayerRenderer renderHand(Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;ILnet/minecraft/client/player/AbstractClientPlayer;Lnet/minecraft/client/model/geom/ModelPart;Lnet/minecraft/client/model/geom/ModelPart;)V"
             else -> entry
         }
-        val finalized = finalizeAccessTransformerEntry(migrated) ?: return ""
-        if (finalized == entry && migrated == entry) return line
+        // Entries outside the explicit legacy table resolve through the MCPConfig + Mojang mapping
+        // table; an SRG id without a Mojang name on that owner is left for target validation.
+        val resolved = if (migrated == entry)
+            com.modporter.mapping.SrgMemberNames.migrateAccessTransformerEntry(entry) ?: entry else migrated
+        val finalized = finalizeAccessTransformerEntry(resolved) ?: return ""
+        if (finalized == entry && resolved == entry) return line
 
         val comment = line.substringAfter("#", "").trim()
         return if (comment.isNotEmpty()) "$finalized # $comment" else finalized
@@ -4786,23 +5334,8 @@ config="$configName"
                 "net.minecraft.world.level.storage.loot.LootTable shuffleAndSplitItems(Lit/unimi/dsi/fastutil/objects/ObjectArrayList;ILnet/minecraft/util/RandomSource;)V"
             )
 
-        return if (shouldDropMigratedAccessTransformerEntry(descriptorAdjusted)) null else descriptorAdjusted
+        return if (AccessTransformerTargets.exists(descriptorAdjusted) == false) AccessTransformerTargets.relocated(descriptorAdjusted) else descriptorAdjusted
     }
-
-    private fun shouldDropMigratedAccessTransformerEntry(entry: String): Boolean =
-            entry.contains("net.minecraft.world.entity.Mob maybeDisableShield(") ||
-            entry.contains("net.minecraft.world.level.block.state.BlockBehaviour material") ||
-            entry.contains("net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator defaultBlock") ||
-            entry.contains("net.minecraft.world.level.chunk.ChunkGenerator getPlacementsForStructure(") ||
-            entry.contains("net.minecraft.client.resources.model.ModelBakery UNREFERENCED_TEXTURES") ||
-            entry.contains("net.minecraft.world.item.crafting.SimpleCookingSerializer\$CookieBaker") ||
-            entry.contains("net.minecraft.client.gui.screens.TitleScreen\$WarningLabel") ||
-            entry.contains("net.minecraft.world.entity.LivingEntity getDeathSound()") ||
-            entry.contains("net.minecraft.world.entity.decoration.HangingEntity setDirection(") ||
-            entry.contains("net.minecraft.world.entity.vehicle.Boat\$Type <init>(") ||
-            entry.contains("net.neoforged.neoforge.client.event.EntityRenderersEvent\$AddLayers renderers") ||
-            entry.contains("net.minecraft.client.renderer.WeatherEffectRenderer rainSoundTime") ||
-            entry.contains("net.minecraft.village.PointOfInterestType func_221052_a(")
 
     private fun normalizeAccessTransformerEntry(line: String): String? {
         val withoutComment = line.substringBefore("#").trim()
@@ -4821,6 +5354,9 @@ config="$configName"
         javaFiles
             .forEach { javaFile ->
                 val source = javaFile.readText()
+                if (source.contains("nextTickTimeNanos") && Regex("""\.nextTickTimeNanos\s*=""").containsMatchIn(maskJavaCommentsAndLiterals(source))) {
+                    entries.add("public net.minecraft.server.MinecraftServer nextTickTimeNanos")
+                }
                 if (containsGoalSelectorAvailableGoalsAccess(source)) {
                     entries.add("public net.minecraft.world.entity.ai.goal.GoalSelector availableGoals")
                 }
@@ -5426,25 +5962,302 @@ $insertion}
         return changes
     }
 
+    /**
+     * Reflection that names a Forge 1.20.1 SRG member id (`"f_91078_"`) runs against Mojang names
+     * on NeoForge, so the literal becomes the Mojang member the MCPConfig + Mojang mapping table
+     * declares on that owner, when the 1.21.1 class table still has that member. Ids without a
+     * mapping or without a surviving member stay for the hard gate below.
+     */
+    private fun migrateSrgReflectionLiterals(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val changes = mutableListOf<Change>()
+        val importPattern = Regex("""(?m)^\s*import\s+(?:static\s+)?([\w.]+)\.(\w+)\s*;""")
+        val wildcardImportPattern = Regex("""(?m)^\s*import\s+([\w.]+)\.\*\s*;""")
+        val packagePattern = Regex("""(?m)^\s*package\s+([\w.]+)\s*;""")
+        val calls = listOf(
+            Regex("""\b([A-Za-z_][\w.]*)\.class\s*\.\s*(?:getDeclaredField|getField)\s*\(\s*"([fm]_\d+_)"""") to "field",
+            Regex("""\b([A-Za-z_][\w.]*)\.class\s*\.\s*(?:getDeclaredMethod|getMethod)\s*\(\s*"([fm]_\d+_)"""") to "method",
+            Regex("""\bObfuscationReflectionHelper\s*\.\s*(?:findField|getPrivateValue|setPrivateValue)\s*\(\s*([A-Za-z_][\w.]*)\.class\s*,(?:[^;"]*,)?\s*"([fm]_\d+_)"""") to "field",
+            Regex("""\bObfuscationReflectionHelper\s*\.\s*findMethod\s*\(\s*([A-Za-z_][\w.]*)\.class\s*,\s*"([fm]_\d+_)"""") to "method"
+        )
+        java.nio.file.Files.walk(srcDir).use { paths ->
+            paths.filter { it.toString().endsWith(".java") }.forEach { javaFile ->
+                val raw = javaFile.readText()
+                if (!Regex("""["'][fm]_\d+_["']""").containsMatchIn(raw)) return@forEach
+                val imports = importPattern.findAll(raw).associate { it.groupValues[2] to "${it.groupValues[1]}.${it.groupValues[2]}" }
+                val wildcardImports = wildcardImportPattern.findAll(raw).map { it.groupValues[1] }.toList()
+                val packageName = packagePattern.find(raw)?.groupValues?.get(1)
+                val edits = mutableListOf<Triple<IntRange, String, String>>()
+                for ((pattern, kind) in calls) {
+                    for (match in pattern.findAll(raw)) {
+                        val owner = resolveReflectedOwner(match.groupValues[1], imports, wildcardImports, packageName) ?: continue
+                        val srg = match.groupValues[2]
+                        val mojang = if (kind == "field") com.modporter.mapping.SrgMemberNames.field(owner, srg)
+                            else com.modporter.mapping.SrgMemberNames.method(owner, srg)
+                        if (mojang == null) continue
+                        val survives = com.modporter.mapping.TargetMembers.hasClass(owner) &&
+                            (if (kind == "field") com.modporter.mapping.TargetMembers.hasField(owner, mojang)
+                            else com.modporter.mapping.TargetMembers.hasMethod(owner, mojang))
+                        if (!survives) continue
+                        edits += Triple(match.groups[2]!!.range, srg, "$owner#$mojang")
+                    }
+                }
+                if (edits.isEmpty()) return@forEach
+                var modified = raw
+                edits.sortedByDescending { it.first.first }.forEach { (range, _, target) ->
+                    modified = modified.replaceRange(range, target.substringAfter('#'))
+                }
+                if (!dryRun) javaFile.writeText(modified)
+                edits.forEach { (range, srg, target) ->
+                    changes.add(Change(
+                        file = javaFile,
+                        line = raw.lineNumberAt(range.first),
+                        description = "Reflect the Mojang member name instead of the Forge SRG id",
+                        before = "\"$srg\"",
+                        after = "\"${target.substringAfter('#')}\" ($target)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-srg-reflection-names"
+                    ))
+                }
+            }
+        }
+        return changes
+    }
+
+    private fun removeReobfArtifactBlocks(content: String): String {
+        var result = content
+        val artifact = Regex("""(?m)^[ \t]*artifact\s*\(\s*(?:tasks\.)?reobfJar\s*\)\s*\{""")
+        while (true) {
+            val match = artifact.find(result) ?: break
+            val openBrace = result.indexOf('{', match.range.first)
+            val closeBrace = findMatchingBrace(result, openBrace)
+            if (closeBrace <= openBrace) break
+            var end = closeBrace + 1
+            while (end < result.length && (result[end] == ' ' || result[end] == '\t')) end++
+            if (end < result.length && result[end] == '\r') end++
+            if (end < result.length && result[end] == '\n') end++
+            result = result.removeRange(match.range.first, end)
+        }
+        return result
+    }
+
     private fun detectForbiddenReflection(projectDir: Path): List<String> {
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return emptyList()
 
+        // Reflection is ordinary Java and survives the port unchanged. What cannot survive are
+        // Forge 1.20.1 SRG member ids (runtime names on NeoForge are the Mojang names), Forge
+        // class names, and members that no longer exist on the NeoForge 1.21.1 classes. The last
+        // check is made against the real target class table, not a hand-written list.
+        val memberCalls = listOf(
+            Regex("""\b([A-Za-z_][\w.]*)\.class\s*\.\s*(?:getDeclaredField|getField)\s*\(""") to "field",
+            Regex("""\b([A-Za-z_][\w.]*)\.class\s*\.\s*(?:getDeclaredMethod|getMethod)\s*\(""") to "method",
+            Regex("""\bObfuscationReflectionHelper\s*\.\s*(?:findField|getPrivateValue|setPrivateValue)\s*\(\s*([A-Za-z_][\w.]*)\.class\s*,""") to "field",
+            Regex("""\bObfuscationReflectionHelper\s*\.\s*findMethod\s*\(\s*([A-Za-z_][\w.]*)\.class\s*,""") to "method",
+            Regex("""\b(Class)\s*\.\s*forName\s*\(""") to "class"
+        )
+        val importPattern = Regex("""(?m)^\s*import\s+(?:static\s+)?([\w.]+)\.(\w+)\s*;""")
+        val wildcardImportPattern = Regex("""(?m)^\s*import\s+([\w.]+)\.\*\s*;""")
+        val packagePattern = Regex("""(?m)^\s*package\s+([\w.]+)\s*;""")
         val errors = mutableListOf<String>()
         java.nio.file.Files.walk(srcDir)
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
+                val raw = javaFile.readText()
                 val code = maskJavaCommentsAndLiterals(javaFile.readText())
+                val relative = projectDir.relativize(javaFile).toString().replace('\\', '/')
+                val imports = importPattern.findAll(raw).associate { it.groupValues[2] to "${it.groupValues[1]}.${it.groupValues[2]}" }
+                val wildcardImports = wildcardImportPattern.findAll(raw).map { it.groupValues[1] }.toList()
+                val packageName = packagePattern.find(raw)?.groupValues?.get(1)
+                var offset = 0
                 code.lines().forEachIndexed { index, line ->
-                    for ((label, pattern) in LegacyReflectionSyntax.forbiddenPatterns) {
-                        if (pattern.containsMatchIn(line)) {
-                            val relative = projectDir.relativize(javaFile).toString().replace('\\', '/')
-                            errors.add("Forbidden reflection in $relative:${index + 1}: $label")
+                    val lineNumber = index + 1
+                    val lineStart = code.indexOf(line, offset).coerceAtLeast(offset)
+                    val lineEnd = raw.indexOf('\n', lineStart).let { if (it < 0) raw.length else it }
+                    val permittedLegacyRanges = mutableMapOf<String, MutableList<IntRange>>()
+                    for ((pattern, kind) in memberCalls) {
+                        for (match in pattern.findAll(line)) {
+                            val literalStart = raw.indexOf('"', lineStart + match.range.last)
+                            val literalEnd = if (literalStart >= 0) raw.indexOf('"', literalStart + 1) else -1
+                            if (literalStart < 0 || literalEnd < 0 || literalStart >= lineEnd) continue
+                            val member = raw.substring(literalStart + 1, literalEnd)
+                            if (kind == "class") {
+                                if (member.startsWith("net.minecraftforge.")) {
+                                    errors.add("Forbidden reflection in $relative:$lineNumber: Forge class name literal $member")
+                                }
+                                continue
+                            }
+                            if (com.modporter.mapping.SrgMemberNames.isSrgName(member)) {
+                                errors.add("Forbidden reflection in $relative:$lineNumber: unmapped Forge SRG member id $member")
+                                continue
+                            }
+                            val owner = resolveReflectedOwner(match.groupValues[1], imports, wildcardImports, packageName)
+                                ?: continue
+                            if (!com.modporter.mapping.TargetMembers.isPlatformClass(owner)) {
+                                if (kind == "field" && !match.value.contains("ObfuscationReflectionHelper")) {
+                                    val label = if (match.value.contains("getDeclaredField")) {
+                                        "getDeclaredField"
+                                    } else {
+                                        "getField"
+                                    }
+                                    permittedLegacyRanges.getOrPut(label) { mutableListOf() }.add(match.range)
+                                }
+                                continue
+                            }
+                            val exists = when {
+                                !com.modporter.mapping.TargetMembers.hasClass(owner) -> false
+                                kind == "field" -> com.modporter.mapping.TargetMembers.hasField(owner, member)
+                                else -> com.modporter.mapping.TargetMembers.hasMethod(owner, member)
+                            }
+                            if (!exists) {
+                                errors.add("Forbidden reflection in $relative:$lineNumber: $owner#$member does not exist on NeoForge 1.21.1")
+                            } else {
+                                val labels = when {
+                                    match.value.contains("ObfuscationReflectionHelper") ->
+                                        listOf("ObfuscationReflectionHelper")
+                                    kind == "field" && match.value.contains("getDeclaredField") ->
+                                        listOf("getDeclaredField")
+                                    kind == "method" && match.value.contains("getDeclaredMethod") ->
+                                        listOf("getDeclaredMethod")
+                                    kind == "method" -> listOf("getMethod")
+                                    else -> emptyList()
+                                }
+                                labels.forEach { label ->
+                                    permittedLegacyRanges.getOrPut(label) { mutableListOf() }.add(match.range)
+                                }
+                            }
                         }
                     }
+
+                    fun isPermittedLegacyMatch(label: String, range: IntRange): Boolean =
+                        permittedLegacyRanges[label].orEmpty().any { range.first in it }
+
+                    val memberLookupLabels = setOf(
+                        "ObfuscationReflectionHelper",
+                        "getDeclaredField",
+                        "getDeclaredMethod",
+                        "getMethod"
+                    )
+                    val hasForbiddenMemberLookup = LegacyReflectionSyntax.forbiddenPatterns.any { (label, pattern) ->
+                        label in memberLookupLabels &&
+                            pattern.findAll(line).any { !isPermittedLegacyMatch(label, it.range) }
+                    }
+                    val reportedLabels = mutableSetOf<String>()
+                    for ((label, pattern) in LegacyReflectionSyntax.forbiddenPatterns) {
+                        for (match in pattern.findAll(line)) {
+                            val permitted = when (label) {
+                                "ObfuscationReflectionHelper",
+                                "getDeclaredField",
+                                "getDeclaredMethod",
+                                "getMethod" -> isPermittedLegacyMatch(label, match.range)
+                                // Class.forName is valid for optional non-Forge integrations, and
+                                // java.lang.reflect Field remains valid for target members proven above.
+                                "Class.forName",
+                                "java.lang.reflect member access" -> true
+                                // A separate setAccessible call is valid after a proven field lookup.
+                                // Chained access on a forbidden lookup remains a hard-gate diagnostic.
+                                "setAccessible" -> !hasForbiddenMemberLookup
+                                else -> false
+                            }
+                            if (!permitted && reportedLabels.add(label)) {
+                                errors.add("Forbidden reflection in $relative:$lineNumber: $label")
+                            }
+                        }
+                    }
+                    offset = lineStart + line.length
                 }
             }
         return errors
+    }
+
+    private fun resolveReflectedOwner(
+        reference: String,
+        imports: Map<String, String>,
+        wildcardImports: List<String>,
+        packageName: String?
+    ): String? {
+        val parts = reference.split('.')
+        if (parts.any { it.isEmpty() }) return null
+        if (parts.size > 1 && parts[0][0].isLowerCase()) {
+            val classIndex = parts.indexOfFirst { it[0].isUpperCase() }
+            if (classIndex < 0) return null
+            return parts.subList(0, classIndex + 1).joinToString(".") + parts.drop(classIndex + 1).joinToString("") { "$$it" }
+        }
+        val outer = parts[0]
+        val nested = parts.drop(1).joinToString("") { "$$it" }
+        imports[outer]?.let { return it + nested }
+        wildcardImports.map { "$it.$outer" }.firstOrNull { com.modporter.mapping.TargetMembers.hasClass(it) }?.let { return it + nested }
+        return if (packageName != null) "$packageName.$outer$nested" else outer + nested
+    }
+
+    /**
+     * ForgeGradle lets a script add mod sources to a single run with a top-level
+     * `minecraft.runs.<run> { mods { <id> { source <sourceSet> } } }` statement. ModDev declares
+     * mods under `neoForge.mods` and every run loads all declared mods unless `loadedMods` narrows
+     * them, so the other runs keep their original selection explicitly.
+     */
+    private fun migrateTopLevelRunModSources(
+        content: String,
+        changes: MutableList<Change>,
+        errors: MutableList<String>,
+        file: Path
+    ): String {
+        var result = content
+        val statement = Regex("""(?m)^[ \t]*minecraft\s*\.\s*runs\s*\.\s*(\w+)\s*\{""")
+        var searchFrom = 0
+        while (true) {
+            val match = statement.find(result, searchFrom) ?: break
+            val runName = match.groupValues[1]
+            val braceStart = result.indexOf('{', match.range.first)
+            val blockEnd = findMatchingBrace(result, braceStart)
+            if (blockEnd <= braceStart) break
+            val body = result.substring(braceStart + 1, blockEnd)
+            val modsMatch = Regex("""\bmods\s*\{""").find(body)
+            val modsBraceStart = modsMatch?.let { body.indexOf('{', it.range.first) } ?: -1
+            val modsEnd = if (modsBraceStart >= 0) findMatchingBrace(body, modsBraceStart) else -1
+            val remainder = if (modsMatch != null && modsEnd > modsBraceStart)
+                (body.substring(0, modsMatch.range.first) + body.substring(modsEnd + 1)).trim() else body.trim()
+            val entryPattern = Regex("""(\w+)\s*\{\s*source\s+([^\s{}]+)\s*\}""")
+            val modsBody = if (modsMatch != null && modsEnd > modsBraceStart) body.substring(modsBraceStart + 1, modsEnd) else ""
+            val entries = entryPattern.findAll(modsBody).map { it.groupValues[1] to it.groupValues[2] }.toList()
+            val leftover = entryPattern.replace(modsBody, "").trim()
+            if (modsMatch == null || remainder.isNotEmpty() || entries.isEmpty() || leftover.isNotEmpty()) {
+                errors.add("Unsupported top-level run configuration 'minecraft.runs.$runName' in ${file.fileName}:" +
+                    "${result.lineNumberAt(match.range.first)}; only mods { <id> { source <sourceSet> } } entries are migrated")
+                searchFrom = blockEnd + 1
+                continue
+            }
+            val excluded = entries.joinToString(" && ") { "it.name != '${it.first}'" }
+            val replacement = buildString {
+                append("neoForge {\n")
+                append("    mods {\n")
+                entries.forEach { (id, source) ->
+                    append("        $id {\n")
+                    append("            sourceSet($source)\n")
+                    append("        }\n")
+                }
+                append("    }\n")
+                append("    // Only the '$runName' run loaded these mod sources under ForgeGradle.\n")
+                append("    runs.configureEach { run ->\n")
+                append("        if (run.name != '$runName') run.loadedMods.set(neoForge.mods.matching { $excluded })\n")
+                append("    }\n")
+                append("}")
+            }
+            val original = result.substring(match.range.first, blockEnd + 1)
+            changes.add(Change(
+                file = file,
+                line = result.lineNumberAt(match.range.first),
+                description = "Declare run-scoped mod sources through neoForge.mods and loadedMods",
+                before = original.trim(),
+                after = replacement,
+                confidence = Confidence.HIGH,
+                ruleId = "build-run-mod-sources"
+            ))
+            result = result.substring(0, match.range.first) + replacement + result.substring(blockEnd + 1)
+            searchFrom = match.range.first + replacement.length
+        }
+        return result
     }
 
     private fun migrateCoremodScripts(projectDir: Path, dryRun: Boolean): List<Change> {
@@ -5700,6 +6513,22 @@ $body
                 break
             }
         }
+        // Version properties that embed the game version (mod_version=1.20.1-4.2.0) move with it, as the
+        // real ports do (hotBath 1.21.1-4.2.0, ShowerCore 1.21.1-1.2.0); dependents compare these ranges.
+        content = Regex("""(?m)^([A-Za-z_][\w.]*)(\s*=\s*)1\.20(?:\.\d+)?-(\S.*)$""").replace(content) { match ->
+            val name = match.groupValues[1]
+            if (name == "minecraft_version" || name == "minecraft_version_range") return@replace match.value
+            val replacement = "${name}${match.groupValues[2]}1.21.1-${match.groupValues[3]}"
+            changes.add(Change(
+                file = file, line = content.lineNumberAt(match.range.first),
+                description = "Move the game version embedded in $name to the target game version",
+                before = match.value.trim(),
+                after = replacement.trim(),
+                confidence = Confidence.HIGH,
+                ruleId = "build-props-game-version-prefix"
+            ))
+            replacement
+        }
         // Ensure minecraft_version exists
         if (!foundMcVersion && !Regex("""(?m)^minecraft_version\s*=""").containsMatchIn(content)) {
             content += "minecraft_version=1.21.1\n"
@@ -5830,6 +6659,18 @@ $body
     /**
      * Detect a unique concrete mod ID from executable @Mod evidence in Java source files.
      */
+    /** The single mod id the module's mods.toml (or neoforge.mods.toml) declares. */
+    private fun declaredModId(projectDir: Path): String? {
+        val metaInf = projectDir.resolve("src/main/resources/META-INF")
+        val toml = listOf("neoforge.mods.toml", "mods.toml").map { metaInf.resolve(it) }.firstOrNull { it.exists() } ?: return null
+        val active = toml.readText().lineSequence().filterNot { it.trimStart().startsWith("#") }.joinToString("\n")
+        return Regex("""(?m)^\s*modId\s*=\s*"([a-z][a-z0-9_]{1,63})"""").findAll(active)
+            .map { it.groupValues[1] }
+            .filter { it != "minecraft" && it != "forge" && it != "neoforge" }
+            .toSet()
+            .singleOrNull()
+    }
+
     private fun detectModId(projectDir: Path): String? {
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return null
@@ -6309,16 +7150,21 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         resolver: DependencyResolver,
         resolvedPrefixes: MutableSet<String>,
         newMavenRepos: MutableSet<String>,
+        runtimeArtifactStagings: MutableMap<String, RuntimeArtifactStagingPolicy>,
+        isKts: Boolean,
         changes: MutableList<Change>,
         file: Path
     ): String {
-        val depKeywords = listOf("compileOnly", "runtimeOnly", "implementation", "annotationProcessor", "jarJar", "def ")
         val lines = content.lines().toMutableList()
-        val emittedCoords = mutableSetOf<String>() // Track already-emitted NeoForge coords to avoid duplicates
+        // Already-emitted "<config>:<coord>" keys: a Forge build declares the same mod as modCompileOnly
+        // and modRuntimeOnly (a library its runtime needs), and each line resolves to one coordinate in its own
+        // configuration, so the runtime line is a duplicate only when the same configuration (or a
+        // covering implementation/api line) was already written.
+        val emittedCoords = mutableSetOf<String>()
         var i = 0
         while (i < lines.size) {
             val trimmed = lines[i].trim()
-            if (trimmed.startsWith("//") || depKeywords.none { trimmed.startsWith(it) }) {
+            if (trimmed.startsWith("//") || !GradleDependencyNotations.startsDependencyStatement(trimmed)) {
                 i++
                 continue
             }
@@ -6335,25 +7181,49 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 
             val blockText = lines.subList(blockStart, j).joinToString("\n")
 
+            // Top-level jarJar statements belong to the range/pin migration, jarJar-wrapped statements
+            // keep their wrapper and were moved to the target artifact in place, and a notation
+            // already on a NeoForge artifact needs no resolution either
+            if (trimmed.startsWith("jarJar") || blockText.contains("jarJar(") ||
+                GradleDependencyNotations.isOnTargetArtifact(blockText, resolver) ||
+                resolver.isKnownTargetStatement(blockText)
+            ) {
+                i = j
+                continue
+            }
+
             // Try to resolve this dependency
             val resolution = resolver.resolve(blockText)
             if (resolution is DepResolution.Resolved) {
+                resolution.runtimeArtifactStaging?.let { staging ->
+                    val previous = runtimeArtifactStagings.putIfAbsent(staging.id, staging)
+                    require(previous == null || previous == staging) {
+                        "Conflicting runtime artifact staging policies for ${staging.id}"
+                    }
+                }
                 // Skip if already resolved (idempotency: dep already contains a NeoForge coord)
                 val alreadyResolved = resolution.coords.any { blockText.contains(it.coord) }
                 if (alreadyResolved) {
                     resolvedPrefixes.addAll(resolution.coords.map { it.coord.substringBefore(":") })
-                    emittedCoords.addAll(resolution.coords.map { it.coord })
+                    emittedCoords.addAll(resolution.coords.map { emittedDependencyKey(it) })
                     i = j
                     continue
                 }
 
                 // Filter out coords already emitted (e.g., multiple JEI deps -> single resolved set)
-                val newCoords = resolution.coords.filter { it.coord !in emittedCoords }
+                val newCoords = resolution.coords.filter { !isCoveredByEmitted(emittedCoords, it) }
 
                 val indent = lines[blockStart].takeWhile { it == ' ' || it == '\t' }
                 if (newCoords.isNotEmpty()) {
                     // Replace the entire dep block with resolved NeoForge coordinates
-                    val replacementLines = newCoords.map { coord -> renderResolvedDependency(indent, coord) }
+                    val replacementLines = newCoords.map { coord ->
+                        renderResolvedDependency(
+                            indent,
+                            coord,
+                            resolution.runtimeArtifactStaging,
+                            isKts
+                        )
+                    }
                     for (k in (j - 1) downTo blockStart) lines.removeAt(k)
                     for ((idx, line) in replacementLines.withIndex()) {
                         lines.add(blockStart + idx, line)
@@ -6375,10 +7245,11 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 
                 // Track what was resolved
                 resolvedPrefixes.addAll(resolution.coords.map { it.coord.substringBefore(":") })
-                emittedCoords.addAll(resolution.coords.map { it.coord })
+                emittedCoords.addAll(resolution.coords.map { emittedDependencyKey(it) })
                 resolution.coords.mapNotNull { it.mavenRepositoryUrl() }.forEach(newMavenRepos::add)
                 resolution.mavenUrl?.let { newMavenRepos.add(it) }
             } else if (resolution is DepResolution.Remove) {
+                resolver.knownDependencyForStatement(blockText)?.packagePrefixes?.let(removedDependencyPackages::addAll)
                 for (k in (j - 1) downTo blockStart) lines.removeAt(k)
                 changes.add(Change(
                     file = file, line = blockStart + 1,
@@ -6486,6 +7357,383 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         return content.substring(0, insertAt) + insertion + content.substring(insertAt)
     }
 
+    private fun runtimeArtifactVariablePrefix(policy: RuntimeArtifactStagingPolicy): String =
+        "modporter" + policy.id.replaceFirstChar { it.titlecase() }
+
+    private fun validateExistingRuntimeArtifactStaging(
+        content: String,
+        resolver: DependencyResolver,
+        isKts: Boolean
+    ) {
+        val startPattern = Regex(
+            """(?m)^[ \t]*// modporter-runtime-artifact-stage:([a-z][a-z0-9]*):([0-9a-fA-F]{64})[ \t]*$"""
+        )
+        val endPattern = Regex(
+            """(?m)^[ \t]*// modporter-runtime-artifact-stage:end:([a-z][a-z0-9]*)[ \t]*$"""
+        )
+        val starts = startPattern.findAll(content).toList()
+        val ends = endPattern.findAll(content).toList()
+        if (starts.isEmpty() && ends.isEmpty()) return
+
+        val policies = resolver.runtimeArtifactStagingPolicies().associateBy { it.id }
+        require(starts.map { it.groupValues[1] }.sorted() == ends.map { it.groupValues[1] }.sorted()) {
+            "Runtime artifact staging start/end markers do not match"
+        }
+        require(starts.map { it.groupValues[1] }.distinct().size == starts.size) {
+            "Runtime artifact staging contains duplicate managed blocks"
+        }
+
+        for (start in starts) {
+            val id = start.groupValues[1]
+            val policy = policies[id]
+                ?: error("Runtime artifact staging block has no current policy: $id")
+            val matchingEnds = ends.filter { it.groupValues[1] == id }
+            require(matchingEnds.size == 1) {
+                "Runtime artifact staging block must have exactly one end marker: $id"
+            }
+            val end = matchingEnds.single()
+            require(end.range.first > start.range.last) {
+                "Runtime artifact staging end marker precedes its start: $id"
+            }
+
+            val actual = content.substring(start.range.first, end.range.last + 1)
+                .replace("\r\n", "\n")
+            val expected = renderRuntimeArtifactStaging(policy, isKts)
+                .replace("\r\n", "\n")
+            require(actual == expected) {
+                "Runtime artifact staging block drifted from policy: $id"
+            }
+
+            val filesVariable = runtimeArtifactVariablePrefix(policy) + "RuntimeFiles"
+            val stagedDependency = if (isKts) {
+                Regex("""(?m)^[ \t]*runtimeOnly\(\s*${Regex.escape(filesVariable)}\s*\)[ \t]*$""")
+            } else {
+                Regex("""(?m)^[ \t]*runtimeOnly\s+${Regex.escape(filesVariable)}[ \t]*$""")
+            }
+            require(stagedDependency.findAll(content).count() == 1) {
+                "Runtime artifact staging must own exactly one runtimeOnly file dependency: $id"
+            }
+            val directRuntime = Regex(
+                """(?m)^[ \t]*runtimeOnly\s*(?:\(\s*)?["']${Regex.escape(policy.coordinate)}["']"""
+            )
+            require(!directRuntime.containsMatchIn(content)) {
+                "Runtime artifact staging retains a direct runtime coordinate duplicate: $id"
+            }
+        }
+    }
+
+    private fun installRuntimeArtifactStaging(
+        content: String,
+        policies: List<RuntimeArtifactStagingPolicy>,
+        isKts: Boolean,
+        changes: MutableList<Change>,
+        file: Path
+    ): String {
+        require(policies.map { it.id }.distinct().size == policies.size) {
+            "Runtime artifact staging ids must be unique"
+        }
+        val dependencyBlock = Regex("""(?m)^[ \t]*dependencies\s*\{""").find(content)
+            ?: error("Runtime artifact staging requires a dependencies block")
+        val newline = if ("\r\n" in content) "\r\n" else "\n"
+        val blocks = policies.map { policy ->
+            val marker = "modporter-runtime-artifact-stage:${policy.id}:${policy.sha256.lowercase()}"
+            require(marker !in content) {
+                "Runtime artifact staging marker already exists while resolving ${policy.coordinate}"
+            }
+            changes.add(
+                Change(
+                    file = file,
+                    line = content.lineNumberAt(dependencyBlock.range.first),
+                    description = "Stage byte-identical runtime artifact under a URLDecoder-safe path",
+                    before = """runtimeOnly "${policy.coordinate}"""",
+                    after = "runtimeOnly ${runtimeArtifactVariablePrefix(policy)}RuntimeFiles",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-stage-runtime-artifact"
+                )
+            )
+            renderRuntimeArtifactStaging(policy, isKts)
+        }
+        val insertion = blocks.joinToString(newline + newline) + newline + newline
+        return content.substring(0, dependencyBlock.range.first) +
+            insertion +
+            content.substring(dependencyBlock.range.first)
+    }
+
+    private fun renderRuntimeArtifactStaging(
+        policy: RuntimeArtifactStagingPolicy,
+        isKts: Boolean
+    ): String {
+        val prefix = runtimeArtifactVariablePrefix(policy)
+        val taskName = "stageModporter${policy.id.replaceFirstChar { it.titlecase() }}RuntimeArtifact"
+        val sourceConfigurationName = "modporter${policy.id.replaceFirstChar { it.titlecase() }}RuntimeSource"
+        val expectedSha256 = policy.sha256.lowercase()
+        val nestedGroovy = policy.expectedNestedJars.joinToString(",\n") { "                '$it'" }
+        val nestedKotlin = policy.expectedNestedJars.joinToString(",\n") { "                \"$it\"" }
+        return if (isKts) {
+            """
+            // modporter-runtime-artifact-stage:${policy.id}:$expectedSha256
+            val ${prefix}Coordinate = "${policy.coordinate}"
+            val ${prefix}ExpectedSha256 = "$expectedSha256"
+            val ${prefix}ExpectedNestedJars = setOf(
+$nestedKotlin
+            )
+            val ${prefix}RuntimeFileName = "${policy.runtimeFileName}"
+            val ${prefix}RuntimeRoot = layout.buildDirectory.dir(
+                "modporter/runtime-artifacts/${policy.id}/$expectedSha256"
+            )
+            val ${prefix}RuntimeFile = ${prefix}RuntimeRoot.map { it.file(${prefix}RuntimeFileName) }
+            val ${prefix}RuntimeReceipt = ${prefix}RuntimeRoot.map { it.file("receipt.properties") }
+            val ${prefix}RuntimeSource = configurations.create("$sourceConfigurationName") {
+                isCanBeConsumed = false
+                isCanBeResolved = true
+                isTransitive = true
+            }
+            dependencies {
+                add(${prefix}RuntimeSource.name, ${prefix}Coordinate)
+            }
+            fun ${prefix}Sha256(input: java.io.File): String {
+                val digest = java.security.MessageDigest.getInstance("SHA-256")
+                input.inputStream().buffered().use { stream ->
+                    val buffer = ByteArray(8192)
+                    while (true) {
+                        val read = stream.read(buffer)
+                        if (read < 0) break
+                        digest.update(buffer, 0, read)
+                    }
+                }
+                return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+            }
+            val ${prefix}StageTask = tasks.register("$taskName") {
+                inputs.files(${prefix}RuntimeSource)
+                inputs.property("coordinate", ${prefix}Coordinate)
+                inputs.property("expectedSha256", ${prefix}ExpectedSha256)
+                inputs.property("expectedNestedJars", ${prefix}ExpectedNestedJars.sorted())
+                outputs.file(${prefix}RuntimeFile)
+                outputs.file(${prefix}RuntimeReceipt)
+                doLast { task ->
+                    val artifacts = ${prefix}RuntimeSource.resolvedConfiguration.resolvedArtifacts.toList()
+                    if (artifacts.size != 1) {
+                        throw GradleException(
+                            "Expected exactly one artifact and no external dependencies for " +
+                                ${prefix}Coordinate + ", got " + artifacts.size
+                        )
+                    }
+                    val artifact = artifacts.single()
+                    val resolvedCoordinate = artifact.moduleVersion.id.group + ":" +
+                        artifact.name + ":" + artifact.moduleVersion.id.version
+                    if (resolvedCoordinate != ${prefix}Coordinate) {
+                        throw GradleException(
+                            "Resolved unexpected runtime artifact " + resolvedCoordinate +
+                                " for " + ${prefix}Coordinate
+                        )
+                    }
+                    val sourceFile = artifact.file.canonicalFile
+                    val stagedFile = ${prefix}RuntimeFile.get().asFile.canonicalFile
+                    if (sourceFile == stagedFile) {
+                        throw GradleException("Runtime artifact staging source and destination are identical")
+                    }
+                    val stagedPath = stagedFile.toPath().toString()
+                    if ('+' in stagedPath || '%' in stagedPath) {
+                        throw GradleException(
+                            "Runtime artifact staging path is unsafe for URLDecoder-based readers: " + stagedPath
+                        )
+                    }
+                    val sourceSha256 = ${prefix}Sha256(sourceFile)
+                    if (!sourceSha256.equals(${prefix}ExpectedSha256, ignoreCase = true)) {
+                        throw GradleException(
+                            "Runtime artifact source hash mismatch for " + ${prefix}Coordinate +
+                                ": expected " + ${prefix}ExpectedSha256 + ", got " + sourceSha256
+                        )
+                    }
+                    val nestedJars = linkedSetOf<String>()
+                    java.util.jar.JarFile(sourceFile).use { jar ->
+                        val entries = jar.entries()
+                        while (entries.hasMoreElements()) {
+                            val entryName = entries.nextElement().name
+                            if (entryName.startsWith("META-INF/jarjar/") && entryName.endsWith(".jar")) {
+                                nestedJars.add(entryName)
+                            }
+                        }
+                    }
+                    if (nestedJars != ${prefix}ExpectedNestedJars) {
+                        throw GradleException(
+                            "Runtime artifact nested jars changed for " + ${prefix}Coordinate +
+                                ": expected " + ${prefix}ExpectedNestedJars.sorted() +
+                                ", got " + nestedJars.sorted()
+                        )
+                    }
+                    java.nio.file.Files.createDirectories(stagedFile.parentFile.toPath())
+                    java.nio.file.Files.copy(
+                        sourceFile.toPath(),
+                        stagedFile.toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING
+                    )
+                    val stagedSha256 = ${prefix}Sha256(stagedFile)
+                    if (!stagedSha256.equals(sourceSha256, ignoreCase = true) ||
+                        sourceFile.length() != stagedFile.length() ||
+                        java.nio.file.Files.mismatch(sourceFile.toPath(), stagedFile.toPath()) != -1L
+                    ) {
+                        throw GradleException("Runtime artifact staged bytes differ from resolved source")
+                    }
+                    val receiptFile = ${prefix}RuntimeReceipt.get().asFile
+                    java.nio.file.Files.createDirectories(receiptFile.parentFile.toPath())
+                    receiptFile.writeText(
+                        listOf(
+                            "schemaVersion=2",
+                            "projectPath=" + project.path,
+                            "taskPath=" + task.path,
+                            "sourceConfiguration=" + ${prefix}RuntimeSource.name,
+                            "runtimeConfiguration=runtimeOnly",
+                            "coordinate=" + ${prefix}Coordinate,
+                            "sourceSha256=" + sourceSha256,
+                            "stagedSha256=" + stagedSha256,
+                            "byteLength=" + stagedFile.length(),
+                            "runtimeFilename=" + stagedFile.name,
+                            "nestedJars=" + nestedJars.sorted().joinToString(",")
+                        ).joinToString(System.lineSeparator(), postfix = System.lineSeparator()),
+                        Charsets.UTF_8
+                    )
+                }
+            }
+            val ${prefix}RuntimeFiles = files(${prefix}RuntimeFile).apply {
+                builtBy(${prefix}StageTask)
+            }
+            // modporter-runtime-artifact-stage:end:${policy.id}
+            """.trimIndent()
+        } else {
+            """
+            // modporter-runtime-artifact-stage:${policy.id}:$expectedSha256
+            final String ${prefix}Coordinate = '${policy.coordinate}'
+            def ${prefix}ExpectedSha256 = '$expectedSha256'
+            def ${prefix}ExpectedNestedJars = [
+$nestedGroovy
+            ] as Set
+            def ${prefix}RuntimeFileName = '${policy.runtimeFileName}'
+            def ${prefix}RuntimeRoot = layout.buildDirectory.dir(
+                'modporter/runtime-artifacts/${policy.id}/$expectedSha256'
+            )
+            def ${prefix}RuntimeFile = ${prefix}RuntimeRoot.map { it.file(${prefix}RuntimeFileName) }
+            def ${prefix}RuntimeReceipt = ${prefix}RuntimeRoot.map { it.file('receipt.properties') }
+            def ${prefix}RuntimeSource = configurations.create('$sourceConfigurationName') {
+                canBeConsumed = false
+                canBeResolved = true
+                transitive = true
+            }
+            dependencies {
+                add(${prefix}RuntimeSource.name, ${prefix}Coordinate)
+            }
+            def ${prefix}Sha256 = { File input ->
+                def digest = java.security.MessageDigest.getInstance('SHA-256')
+                input.withInputStream { stream ->
+                    byte[] buffer = new byte[8192]
+                    int read
+                    while ((read = stream.read(buffer)) >= 0) {
+                        if (read > 0) {
+                            digest.update(buffer, 0, read)
+                        }
+                    }
+                }
+                digest.digest().collect { String.format('%02x', it & 0xff) }.join()
+            }
+            def ${prefix}StageTask = tasks.register('$taskName') {
+                inputs.files(${prefix}RuntimeSource)
+                inputs.property('coordinate', ${prefix}Coordinate)
+                inputs.property('expectedSha256', ${prefix}ExpectedSha256)
+                inputs.property('expectedNestedJars', ${prefix}ExpectedNestedJars.toList().sort())
+                outputs.file(${prefix}RuntimeFile)
+                outputs.file(${prefix}RuntimeReceipt)
+                doLast { task ->
+                    def artifacts = ${prefix}RuntimeSource.resolvedConfiguration.resolvedArtifacts.toList()
+                    if (artifacts.size() != 1) {
+                        throw new GradleException(
+                            'Expected exactly one artifact and no external dependencies for ' +
+                                ${prefix}Coordinate + ', got ' + artifacts.size()
+                        )
+                    }
+                    def artifact = artifacts[0]
+                    def resolvedCoordinate = artifact.moduleVersion.id.group + ':' +
+                        artifact.name + ':' + artifact.moduleVersion.id.version
+                    if (resolvedCoordinate != ${prefix}Coordinate) {
+                        throw new GradleException(
+                            'Resolved unexpected runtime artifact ' + resolvedCoordinate +
+                                ' for ' + ${prefix}Coordinate
+                        )
+                    }
+                    def sourceFile = artifact.file.canonicalFile
+                    def stagedFile = ${prefix}RuntimeFile.get().asFile.canonicalFile
+                    if (sourceFile == stagedFile) {
+                        throw new GradleException('Runtime artifact staging source and destination are identical')
+                    }
+                    def stagedPath = stagedFile.toPath().toString()
+                    if (stagedPath.contains('+') || stagedPath.contains('%')) {
+                        throw new GradleException(
+                            'Runtime artifact staging path is unsafe for URLDecoder-based readers: ' + stagedPath
+                        )
+                    }
+                    def sourceSha256 = ${prefix}Sha256(sourceFile)
+                    if (!sourceSha256.equalsIgnoreCase(${prefix}ExpectedSha256)) {
+                        throw new GradleException(
+                            'Runtime artifact source hash mismatch for ' + ${prefix}Coordinate +
+                                ': expected ' + ${prefix}ExpectedSha256 + ', got ' + sourceSha256
+                        )
+                    }
+                    def nestedJars = new LinkedHashSet<String>()
+                    def jar = new java.util.jar.JarFile(sourceFile)
+                    try {
+                        def entries = jar.entries()
+                        while (entries.hasMoreElements()) {
+                            def entryName = entries.nextElement().name
+                            if (entryName.startsWith('META-INF/jarjar/') && entryName.endsWith('.jar')) {
+                                nestedJars.add(entryName)
+                            }
+                        }
+                    } finally {
+                        jar.close()
+                    }
+                    if (nestedJars != ${prefix}ExpectedNestedJars) {
+                        throw new GradleException(
+                            'Runtime artifact nested jars changed for ' + ${prefix}Coordinate +
+                                ': expected ' + ${prefix}ExpectedNestedJars.toList().sort() +
+                                ', got ' + nestedJars.toList().sort()
+                        )
+                    }
+                    java.nio.file.Files.createDirectories(stagedFile.parentFile.toPath())
+                    java.nio.file.Files.copy(
+                        sourceFile.toPath(),
+                        stagedFile.toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING
+                    )
+                    def stagedSha256 = ${prefix}Sha256(stagedFile)
+                    if (!stagedSha256.equalsIgnoreCase(sourceSha256) ||
+                        sourceFile.length() != stagedFile.length() ||
+                        java.nio.file.Files.mismatch(sourceFile.toPath(), stagedFile.toPath()) != -1L
+                    ) {
+                        throw new GradleException('Runtime artifact staged bytes differ from resolved source')
+                    }
+                    def receiptFile = ${prefix}RuntimeReceipt.get().asFile
+                    java.nio.file.Files.createDirectories(receiptFile.parentFile.toPath())
+                    receiptFile.setText([
+                        'schemaVersion=2',
+                        'projectPath=' + project.path,
+                        'taskPath=' + task.path,
+                        'sourceConfiguration=' + ${prefix}RuntimeSource.name,
+                        'runtimeConfiguration=runtimeOnly',
+                        'coordinate=' + ${prefix}Coordinate,
+                        'sourceSha256=' + sourceSha256,
+                        'stagedSha256=' + stagedSha256,
+                        'byteLength=' + stagedFile.length(),
+                        'runtimeFilename=' + stagedFile.name,
+                        'nestedJars=' + nestedJars.toList().sort().join(',')
+                    ].join(System.lineSeparator()) + System.lineSeparator(), 'UTF-8')
+                }
+            }
+            def ${prefix}RuntimeFiles = files(${prefix}RuntimeFile)
+            ${prefix}RuntimeFiles.builtBy(${prefix}StageTask)
+            // modporter-runtime-artifact-stage:end:${policy.id}
+            """.trimIndent()
+        }
+    }
+
     private fun NeoForgeCoord.mavenRepositoryUrl(): String? =
         when {
             coord.startsWith("curse.maven:") -> "https://www.cursemaven.com"
@@ -6494,7 +7742,33 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
             else -> null
         }
 
-    private fun renderResolvedDependency(indent: String, coord: NeoForgeCoord): String {
+    internal fun emittedDependencyKey(coord: NeoForgeCoord): String = "${coord.config}:${coord.coord.trim()}"
+
+    /** implementation/api lines already give the coordinate to both classpaths; otherwise the configuration must match. */
+    internal fun isCoveredByEmitted(emitted: Set<String>, coord: NeoForgeCoord): Boolean {
+        val dependency = coord.coord.trim()
+        return emittedDependencyKey(coord) in emitted ||
+            "implementation:$dependency" in emitted ||
+            "api:$dependency" in emitted
+    }
+
+    private fun renderResolvedDependency(
+        indent: String,
+        coord: NeoForgeCoord,
+        runtimeArtifactStaging: RuntimeArtifactStagingPolicy? = null,
+        isKts: Boolean = false
+    ): String {
+        if (runtimeArtifactStaging != null &&
+            coord.config == "runtimeOnly" &&
+            coord.coord == runtimeArtifactStaging.coordinate
+        ) {
+            val filesVariable = runtimeArtifactVariablePrefix(runtimeArtifactStaging) + "RuntimeFiles"
+            return if (isKts) {
+                "${indent}runtimeOnly($filesVariable)"
+            } else {
+                "${indent}runtimeOnly $filesVariable"
+            }
+        }
         val dependency = coord.coord.trim()
         val declaration = if (dependency.startsWith("files(")) {
             "${indent}${coord.config} $dependency"
@@ -6556,12 +7830,24 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         return lines.joinToString("\n")
     }
 
+    /**
+     * ForgeGradle's `jarJar.ranged(it, range)` / `jarJar.pin(it, version)` describe the JarJar
+     * metadata range and the embedded version. ModDevGradle expresses the same contract through
+     * Gradle rich versions on the `jarJar` dependency: `strictly` is the compatibility range and
+     * `prefer` the version that is resolved and embedded. This mirrors the official 1.21.1 ports
+     * (for example The Aether's `jarJar(...) { version { strictly ...; prefer ... } }`).
+     */
     private fun normalizeJarJarRangePinDsl(
         content: String,
         changes: MutableList<Change>,
-        file: Path
+        file: Path,
+        resolver: DependencyResolver? = null
     ): String {
         val lines = content.lines().toMutableList()
+        val rangedPattern = Regex("""^jarJar\s*\.\s*ranged\s*\(\s*it\s*,\s*(.+?)\s*\)\s*;?$""")
+        val pinPattern = Regex("""^jarJar\s*\.\s*pin\s*\(\s*it\s*,\s*(.+?)\s*\)\s*;?$""")
+        // `jarJar "g:a:v" { ... }` is parsed by Groovy as a call on the string; ModDev needs `jarJar("g:a:v") { ... }`.
+        val headerPattern = Regex("""^(\s*)jarJar\s*\(?\s*(["'])(.+?)\2\s*\)?\s*\{\s*$""")
         var i = 0
         while (i < lines.size) {
             val trimmed = lines[i].trim()
@@ -6585,21 +7871,66 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
             }
 
             val bodyLines = lines.subList(blockStart + 1, (j - 1).coerceAtLeast(blockStart + 1))
-            val unsupportedOnly = bodyLines.all { bodyLine ->
-                val bodyTrimmed = bodyLine.trim()
-                bodyTrimmed.isEmpty() ||
-                    bodyTrimmed.startsWith("jarJar.ranged(") ||
-                    bodyTrimmed.startsWith("jarJar.pin(")
-            }
-            val replacementLines = if (unsupportedOnly) {
-                val closureStart = indexOfOutsideStrings(lines[blockStart], '{')
-                listOf(if (closureStart >= 0) lines[blockStart].substring(0, closureStart).trimEnd() else lines[blockStart])
-            } else {
-                lines.subList(blockStart, j).filterNot { bodyLine ->
-                    val bodyTrimmed = bodyLine.trim()
-                    bodyTrimmed.startsWith("jarJar.ranged(") || bodyTrimmed.startsWith("jarJar.pin(")
+            var range: String? = null
+            var pin: String? = null
+            val retained = mutableListOf<String>()
+            var unsupported = false
+            for (bodyLine in bodyLines) {
+                val body = bodyLine.trim()
+                val rangedMatch = rangedPattern.matchEntire(body)
+                val pinMatch = pinPattern.matchEntire(body)
+                when {
+                    rangedMatch != null && range == null -> range = rangedMatch.groupValues[1]
+                    pinMatch != null && pin == null -> pin = pinMatch.groupValues[1]
+                    body.startsWith("jarJar.ranged(") || body.startsWith("jarJar.pin(") -> unsupported = true
+                    else -> retained.add(bodyLine)
                 }
             }
+            val headerMatch = headerPattern.matchEntire(lines[blockStart])
+            if (unsupported || headerMatch == null) {
+                // An unrecognized shape is left untouched so the converted script fails visibly
+                // instead of silently losing the original range or pinned version.
+                i = j
+                continue
+            }
+
+            val indent = headerMatch.groupValues[1]
+            val quote = headerMatch.groupValues[2]
+            var coordinate = headerMatch.groupValues[3]
+            // The same artifact mapping that rewrote the compile/runtime declarations (for example
+            // curios-forge -> curios-neoforge) applies to the bundled artifact; the resolved literal
+            // version then also replaces the Forge-era property references in range and pin.
+            var literalVersion: String? = null
+            val coordinateParts = coordinate.split(':')
+            if (coordinateParts.size >= 3 && coordinateParts[0].none { it == '$' || it == '{' } && coordinateParts[1].none { it == '$' || it == '{' }) {
+                val resolution = resolver?.resolve("implementation \"$coordinate\"")
+                if (resolution is DepResolution.Resolved) {
+                    val replacement = resolution.coords
+                        .map { it.coord.trim() }
+                        .firstOrNull { candidate -> candidate.split(':').size == 3 && !candidate.startsWith("files(") }
+                    if (replacement != null) {
+                        coordinate = replacement
+                        literalVersion = replacement.substringAfterLast(':')
+                    }
+                }
+                if (literalVersion == null && !coordinate.contains("\${")) literalVersion = coordinateParts.drop(2).joinToString(":")
+            }
+            if (literalVersion != null) {
+                val rangeMatch = range?.let { Regex("""^(["'])\[(.+),\)\1$""").matchEntire(it) }
+                if (rangeMatch != null && rangeMatch.groupValues[2].contains("\${")) {
+                    range = "${rangeMatch.groupValues[1]}[$literalVersion,)${rangeMatch.groupValues[1]}"
+                }
+                if (pin != null && pin.contains("\${")) pin = "\"$literalVersion\""
+            }
+            val header = "${indent}jarJar($quote$coordinate$quote) {"
+            val inner = "$indent    "
+            val replacementLines = mutableListOf(header)
+            replacementLines.addAll(retained)
+            replacementLines.add("${inner}version {")
+            range?.let { replacementLines.add("$inner    strictly $it") }
+            pin?.let { replacementLines.add("$inner    prefer $it") }
+            replacementLines.add("$inner}")
+            replacementLines.add(lines[j - 1])
 
             for (k in (j - 1) downTo blockStart) lines.removeAt(k)
             for ((offset, replacementLine) in replacementLines.withIndex()) {
@@ -6608,11 +7939,11 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
             changes.add(Change(
                 file = file,
                 line = blockStart + 1,
-                description = "Remove ForgeGradle JarJar range/pin DSL unsupported by ModDev",
+                description = "Map ForgeGradle JarJar range/pin to ModDev jarJar version constraints (strictly/prefer)",
                 before = blockText.trim(),
                 after = replacementLines.joinToString("\n").trim(),
                 confidence = Confidence.HIGH,
-                ruleId = "build-normalize-jarjar-range-pin"
+                ruleId = "build-jarjar-version-constraints"
             ))
             i = blockStart + replacementLines.size
         }
@@ -6849,11 +8180,84 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         if (!srcDir.exists()) return changes
 
         val materials = mutableListOf<LegacyArmorMaterial>()
-        java.nio.file.Files.walk(srcDir)
-            .filter { it.toString().endsWith(".java") }
-            .forEach { javaFile ->
-                val original = javaFile.readText()
-                val material = parseLegacyArmorMaterial(javaFile, original, projectDir, errors) ?: return@forEach
+        val evaluatedEnums = mutableListOf<String>()
+        val dyeableConstants = dyeableArmorMaterialConstants(srcDir)
+        val javaFiles = java.nio.file.Files.walk(srcDir).use { paths ->
+            paths.filter { it.toString().endsWith(".java") }
+                .sorted()
+                .toList()
+        }
+        val javaSources = javaFiles.associateWith { it.readText() }
+            .toMutableMap()
+        val soundHolderFields = legacyArmorSoundHolderFields(javaSources.values)
+        for (javaFile in javaFiles) {
+                val original = javaSources.getValue(javaFile)
+                // an enum declaring every 1.20.1 getter keeps computing its values (LegacyArmorMaterialEnums)
+                val modIdExpr = if (Regex("""\benum\s+[A-Za-z_$][\w$]*\s+implements\s+[^{]*\bArmorMaterial\b""").containsMatchIn(original)) {
+                    legacyArmorMaterialModIdExpression(original, projectDir)
+                } else {
+                    null
+                }
+                val soundPlan = modIdExpr?.let {
+                    LegacyArmorMaterialSoundHolderGraph.resolve(
+                        original,
+                        javaSources
+                    )
+                }
+                val evaluated = modIdExpr?.let {
+                    LegacyArmorMaterialEnums.render(
+                        original,
+                        it,
+                        dyeableConstants,
+                        soundPlan?.holderSuppliers.orEmpty(),
+                        soundHolderFields
+                    )
+                }
+                if (evaluated != null) {
+                    for ((producerFile, rewritten) in
+                        soundPlan?.rewrittenSources.orEmpty()
+                    ) {
+                        val producerOriginal =
+                            javaSources[producerFile] ?: continue
+                        if (producerOriginal == rewritten) continue
+                        changes.add(Change(
+                            file = producerFile,
+                            line = 1,
+                            description =
+                                "Expose the existing sound-event holder " +
+                                    "without dereferencing it",
+                            before = "SoundEvent getMainEvent()",
+                            after =
+                                "Holder<SoundEvent> getMainEventHolder()",
+                            confidence = Confidence.HIGH,
+                            ruleId =
+                                "build-sound-event-holder-accessor"
+                        ))
+                        javaSources[producerFile] = rewritten
+                        if (!dryRun) producerFile.writeText(rewritten)
+                    }
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 1,
+                        description = "Register the legacy ArmorMaterial enum's constants as 1.21 ArmorMaterial holders computed by its own getters",
+                        before = "enum ${evaluated.enumName} implements ArmorMaterial",
+                        after = "${evaluated.enumName}.ARMOR_MATERIALS holders over ${evaluated.enumName}.Legacy",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-legacy-armor-material-registry"
+                    ))
+                    javaSources[javaFile] = evaluated.source
+                    if (!dryRun) javaFile.writeText(evaluated.source)
+                    materials.add(LegacyArmorMaterial(evaluated.enumName, javaFile, evaluated.packageName, modIdExpr, null, emptyList(), emptyList()))
+                    evaluatedEnums.add(evaluated.enumName)
+                    continue
+                }
+                val material =
+                    parseLegacyArmorMaterial(
+                        javaFile,
+                        original,
+                        projectDir,
+                        errors
+                    ) ?: continue
                 val replacement = renderArmorMaterialRegistry(material)
                 if (replacement != original) {
                     changes.add(Change(
@@ -6865,17 +8269,100 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                         confidence = Confidence.HIGH,
                         ruleId = "build-legacy-armor-material-registry"
                     ))
+                    javaSources[javaFile] = replacement
                     if (!dryRun) {
                         javaFile.writeText(replacement)
                     }
                 }
                 materials.add(material)
-            }
+        }
 
         if (materials.isEmpty()) return changes
 
         changes.addAll(rewriteLegacyArmorMaterialConsumers(srcDir, materials, dryRun))
+        if (evaluatedEnums.isNotEmpty()) changes.addAll(restoreArmorDurability(srcDir, materials, evaluatedEnums, dryRun))
         changes.addAll(registerLegacyArmorMaterials(srcDir, materials, dryRun))
+        return changes
+    }
+
+    /**
+     * `Owner.FIELD` for every project field declared `DeferredHolder<SoundEvent, SoundEvent>` or
+     * `Holder<SoundEvent>`: a legacy armor enum may pass such a holder along without dereferencing
+     * it before the sound registers (LegacyArmorMaterialEnums).
+     */
+    private fun legacyArmorSoundHolderFields(sources: Collection<String>): Set<String> {
+        val declaration = Regex(
+            """\b(?:DeferredHolder\s*<\s*SoundEvent\s*,\s*(?:\?\s+extends\s+)?SoundEvent\s*>|Holder(?:\.Reference)?\s*<\s*SoundEvent\s*>)\s+([A-Za-z_$][\w$]*)\s*="""
+        )
+        return sources.flatMap { source ->
+            val masked = com.modporter.core.transforms.util.JavaSourceText.maskCommentsAndLiterals(source)
+            val owner = Regex("""\b(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)""").find(masked)?.groupValues?.get(1)
+                ?: return@flatMap emptyList()
+            declaration.findAll(masked).map { "$owner.${it.groupValues[1]}" }.toList()
+        }.toSet()
+    }
+
+    /** The mod id expression an armor material enum registers under: its own MODID/ID reference, else the project's. */
+    private fun legacyArmorMaterialModIdExpression(content: String, projectDir: Path): String? =
+        Regex("""return\s+([A-Za-z_$][\w$.]*\.MODID)\s*\+""").find(content)?.groupValues?.get(1)
+            ?: Regex("""\b([A-Za-z_$][\w$]*\.MODID)\b""").find(content)?.groupValues?.get(1)
+            ?: Regex("""\b([A-Za-z_$][\w$]*\.ID)\b""").find(content)?.groupValues?.get(1)
+            ?: projectModIdExpression(projectDir)
+
+    /**
+     * `Enum.CONSTANT` materials of armor items that implemented 1.20.1's `DyeableLeatherItem` (passed
+     * to their constructor or to their `super(...)`): 1.20.1 rendered those tinted with an overlay.
+     */
+    private fun dyeableArmorMaterialConstants(srcDir: Path): Set<String> {
+        val files = java.nio.file.Files.walk(srcDir).use { paths -> paths.filter { it.toString().endsWith(".java") }.toList() }
+        val sources = files.associateWith { runCatching { it.readText() }.getOrDefault("") }
+        val dyeableClasses = sources.values.flatMap { source ->
+            Regex("""\bclass\s+([A-Za-z_$][\w$]*)[^{;]*\bimplements\s+[^{;]*\bDyeableLeatherItem\b""").findAll(source).map { it.groupValues[1] }.toList()
+        }.toSet()
+        if (dyeableClasses.isEmpty()) return emptySet()
+        val constant = """[A-Za-z_$][\w$]*\.([A-Za-z_$][\w$]*)"""
+        return sources.flatMap { (_, source) ->
+            val constructed = dyeableClasses.flatMap { name ->
+                Regex("""\bnew\s+${Regex.escape(name)}\s*\(\s*$constant""").findAll(source).map { it.groupValues[1] }.toList()
+            }
+            val declared = dyeableClasses.filter { Regex("""\bclass\s+${Regex.escape(it)}\b""").containsMatchIn(source) }
+                .flatMap { Regex("""\bsuper\s*\(\s*$constant""").findAll(source).map { match -> match.groupValues[1] }.toList() }
+            constructed + declared
+        }.toSet()
+    }
+
+    /** Armor items of the evaluated enums take their 1.20.1 durability back and compare materials by key. */
+    private fun restoreArmorDurability(
+        srcDir: Path,
+        materials: List<LegacyArmorMaterial>,
+        evaluatedEnums: List<String>,
+        dryRun: Boolean
+    ): List<Change> {
+        val changes = mutableListOf<Change>()
+        val directArmorItemSubclass = Regex("""\bclass\s+[A-Za-z_$][\w$]*(?:\s*<[^{]*?>)?\s+extends\s+(?:net\.minecraft\.world\.item\.)?ArmorItem\b""")
+        java.nio.file.Files.walk(srcDir).use { paths -> paths.filter { it.toString().endsWith(".java") }.toList() }
+            .filter { file -> materials.none { it.path == file && it.enumName in evaluatedEnums } }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                if (evaluatedEnums.none { original.contains(it) } && !original.contains("ArmorItem")) return@forEach
+                var modified = LegacyArmorMaterialEnums.rewriteConsumer(original, evaluatedEnums, directArmorItemSubclass.containsMatchIn(original))
+                if (modified == original) return@forEach
+                materials.filter { it.enumName in evaluatedEnums }.forEach { material ->
+                    if (modified.contains("${material.enumName}.") && !modified.contains("package ${material.packageName};")) {
+                        modified = ensureJavaImport(modified, "${material.packageName}.${material.enumName}")
+                    }
+                }
+                changes.add(Change(
+                    file = javaFile,
+                    line = 1,
+                    description = "Armor items take their legacy material durability back; materials compare by key",
+                    before = "super(material, type, properties)",
+                    after = "super(material, type, Material.withDurability(properties, material, type))",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-legacy-armor-material-durability"
+                ))
+                if (!dryRun) javaFile.writeText(modified)
+            }
         return changes
     }
 
@@ -8605,6 +10092,7 @@ public abstract class ModPorterAbstractTreeGrower extends TreeGrower {
     }
 
     private fun usesRemovedMmlibRecipeBaseType(source: String): Boolean {
+        if (listOf("AbstractRecipe", "FluidIngredient", "ChanceResult").none { source.contains(it) }) return false
         val code = maskJavaCommentsAndLiterals(source)
         val removedType = """(?:cn\.mcmod_mmf\.mmlib\.(?:recipe|fluid)\.)?(?:AbstractRecipe|AbstractRecipeSerializer|FluidIngredient|ChanceResult)"""
         val importsRemovedType = Regex("""(?m)^\s*import\s+cn\.mcmod_mmf\.mmlib\.(?:recipe|fluid)\.(?:AbstractRecipe|AbstractRecipeSerializer|FluidIngredient|ChanceResult)\s*;""")
@@ -9750,6 +11238,7 @@ import java.util.function.Supplier;
  */
 public final class LazyOptional<T> {
     private final Supplier<? extends T> supplier;
+    private final java.util.Set<Consumer<LazyOptional<T>>> listeners = new java.util.HashSet<>();
     private boolean valid = true;
     private boolean resolved = false;
     private T value;
@@ -9772,7 +11261,7 @@ public final class LazyOptional<T> {
 
     @SuppressWarnings("unchecked")
     public <R> LazyOptional<R> cast() {
-        return new LazyOptional<>(() -> (R) this.orElse(null));
+        return (LazyOptional<R>) (LazyOptional<?>) this;
     }
 
     public void ifPresent(Consumer<? super T> consumer) {
@@ -9836,10 +11325,22 @@ public final class LazyOptional<T> {
         return orElse(null) != null;
     }
 
+    public void addListener(Consumer<LazyOptional<T>> listener) {
+        if (isPresent()) listeners.add(listener);
+        else listener.accept(this);
+    }
+
+    public void removeListener(Consumer<LazyOptional<T>> listener) {
+        listeners.remove(listener);
+    }
+
     public void invalidate() {
+        if (!valid) return;
         valid = false;
         value = null;
         resolved = true;
+        listeners.forEach(listener -> listener.accept(this));
+        listeners.clear();
     }
 }
 """.trimIndent()

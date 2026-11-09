@@ -1,0 +1,49 @@
+name: Migration or generated-port issue
+description: Report a reproducible migration issue so a reusable rule can be improved.
+title: "[Migration] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ModPorter produces a reviewable developer baseline. Reports from generated
+        research ports help us improve the shared migration rules and regenerate
+        candidates. Include the smallest useful reproducer and relevant log excerpt.
+  - type: input
+    id: tool
+    attributes:
+      label: ModPorter version or commit
+      placeholder: "0.4.0 / commit SHA"
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Original mod repository and revision
+      placeholder: "Upstream URL, branch/tag, and exact commit when available"
+    validations:
+      required: true
+  - type: input
+    id: candidate
+    attributes:
+      label: Generated research port
+      description: Repository, branch, and candidate version when applicable.
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Command and reproduction steps
+      description: Include Minecraft/loader versions and the step that failed.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and observed behavior
+      description: Describe the generated code or gameplay behavior you reviewed.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant transformation report and logs
+      description: Include useful excerpts with private paths or credentials removed.
+      render: text

@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "fixturePurpose": "Exact Create JourneyMap family before native JourneyMap v2 migration",
+  "sets": [
+    {
+      "name": "original",
+      "sourceRoot": "fixture://create-strict-original",
+      "files": [
+        {
+          "relativePath": "src/main/java/com/simibubi/create/compat/trainmap/JourneyTrainMap.java",
+          "sha256": "305e9c57d6196ab9f6061bba56b1e650f9095b1066d84eeb488ba3b04f3dc20d",
+          "bytes": 3775,
+          "sourceSha256": "305e9c57d6196ab9f6061bba56b1e650f9095b1066d84eeb488ba3b04f3dc20d",
+          "identicalToSource": true
+        },
+        {
+          "relativePath": "src/main/java/com/simibubi/create/foundation/mixin/compat/journeymap/JourneyFullscreenMapMixin.java",
+          "sha256": "32ee8b13315acb4ec25ad0c55435ec273238212260fdb6be250335442366f62e",
+          "bytes": 1671,
+          "sourceSha256": "32ee8b13315acb4ec25ad0c55435ec273238212260fdb6be250335442366f62e",
+          "identicalToSource": true
+        },
+        {
+          "relativePath": "src/main/resources/create.mixins.json",
+          "sha256": "8dec7b91a252eecfd34f913d4833a79be37c1c13ebf01ef84b4a8ea58b58c796",
+          "bytes": 2462,
+          "sourceSha256": "8dec7b91a252eecfd34f913d4833a79be37c1c13ebf01ef84b4a8ea58b58c796",
+          "identicalToSource": true
+        }
+      ]
+    },
+    {
+      "name": "owned",
+      "sourceRoot": "fixture://create-run-215-owned-output",
+      "files": [
+        {
+          "relativePath": "src/main/java/com/simibubi/create/compat/trainmap/JourneyTrainMap.java",
+          "sha256": "d852f5ebc94da21f01fc988d843fd54d72352dcb5eac8933e3a3bfe972232cbd",
+          "bytes": 3711,
+          "sourceSha256": "d852f5ebc94da21f01fc988d843fd54d72352dcb5eac8933e3a3bfe972232cbd",
+          "identicalToSource": true
+        },
+        {
+          "relativePath": "src/main/java/com/simibubi/create/foundation/mixin/compat/journeymap/JourneyFullscreenMapMixin.java",
+          "sha256": "a8c82a0b56a02944e1a530d9d063e8e4d6c83ca33b45f630041d8133e4f9ad62",
+          "bytes": 1631,
+          "sourceSha256": "a8c82a0b56a02944e1a530d9d063e8e4d6c83ca33b45f630041d8133e4f9ad62",
+          "identicalToSource": true
+        },
+        {
+          "relativePath": "src/main/resources/create.mixins.json",
+          "sha256": "420ed570b0ea3e9d6302cfb39f22c4f361473de53ae892799195b1d619d9a8f8",
+          "bytes": 2436,
+          "sourceSha256": "420ed570b0ea3e9d6302cfb39f22c4f361473de53ae892799195b1d619d9a8f8",
+          "identicalToSource": true
+        }
+      ]
+    }
+  ]
+}

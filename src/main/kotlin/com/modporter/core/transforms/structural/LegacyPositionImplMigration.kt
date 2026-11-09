@@ -3,6 +3,8 @@ package com.modporter.core.transforms.structural
 import com.github.javaparser.JavaParser
 import com.github.javaparser.ParserConfiguration
 import com.github.javaparser.StaticJavaParser
+import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
+import com.github.javaparser.ast.body.TypeDeclaration
 import com.github.javaparser.ast.body.VariableDeclarator
 import com.github.javaparser.ast.expr.ObjectCreationExpr
 import com.github.javaparser.ast.type.ClassOrInterfaceType
@@ -38,7 +40,22 @@ class LegacyPositionImplMigration {
                 !it.isStatic && it.nameAsString == "net.minecraft.core.PositionImpl"
             }
             if (!exactImport) {
+                if (cu.findAll(TypeDeclaration::class.java).any { it.nameAsString == "PositionImpl" }) {
+                    return@forEach
+                }
+                if (cu.findAll(ClassOrInterfaceType::class.java).any {
+                        it.nameWithScope == "net.minecraft.core.PositionImpl"
+                    }
+                ) {
+                    return@forEach
+                }
                 throw IllegalStateException("PositionImpl usage has no exact Minecraft owner import in $file")
+            }
+            if (cu.findAll(ClassOrInterfaceDeclaration::class.java).any { declaration ->
+                    declaration.extendedTypes.any { it.nameWithScope == "PositionImpl" }
+                }
+            ) {
+                return@forEach
             }
             val constructors = cu.findAll(ObjectCreationExpr::class.java).filter {
                 it.typeAsString == "PositionImpl"

@@ -2,12 +2,20 @@ package com.modporter.core.transforms.structural
 
 import com.github.javaparser.ast.Node
 import com.github.javaparser.ast.body.CallableDeclaration
+import com.github.javaparser.ast.body.InitializerDeclaration
 import com.github.javaparser.ast.body.Parameter
+import com.github.javaparser.ast.body.TypeDeclaration
 import com.github.javaparser.ast.expr.BinaryExpr
 import com.github.javaparser.ast.expr.EnclosedExpr
 import com.github.javaparser.ast.expr.Expression
+import com.github.javaparser.ast.expr.BinaryExpr.Operator.AND
+import com.github.javaparser.ast.expr.BinaryExpr.Operator.OR
+import com.github.javaparser.ast.expr.ConditionalExpr
+import com.github.javaparser.ast.expr.LambdaExpr
 import com.github.javaparser.ast.expr.MethodCallExpr
 import com.github.javaparser.ast.expr.NullLiteralExpr
+import com.github.javaparser.ast.expr.ObjectCreationExpr
+import com.github.javaparser.ast.expr.SwitchExpr
 import com.github.javaparser.ast.expr.UnaryExpr
 import com.github.javaparser.ast.stmt.BlockStmt
 import com.github.javaparser.ast.stmt.BreakStmt
@@ -30,6 +38,13 @@ internal object ExactNullabilityProof {
             callable.findAll(BinaryExpr::class.java).any { isNullComparison(it, expression) }
         return !nullableEvidence || expressionProvenNonNullAt(expression, callable, use)
     }
+
+    fun stableExpressionProvenNonNullAt(
+        expression: String,
+        callable: CallableDeclaration<*>,
+        use: Node
+    ): Boolean = expressionProvenNonNullAt(expression, callable, use) ||
+        priorSuccessfulDereferenceDominates(expression, callable, use)
 
     fun expressionProvenNonNullAt(
         expression: String,
@@ -60,6 +75,48 @@ internal object ExactNullabilityProof {
                 else -> false
             }
         }
+    }
+
+    private fun priorSuccessfulDereferenceDominates(
+        expression: String,
+        callable: CallableDeclaration<*>,
+        use: Node
+    ): Boolean {
+        val expected = expression.replace(Regex("\\s+"), "")
+        val block = use.findAncestor(BlockStmt::class.java).orElse(null) ?: return false
+        val containing = block.statements.firstOrNull { it === use || it.isAncestorOf(use) } ?: return false
+        val useIndex = block.statements.indexOf(containing)
+        return block.statements.take(useIndex)
+            .filterIsInstance<ExpressionStmt>()
+            .any statementSearch@{ statement ->
+                statement.findAll(MethodCallExpr::class.java).any callSearch@{ call ->
+                    val scope = call.scope.orElse(null) ?: return@callSearch false
+                    if (normalizedExpression(scope) != expected) return@callSearch false
+                    isUnconditionallyEvaluated(call, statement, callable)
+                }
+            }
+    }
+
+    private fun isUnconditionallyEvaluated(
+        call: MethodCallExpr,
+        statement: ExpressionStmt,
+        callable: CallableDeclaration<*>
+    ): Boolean {
+        var current: Node? = call.parentNode.orElse(null)
+        while (current != null && current !== statement && current !== callable) {
+            when (current) {
+                is LambdaExpr,
+                is ConditionalExpr,
+                is SwitchExpr,
+                is InitializerDeclaration,
+                is TypeDeclaration<*> -> return false
+                is CallableDeclaration<*> -> if (current !== callable) return false
+                is ObjectCreationExpr -> if (current.anonymousClassBody.isPresent) return false
+                is BinaryExpr -> if (current.operator == AND || current.operator == OR) return false
+            }
+            current = current.parentNode.orElse(null)
+        }
+        return current === statement
     }
 
     private fun exactRequireNonNullExpression(

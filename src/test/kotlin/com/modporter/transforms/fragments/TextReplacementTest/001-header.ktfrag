@@ -50,28 +50,45 @@ class TextReplacementTest {
     }
 
     @Test
-    fun `enchantment table types follow vanilla 121 class names`() {
+    fun `forge registry keys and qualified references use the vanilla registries`() {
         val projectDir = createTestFile("""
             package com.example;
-            import net.minecraft.world.level.block.EnchantmentTableBlock;
-            import net.minecraft.world.level.block.entity.EnchantmentTableBlockEntity;
-            class TestMod {
-                boolean read(Object value) {
-                    return value instanceof EnchantmentTableBlockEntity
-                        && EnchantmentTableBlock.BOOKSHELF_OFFSETS.length > 0;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraftforge.registries.ForgeRegistries;
+            public class TestMod {
+                void scan() {
+                    for (ResourceLocation name : ForgeRegistries.BLOCKS.getKeys()) {
+                    }
+                    boolean known = net.minecraftforge.registries.ForgeRegistries.ENTITY_TYPES.containsKey(new ResourceLocation("a:b"));
                 }
             }
         """.trimIndent())
 
-        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+        TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
         val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
 
-        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        assertTrue(transformed.contains("import net.minecraft.world.level.block.EnchantingTableBlock;"), transformed)
-        assertTrue(transformed.contains("import net.minecraft.world.level.block.entity.EnchantingTableBlockEntity;"), transformed)
-        assertTrue(transformed.contains("value instanceof EnchantingTableBlockEntity"), transformed)
-        assertTrue(transformed.contains("EnchantingTableBlock.BOOKSHELF_OFFSETS"), transformed)
-        assertFalse(transformed.contains("EnchantmentTableBlock"), transformed)
+        assertTrue(transformed.contains("BuiltInRegistries.BLOCK.keySet()"), transformed)
+        assertTrue(transformed.contains("net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.containsKey("), transformed)
+        assertTrue(!transformed.contains("net.neoforged.neoforge.registries.BuiltInRegistries"), transformed)
+    }
+
+    @Test
+    fun `nested tick event imports point at the 1_21 classes`() {
+        val projectDir = createTestFile("""
+            package com.example;
+            import net.minecraftforge.event.TickEvent.ClientTickEvent;
+            import net.minecraftforge.event.TickEvent.LevelTickEvent;
+            import net.minecraftforge.event.TickEvent.PlayerTickEvent;
+            import net.minecraftforge.eventbus.api.SubscribeEvent;
+        """.trimIndent())
+
+        TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.neoforged.neoforge.client.event.ClientTickEvent;"), transformed)
+        assertTrue(transformed.contains("import net.neoforged.neoforge.event.tick.LevelTickEvent;"), transformed)
+        assertTrue(transformed.contains("import net.neoforged.neoforge.event.tick.PlayerTickEvent;"), transformed)
+        assertTrue(!transformed.contains("import net.neoforged.neoforge.event.ClientTickEvent;"), transformed)
     }
 
     @Test
@@ -333,28 +350,6 @@ class TextReplacementTest {
     }
 
     @Test
-    fun `DistExecutor owner evidence is preserved for the structural pass without placeholders`() {
-        val projectDir = createTestFile("""
-            package com.example;
-
-            import net.neoforged.fml.DistExecutor;
-
-            public class TestMod {
-            }
-        """.trimIndent())
-
-        val db = MappingDatabase.loadDefault()
-        val pass = TextReplacementPass(db)
-        pass.apply(projectDir)
-
-        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
-
-        assertTrue(transformed.contains("import net.neoforged.fml.DistExecutor;"))
-        assertFalse(transformed.contains("[forge2neo]"))
-        assertFalse(transformed.contains("removed in NeoForge"))
-    }
-
-    @Test
     fun `syntax sensitive migrations keep valid Java statements`() {
         val projectDir = createTestFile("""
             package com.example;
@@ -559,35 +554,6 @@ class TextReplacementTest {
     }
 
     @Test
-    fun `legacy hand references after useWithoutItem migration use main hand`() {
-        val projectDir = createTestFile("""
-            public class TestMod {
-                void useWithoutItem(Player player, ItemStack heldStack) {
-                    ItemStack stack = player.getItemInHand(hand);
-                    player.swing(handIn);
-                    heldStack.hurtAndBreak(1, player, p -> p.onEquippedItemBroken(hand));
-                    this.takePlates(level, pos, state, player, handIn);
-                }
-            }
-        """.trimIndent())
-
-        val db = MappingDatabase.loadDefault()
-        val pass = TextReplacementPass(db)
-        pass.apply(projectDir)
-
-        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
-
-        assertTrue(transformed.contains("import net.minecraft.world.InteractionHand;"))
-        assertTrue(transformed.contains("import net.minecraft.world.entity.EquipmentSlot;"))
-        assertTrue(transformed.contains("ItemStack stack = player.getMainHandItem();"))
-        assertTrue(transformed.contains("player.swing(InteractionHand.MAIN_HAND);"))
-        assertTrue(transformed.contains("heldStack.hurtAndBreak(1, player, EquipmentSlot.MAINHAND);"))
-        assertTrue(transformed.contains("this.takePlates(level, pos, state, player, InteractionHand.MAIN_HAND);"))
-        assertFalse(transformed.contains("handIn"))
-        assertFalse(transformed.contains("onEquippedItemBroken(hand"))
-    }
-
-    @Test
     fun `gui overlay registration migrates to layered draw API`() {
         val projectDir = createTestFile("""
             package com.example;
@@ -646,33 +612,6 @@ class TextReplacementTest {
         assertTrue(!transformed.contains("IGuiOverlay"))
         assertTrue(!transformed.contains("ExtendedGui"))
         assertTrue(!transformed.contains("VanillaGuiOverlay"))
-    }
-
-    @Test
-    fun `legacy gui overlay owner migrates method reference fields without touching text`() {
-        val projectDir = createTestFile("""
-            package com.example;
-
-            import net.minecraftforge.client.gui.overlay.IGuiOverlay;
-
-            public class TestMod {
-                private static final String DOC = "IGuiOverlay OVERLAY";
-                public static final IGuiOverlay OVERLAY = TestMod::render;
-
-                private static void render(Object graphics, Object tracker) {}
-                // IGuiOverlay remains documentation.
-            }
-        """.trimIndent())
-
-        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
-        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
-
-        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
-        assertTrue(result.changes.any { it.ruleId == "gui-overlay-layer-owner" })
-        assertTrue(transformed.contains("import net.minecraft.client.gui.LayeredDraw;"), transformed)
-        assertTrue(transformed.contains("public static final LayeredDraw.Layer OVERLAY = TestMod::render;"), transformed)
-        assertTrue(transformed.contains("\"IGuiOverlay OVERLAY\""), transformed)
-        assertTrue(transformed.contains("// IGuiOverlay remains documentation."), transformed)
     }
 
     @Test

@@ -3,6 +3,35 @@
 ModPorter can be driven as an engineering benchmark instead of a one-off conversion script.
 The benchmark manifest is `src/test/resources/benchmarks/real-mods.tsv`.
 
+## Recorded input scope
+
+The strict milestone covers the exact source revisions listed in the README.
+Create's recorded run uses an unchanged source snapshot through
+`MODPORTER_BENCHMARK_SOURCE_CREATE`; its SHA-256 is
+`d6a7482014bf52793ea6d949019142a0c8337e5496f6f282411fb752a85324e9`.
+
+WorldEdit's recorded input is the Forge-only project with its core and retained
+libraries. It is derived from official commit
+`b04ab0e267285e51bcc064a25cf429f10f9b4aba`; the complete prepared Git tree is
+`781261ac5a63f3f15d79d83bb487bb3e2972d46d`. This is a declared input scope,
+not a result for the complete Bukkit/Fabric/Sponge/CLI monorepo.
+`scripts/prepare_worldedit_benchmark.py` reconstructs and verifies that input
+from the official repository while preserving its GPLv3 license. It refuses
+to overwrite an existing directory whose state does not match.
+
+The public strict entry point prepares this input automatically:
+
+```powershell
+./scripts/run_strict_benchmarks.ps1 -KeepWork
+# To reproduce the recorded Create source snapshot:
+./scripts/run_strict_benchmarks.ps1 -CreateSource /path/to/original-create -KeepWork
+```
+
+The wrapper sets `MODPORTER_BENCHMARK_SOURCE_WORLDEDIT` to the verified input.
+Direct Gradle invocations for this milestone need the same override. The
+manifest's upstream WorldEdit URL identifies the source of that preparation;
+passing a raw full-monorepo checkout is a different input.
+
 ## Source Providers
 
 The manifest is tab-separated:
@@ -24,7 +53,11 @@ providers. `local` sources are useful for development overrides, but they make t
 gate depend on one maintainer machine and are rejected by the config tests.
 
 The benchmark deletes fetched sources and converted outputs by default. Only reports and logs stay
-under `build/real-mod-benchmark/reports/`.
+under `build/real-mod-benchmark/reports/`. Set `MODPORTER_BENCHMARK_RUN_ID` to reserve a new,
+previously nonexistent root at `build/real-mod-benchmark/runs/<id>/`; the harness rejects reused
+ids so an earlier run cannot be reset or overwritten. Combine it with
+`MODPORTER_BENCHMARK_KEEP_WORK=true` when the isolated run must retain fetched sources, converted
+projects, runtime directories, and the generated client smoke save.
 
 `strictRealModBenchmark` also updates the README benchmark snapshot after a complete strict-runtime
 success over every currently available Git-backed manifest entry. The generated README block records
@@ -43,7 +76,7 @@ the rest of `tmp/` unless `MODPORTER_BENCHMARK_KEEP_WORK=true`.
 |------|-------------|--------------|--------|
 | Unit/rule tests | `src/test/kotlin/com/modporter/transforms` | Expected text, AST, and build/resource rewrites | Fast regression coverage for deterministic rules |
 | Synthetic pipeline tests | `BuildVerificationTest` | Converted project shape and major Forge-to-NeoForge structure | Good coverage for common surfaces, not a compiler proof |
-| Synthetic compile gate | `CompilationVerificationTest` with `FORGE2NEO_COMPILE_TEST=true` | Minimal converted projects compile against NeoForge 1.21.1 | Strong signal for covered minimal APIs |
+| Synthetic compile gate | `FORGE2NEO_COMPILE_TEST=true ./gradlew testKitTest` | Minimal converted projects compile against NeoForge 1.21.1 | Strong signal for covered minimal APIs |
 | Real mod benchmark | `./gradlew realModBenchmark` | Provider-backed real mods convert in temp workspaces, optionally compile/runtime-test with log audit, then clean up | Main engineering loop for hands-off porting |
 | Strict real mod benchmark | `./gradlew strictRealModBenchmark` | Hands-off compile, dedicated server lifecycle, GameTest server, client boot, client saved-world quick-load, and warning-clean logs | Definition of a genuinely successful port |
 
@@ -125,6 +158,9 @@ $env:MODPORTER_BENCHMARK_STRICT_RUNTIME = "true"
 
 # Keep fetched sources and converted outputs for debugging.
 $env:MODPORTER_BENCHMARK_KEEP_WORK = "true"
+
+# Write this run below a unique, repository-contained output root.
+$env:MODPORTER_BENCHMARK_RUN_ID = "strict-20261101T120000"
 
 # Refresh the README benchmark snapshot after a complete strict success.
 $env:MODPORTER_BENCHMARK_UPDATE_README = "true"

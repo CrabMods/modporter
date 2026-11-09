@@ -40,6 +40,8 @@
     {"forgeClass": "RegistryObject", "neoForgeClass": "DeferredHolder", "description": "Registry object type change"},
     {"forgeClass": "LivingHurtEvent", "neoForgeClass": "LivingDamageEvent", "description": "Mutable living damage event boundary"},
     {"forgeClass": "LivingAttackEvent", "neoForgeClass": "LivingIncomingDamageEvent", "description": "Damage event rename"},
+    {"forgeClass": "EnchantmentTableBlockEntity", "neoForgeClass": "EnchantingTableBlockEntity", "description": "Vanilla 1.21 rename (1.20.1 SRG table vs 1.21.1 class table)"},
+    {"forgeClass": "EnchantmentTableBlock", "neoForgeClass": "EnchantingTableBlock", "description": "Vanilla 1.21 rename (1.20.1 SRG table vs 1.21.1 class table)"},
     {"forgeClass": "ShieldBlockEvent", "neoForgeClass": "LivingShieldBlockEvent", "description": "Event rename"},
     {"forgeClass": "RenderGuiOverlayEvent", "neoForgeClass": "RenderGuiLayerEvent", "description": "GUI event rename"},
     {"forgeClass": "ClientForgeMod", "neoForgeClass": "ClientNeoForgeMod", "description": "Core class rename"},

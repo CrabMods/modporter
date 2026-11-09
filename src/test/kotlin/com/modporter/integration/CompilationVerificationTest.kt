@@ -37,7 +37,7 @@ import kotlin.test.fail
  * - Download large dependencies on first run
  * - Take 1-5 minutes per test
  *
- * Enable with: FORGE2NEO_COMPILE_TEST=true ./gradlew test
+ * Enable with: FORGE2NEO_COMPILE_TEST=true ./gradlew testKitTest
  */
 @EnabledIfEnvironmentVariable(named = "FORGE2NEO_COMPILE_TEST", matches = "true")
 class CompilationVerificationTest {

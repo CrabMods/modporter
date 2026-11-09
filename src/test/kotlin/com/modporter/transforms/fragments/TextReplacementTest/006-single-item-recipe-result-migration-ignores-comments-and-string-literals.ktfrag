@@ -1,0 +1,1182 @@
+
+    @Test
+    fun `single item recipe result migration ignores comments and string literals`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.data.recipes.SingleItemRecipeBuilder;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.level.ItemLike;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import org.jetbrains.annotations.Nullable;
+
+            public class TestMod {
+                private static final String DOC = "consumer.accept(stonecutting(Blocks.DIRT, ModBlocks.DOC.get()));";
+
+                /*
+                 consumer.accept(stonecutting(Blocks.DIRT, ModBlocks.DOC.get()));
+
+                 private static ResourceLocation getIdFor(Item input, Item output) {
+                     String path = String.format("stonecutting/%s/%s", BuiltInRegistries.ITEM.getKey(input).getPath(), BuiltInRegistries.ITEM.getKey(output).getPath());
+                     return prefix(path);
+                 }
+
+                 public static class Wrapper extends SingleItemRecipeBuilder.Result {
+                 }
+                 */
+
+                protected static void buildRecipes(RecipeOutput consumer) {
+                    consumer.accept(stonecutting(Blocks.STONE, ModBlocks.CUT_STONE.get()));
+                }
+
+                private static Wrapper stonecutting(ItemLike input, ItemLike output) {
+                    return stonecutting(input, output, 1);
+                }
+
+                private static Wrapper stonecutting(ItemLike input, ItemLike output, int count) {
+                    return new Wrapper(getIdFor(input.asItem(), output.asItem()), Ingredient.of(input), output.asItem(), count);
+                }
+
+                private static ResourceLocation getIdFor(Item input, Item output) {
+                    String path = String.format("stonecutting/%s/%s", BuiltInRegistries.ITEM.getKey(input).getPath(), BuiltInRegistries.ITEM.getKey(output).getPath());
+                    return prefix(path);
+                }
+
+                public static class Wrapper extends SingleItemRecipeBuilder.Result {
+                    public Wrapper(ResourceLocation id, Ingredient input, Item output, int count) {
+                        super(id, RecipeSerializer.STONECUTTER, "", input, output, count, null, null);
+                    }
+
+                    @Nullable
+                    @Override
+                    public JsonObject serializeAdvancement() {
+                        return null;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("stonecutting(consumer, Blocks.STONE, ModBlocks.CUT_STONE.get());"), transformed)
+        assertTrue(transformed.contains("private static ResourceLocation getIdFor(ItemLike input, ItemLike output)"), transformed)
+        assertTrue(transformed.contains("private static final String DOC = \"consumer.accept(stonecutting(Blocks.DIRT, ModBlocks.DOC.get()));\";"), transformed)
+        assertTrue(transformed.contains("consumer.accept(stonecutting(Blocks.DIRT, ModBlocks.DOC.get()));"), transformed)
+        assertTrue(transformed.contains("private static ResourceLocation getIdFor(Item input, Item output)"), transformed)
+        assertTrue(transformed.contains("public static class Wrapper extends SingleItemRecipeBuilder.Result"), transformed)
+        assertFalse(transformed.contains("stonecutting(consumer, Blocks.DIRT, ModBlocks.DOC.get());"), transformed)
+        assertFalse(transformed.contains("DOC = \"stonecutting("), transformed)
+        assertFalse(transformed.contains("RecipeSerializer.STONECUTTER"), transformed)
+    }
+
+    @Test
+    fun `dyeable leather item implementations migrate to dyed item color components`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.ChatFormatting;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.network.chat.MutableComponent;
+            import net.minecraft.network.chat.Style;
+            import net.minecraft.world.item.ArmorItem;
+            import net.minecraft.world.item.ArmorMaterial;
+            import net.minecraft.world.item.DyeableLeatherItem;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.core.component.DataComponents;
+
+            public class TestMod extends ArmorItem implements DyeableLeatherItem {
+                private static final MutableComponent TOOLTIP = Component.translatable("item.example.arctic.desc").setStyle(Style.EMPTY.withColor(ChatFormatting.GRAY));
+
+                public TestMod(ArmorMaterial armorMaterial, Type type, Properties properties) {
+                    super(armorMaterial, type, properties);
+                }
+
+                @Override
+                public boolean hasCustomColor(ItemStack stack) {
+                    CompoundTag tag = stack.getOrDefault(DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag();
+                    return tag.contains("display", 10) && tag.getCompound("display").contains("color", 3);
+                }
+
+                @Override
+                public int getColor(ItemStack stack) {
+                    return this.getColor(stack, 1);
+                }
+
+                @Override
+                public void clearColor(ItemStack stack) {
+                    this.removeColor(stack);
+                }
+
+                public int getColor(ItemStack stack, int type) {
+                    CompoundTag tag = stack.getOrDefault(DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag();
+                    return type == 0 ? 0xFFFFFF : tag.getCompound("display").getInt("color");
+                }
+
+                public void removeColor(ItemStack stack) {
+                    stack.getOrDefault(DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag().remove("color");
+                }
+
+                @Override
+                public void setColor(ItemStack stack, int color) {
+                    CompoundTag tag = stack.getOrDefault(DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag();
+                    tag.putInt("color", color);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("public class TestMod extends ArmorItem"))
+        assertTrue(transformed.contains("public static final int DEFAULT_COLOR = 0xFFBDCFD9;"))
+        assertTrue(transformed.contains("return stack.has(DataComponents.DYED_COLOR);"))
+        assertTrue(transformed.contains("return type == 0 ? 0xFFFFFF : DyedItemColor.getOrDefault(stack, DEFAULT_COLOR);"))
+        assertTrue(transformed.contains("stack.remove(DataComponents.DYED_COLOR);"))
+        assertTrue(transformed.contains("stack.set(DataComponents.DYED_COLOR, new DyedItemColor(color, true));"))
+        assertTrue(transformed.contains("import net.minecraft.world.item.component.DyedItemColor;"))
+        assertFalse(transformed.contains("DyeableLeatherItem"))
+        assertFalse(transformed.contains("CUSTOM_DATA"))
+        assertFalse(transformed.contains("CompoundTag"))
+        assertFalse(transformed.contains("@Override\n\tpublic boolean hasCustomColor"))
+    }
+
+    @Test
+    fun `dyeable leather item color migration does not require tooltip fields`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ArmorItem;
+            import net.minecraft.world.item.DyeableLeatherItem;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.core.component.DataComponents;
+
+            public class TestMod extends ArmorItem implements DyeableLeatherItem {
+                @Override
+                public boolean hasCustomColor(ItemStack stack) {
+                    CompoundTag tag = stack.getOrDefault(DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag();
+                    return tag.contains("display", 10) && tag.getCompound("display").contains("color", 3);
+                }
+
+                @Override
+                public void setColor(ItemStack stack, int color) {
+                    CompoundTag tag = stack.getOrDefault(DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag();
+                    tag.putInt("color", color);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("public static final int DEFAULT_COLOR = 0xFFBDCFD9;"))
+        assertTrue(transformed.contains("DyedItemColor.getOrDefault(stack, DEFAULT_COLOR);"))
+        assertFalse(transformed.contains("DyeableLeatherItem"))
+        assertFalse(transformed.contains("CUSTOM_DATA"))
+    }
+
+    @Test
+    fun `dyeable leather item interface and external color handlers migrate to dyed item color`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val itemDir = srcDir.resolve("item")
+        val clientDir = srcDir.resolve("client")
+        itemDir.createDirectories()
+        clientDir.createDirectories()
+        itemDir.resolve("LeatherGlovesItem.java").writeText("""
+            package com.example.item;
+
+            import net.minecraft.world.item.DyeableLeatherItem;
+
+            public class LeatherGlovesItem extends GlovesItem implements DyeableLeatherItem {
+                public LeatherGlovesItem(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+        clientDir.resolve("ColorResolver.java").writeText("""
+            package com.example.client;
+
+            import com.example.item.LeatherGlovesItem;
+            import net.minecraft.world.item.DyeableLeatherItem;
+            import net.minecraft.world.item.ItemStack;
+
+            public class ColorResolver {
+                public int color(ItemStack stack, int tintIndex) {
+                    return tintIndex > 0 ? -1 : ((DyeableLeatherItem) stack.getItem()).getColor(stack);
+                }
+
+                public int colors(ItemStack stack) {
+                    if (stack.getItem() instanceof LeatherGlovesItem leatherGlovesItem) {
+                        return leatherGlovesItem.getColor(stack);
+                    }
+                    return 0xFFFFFF;
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(tempDir)
+
+        val item = itemDir.resolve("LeatherGlovesItem.java").readText()
+        val colorResolver = clientDir.resolve("ColorResolver.java").readText()
+
+        assertTrue(item.contains("public class LeatherGlovesItem extends GlovesItem"))
+        assertFalse(item.contains("DyeableLeatherItem"))
+        assertTrue(colorResolver.contains("DyedItemColor.getOrDefault(stack, DyedItemColor.LEATHER_COLOR)"))
+        assertTrue(colorResolver.contains("return DyedItemColor.getOrDefault(stack, DyedItemColor.LEATHER_COLOR);"))
+        assertTrue(colorResolver.contains("import net.minecraft.world.item.component.DyedItemColor;"))
+        assertFalse(colorResolver.contains("DyeableLeatherItem"))
+        assertFalse(colorResolver.contains(".getColor(stack)"))
+    }
+
+    @Test
+    fun `dyeable leather external cast color migration ignores comments and string literals`() {
+        val clientDir = tempDir.resolve("src/main/java/com/example/client")
+        clientDir.createDirectories()
+        clientDir.resolve("ColorResolver.java").writeText("""
+            package com.example.client;
+
+            import net.minecraft.world.item.DyeableLeatherItem;
+            import net.minecraft.world.item.ItemStack;
+
+            public class ColorResolver {
+                private static final String DOC = "((DyeableLeatherItem) stack.getItem()).getColor(stack)";
+
+                /*
+                 return ((DyeableLeatherItem) stack.getItem()).getColor(stack);
+                 */
+
+                public int color(ItemStack stack, int tintIndex) {
+                    return tintIndex > 0 ? -1 : ((DyeableLeatherItem) stack.getItem()).getColor(stack);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(tempDir)
+
+        val transformed = clientDir.resolve("ColorResolver.java").readText()
+
+        assertTrue(transformed.contains("return tintIndex > 0 ? -1 : DyedItemColor.getOrDefault(stack, DyedItemColor.LEATHER_COLOR);"), transformed)
+        assertTrue(transformed.contains("import net.minecraft.world.item.component.DyedItemColor;"), transformed)
+        assertTrue(transformed.contains("private static final String DOC = \"((DyeableLeatherItem) stack.getItem()).getColor(stack)\";"), transformed)
+        assertTrue(transformed.contains("return ((DyeableLeatherItem) stack.getItem()).getColor(stack);"), transformed)
+        assertFalse(transformed.contains("DOC = \"DyedItemColor.getOrDefault"), transformed)
+        assertFalse(transformed.contains("import net.minecraft.world.item.DyeableLeatherItem;"), transformed)
+    }
+
+    @Test
+    fun `dyeable leather instanceof color migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val itemDir = srcDir.resolve("item")
+        val clientDir = srcDir.resolve("client")
+        itemDir.createDirectories()
+        clientDir.createDirectories()
+        itemDir.resolve("LeatherGlovesItem.java").writeText("""
+            package com.example.item;
+
+            import net.minecraft.world.item.DyeableLeatherItem;
+
+            public class LeatherGlovesItem extends GlovesItem implements DyeableLeatherItem {
+                public LeatherGlovesItem(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+        clientDir.resolve("ColorResolver.java").writeText("""
+            package com.example.client;
+
+            import com.example.item.LeatherGlovesItem;
+            import net.minecraft.world.item.ItemStack;
+
+            public class ColorResolver {
+                private static final String DOC = "leatherGlovesItem.getColor(stack)";
+
+                public int color(ItemStack stack) {
+                    if (stack.getItem() instanceof LeatherGlovesItem leatherGlovesItem) {
+                        /*
+                         return leatherGlovesItem.getColor(stack);
+                         */
+                        return leatherGlovesItem.getColor(stack);
+                    }
+                    return 0xFFFFFF;
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(tempDir)
+
+        val transformed = clientDir.resolve("ColorResolver.java").readText()
+
+        assertTrue(transformed.contains("return DyedItemColor.getOrDefault(stack, DyedItemColor.LEATHER_COLOR);"), transformed)
+        assertTrue(transformed.contains("private static final String DOC = \"leatherGlovesItem.getColor(stack)\";"), transformed)
+        assertTrue(transformed.contains("return leatherGlovesItem.getColor(stack);"), transformed)
+        assertFalse(transformed.contains("DOC = \"DyedItemColor.getOrDefault"), transformed)
+    }
+
+    @Test
+    fun `dyeable leather class collection ignores commented declarations`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val itemDir = srcDir.resolve("item")
+        val clientDir = srcDir.resolve("client")
+        itemDir.createDirectories()
+        clientDir.createDirectories()
+        itemDir.resolve("Docs.java").writeText("""
+            package com.example.item;
+
+            public class Docs {
+                /*
+                 public class FakeLeatherItem extends GlovesItem implements DyeableLeatherItem {
+                 }
+                 */
+            }
+        """.trimIndent())
+        clientDir.resolve("ColorResolver.java").writeText("""
+            package com.example.client;
+
+            import com.example.item.FakeLeatherItem;
+            import net.minecraft.world.item.ItemStack;
+
+            public class ColorResolver {
+                public int color(ItemStack stack) {
+                    if (stack.getItem() instanceof FakeLeatherItem fake) {
+                        return fake.getColor(stack);
+                    }
+                    return 0xFFFFFF;
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(tempDir)
+
+        val transformed = clientDir.resolve("ColorResolver.java").readText()
+
+        assertTrue(transformed.contains("return fake.getColor(stack);"), transformed)
+        assertFalse(transformed.contains("DyedItemColor.getOrDefault"), transformed)
+        assertFalse(transformed.contains("import net.minecraft.world.item.component.DyedItemColor;"), transformed)
+    }
+
+    @Test
+    fun `tier sorting registry custom tiers migrate to simple tier incorrect block tags`() {
+        val projectDir = createTestFile("""
+            package com.example.util;
+
+            import net.minecraft.tags.BlockTags;
+            import net.minecraft.world.item.Tier;
+            import net.minecraft.world.item.Tiers;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.neoforged.neoforge.common.SimpleTier;
+            import net.neoforged.neoforge.common.TierSortingRegistry;
+            import com.example.ExampleMod;
+            import com.example.init.ModItems;
+
+            import java.util.List;
+
+            public class TestMod {
+                public static final Tier COPPER = TierSortingRegistry.registerTier(
+                        new SimpleTier(2, 512, 6.5F, 2, 25, BlockTags.create(ExampleMod.prefix("needs_copper_tool")), () -> Ingredient.of(ModItems.COPPER_INGOT.get())),
+                        ExampleMod.prefix("copper"), List.of(Tiers.IRON), List.of(Tiers.DIAMOND));
+
+                public static final Tier GLASS = TierSortingRegistry.registerTier(
+                        new SimpleTier(BlockTags.create(ExampleMod.prefix("needs_glass_tool")), 1, 1.0F, 36.0F, 30, () -> Ingredient.EMPTY),
+                        ExampleMod.prefix("glass"), List.of(Tiers.WOOD), List.of());
+            }
+        """.trimIndent())
+        projectDir.resolve("src/generated/resources/data/example").createDirectories()
+        projectDir.resolve("src/generated/resources/data/anothermod").createDirectories()
+        projectDir.resolve("src/main/java/com/example/ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleMod {
+                public static final String ID = "example";
+
+                public static ResourceLocation prefix(String path) {
+                    return ResourceLocation.fromNamespaceAndPath(ID, path);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+        val copperTag = projectDir.resolve("src/generated/resources/data/example/tags/block/incorrect_for_copper_tool.json")
+        val glassTag = projectDir.resolve("src/generated/resources/data/example/tags/block/incorrect_for_glass_tool.json")
+
+        assertTrue(transformed.contains("""new SimpleTier(BlockTags.create(ExampleMod.prefix("incorrect_for_copper_tool")), 512, 6.5F, 2, 25, () -> Ingredient.of(ModItems.COPPER_INGOT.get()))"""))
+        assertTrue(transformed.contains("""new SimpleTier(BlockTags.create(ExampleMod.prefix("incorrect_for_glass_tool")), 1, 1.0F, 36.0F, 30, () -> Ingredient.EMPTY)"""))
+        assertTrue(result.changes.any { it.ruleId == "tier-incorrect-block-tag-resource" })
+        assertTrue(copperTag.exists())
+        assertTrue(copperTag.readText().contains(""""#minecraft:incorrect_for_iron_tool""""))
+        assertTrue(glassTag.exists())
+        assertTrue(glassTag.readText().contains(""""#minecraft:incorrect_for_wooden_tool""""))
+        assertFalse(transformed.contains("TierSortingRegistry"))
+        assertFalse(transformed.contains("needs_copper_tool"))
+        assertFalse(transformed.contains("needs_glass_tool"))
+        assertFalse(transformed.contains("List.of(Tiers"))
+    }
+
+    @Test
+    fun `tier incorrect tag resources are not emitted from data directory namespace guesses`() {
+        val projectDir = createTestFile("""
+            package com.example.util;
+
+            import net.minecraft.tags.BlockTags;
+            import net.minecraft.world.item.Tier;
+            import net.minecraft.world.item.Tiers;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.neoforged.neoforge.common.SimpleTier;
+            import net.neoforged.neoforge.common.TierSortingRegistry;
+
+            import java.util.List;
+
+            public class TestMod {
+                public static final Tier COPPER = TierSortingRegistry.registerTier(
+                        new SimpleTier(2, 512, 6.5F, 2, 25, BlockTags.create(UnknownMod.prefix("needs_copper_tool")), () -> Ingredient.EMPTY),
+                        UnknownMod.prefix("copper"), List.of(Tiers.IRON), List.of(Tiers.DIAMOND));
+            }
+        """.trimIndent())
+        projectDir.resolve("src/generated/resources/data/foreignmod").createDirectories()
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+        val guessedTag = projectDir.resolve("src/generated/resources/data/foreignmod/tags/block/incorrect_for_copper_tool.json")
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot derive namespace for custom tool tier tag") },
+            "Expected namespace hard gate, got: ${result.errors}"
+        )
+        assertTrue(transformed.contains("TierSortingRegistry.registerTier"), transformed)
+        assertTrue(transformed.contains("UnknownMod.prefix(\"needs_copper_tool\")"), transformed)
+        assertFalse(guessedTag.exists(), "Must not emit generated tags into unrelated data namespace")
+    }
+
+    @Test
+    fun `tier incorrect tag resources are not emitted from metadata namespace fallback`() {
+        val projectDir = createTestFile("""
+            package com.example.util;
+
+            import net.minecraft.tags.BlockTags;
+            import net.minecraft.world.item.Tier;
+            import net.minecraft.world.item.Tiers;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.neoforged.neoforge.common.SimpleTier;
+            import net.neoforged.neoforge.common.TierSortingRegistry;
+
+            import java.util.List;
+
+            public class TestMod {
+                public static final Tier COPPER = TierSortingRegistry.registerTier(
+                        new SimpleTier(2, 512, 6.5F, 2, 25, BlockTags.create(UnknownMod.prefix("needs_copper_tool")), () -> Ingredient.EMPTY),
+                        UnknownMod.prefix("copper"), List.of(Tiers.IRON), List.of(Tiers.DIAMOND));
+            }
+        """.trimIndent())
+        val metaInf = projectDir.resolve("src/main/resources/META-INF")
+        metaInf.createDirectories()
+        metaInf.resolve("mods.toml").writeText("""
+            [[mods]]
+            modId = "example"
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+        val metadataFallbackTag = projectDir.resolve("src/main/resources/data/example/tags/block/incorrect_for_copper_tool.json")
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot derive namespace for custom tool tier tag") },
+            "Expected namespace hard gate, got: ${result.errors}"
+        )
+        assertTrue(transformed.contains("TierSortingRegistry.registerTier"), transformed)
+        assertTrue(transformed.contains("UnknownMod.prefix(\"needs_copper_tool\")"), transformed)
+        assertFalse(metadataFallbackTag.exists(), "Must not emit generated tags from mods.toml namespace fallback")
+    }
+
+    @Test
+    fun `tier sorting registry drop checks migrate to tier tool properties`() {
+        val projectDir = createTestFile("""
+            package com.example.util;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Tier;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.common.TierSortingRegistry;
+
+            public class TestMod {
+                public boolean isCorrectToolForDrops(ItemStack stack, BlockState state) {
+                    return TierSortingRegistry.isCorrectTierForDrops(getHarvestLevel(stack), state);
+                }
+
+                private Tier getHarvestLevel(ItemStack stack) {
+                    return null;
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertFalse(transformed.contains("TierSortingRegistry"))
+        assertTrue(transformed.contains("(getHarvestLevel(stack)).createToolProperties("))
+        assertTrue(transformed.contains("state.is(net.minecraft.tags.BlockTags.MINEABLE_WITH_AXE) ? net.minecraft.tags.BlockTags.MINEABLE_WITH_AXE"))
+        assertTrue(transformed.contains("net.minecraft.tags.BlockTags.MINEABLE_WITH_PICKAXE).isCorrectForDrops(state)"))
+    }
+
+    @Test
+    fun `tier sorting registry migrations ignore comments and string literals`() {
+        val projectDir = createTestFile("""
+            package com.example.util;
+
+            import net.minecraft.tags.BlockTags;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Tier;
+            import net.minecraft.world.item.Tiers;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.common.SimpleTier;
+            import net.neoforged.neoforge.common.TierSortingRegistry;
+            import com.example.ExampleMod;
+            import com.example.init.ModItems;
+
+            import java.util.List;
+
+            public class TestMod {
+                private static final String DOC = "TierSortingRegistry.isCorrectTierForDrops(getHarvestLevel(stack), state)";
+
+                /*
+                 public static final Tier DOC_TIER = TierSortingRegistry.registerTier(
+                         new SimpleTier(2, 512, 6.5F, 2, 25, BlockTags.create(ExampleMod.prefix("needs_doc_tool")), () -> Ingredient.EMPTY),
+                         ExampleMod.prefix("doc"), List.of(Tiers.IRON), List.of(Tiers.DIAMOND));
+
+                 return TierSortingRegistry.isCorrectTierForDrops(getHarvestLevel(stack), state);
+                 */
+
+                public static final Tier COPPER = TierSortingRegistry.registerTier(
+                        new SimpleTier(2, 512, 6.5F, 2, 25, BlockTags.create(ExampleMod.prefix("needs_copper_tool")), () -> Ingredient.of(ModItems.COPPER_INGOT.get())),
+                        ExampleMod.prefix("copper"), List.of(Tiers.IRON), List.of(Tiers.DIAMOND));
+
+                public boolean isCorrectToolForDrops(ItemStack stack, BlockState state) {
+                    return TierSortingRegistry.isCorrectTierForDrops(getHarvestLevel(stack), state);
+                }
+
+                private Tier getHarvestLevel(ItemStack stack) {
+                    return null;
+                }
+            }
+        """.trimIndent())
+        projectDir.resolve("src/generated/resources/data/example").createDirectories()
+        projectDir.resolve("src/main/java/com/example/ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleMod {
+                public static final String ID = "example";
+
+                public static ResourceLocation prefix(String path) {
+                    return ResourceLocation.fromNamespaceAndPath(ID, path);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+        val copperTag = projectDir.resolve("src/generated/resources/data/example/tags/block/incorrect_for_copper_tool.json")
+        val docTag = projectDir.resolve("src/generated/resources/data/example/tags/block/incorrect_for_doc_tool.json")
+
+        assertTrue(transformed.contains("""new SimpleTier(BlockTags.create(ExampleMod.prefix("incorrect_for_copper_tool")), 512, 6.5F, 2, 25, () -> Ingredient.of(ModItems.COPPER_INGOT.get()))"""), transformed)
+        assertTrue(transformed.contains("(getHarvestLevel(stack)).createToolProperties("), transformed)
+        assertTrue(transformed.contains("private static final String DOC = \"TierSortingRegistry.isCorrectTierForDrops(getHarvestLevel(stack), state)\";"), transformed)
+        assertTrue(transformed.contains("""needs_doc_tool"""), transformed)
+        assertTrue(transformed.contains("return TierSortingRegistry.isCorrectTierForDrops(getHarvestLevel(stack), state);"), transformed)
+        assertTrue(copperTag.exists())
+        assertFalse(docTag.exists(), "Commented registerTier must not emit generated tag resources")
+        assertFalse(transformed.contains("import net.neoforged.neoforge.common.TierSortingRegistry;"), transformed)
+        assertFalse(transformed.contains("DOC = \"(getHarvestLevel"), transformed)
+    }
+
+    @Test
+    fun `item property use duration calls use lambda living entity parameter`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.client.renderer.item.ItemProperties;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class TestMod {
+                public void register() {
+                    ItemProperties.register(ModItems.BOW.get(), ResourceLocation.parse("pull"), (stack, world, entity, seed) -> {
+                        if (entity == null) return 0.0F;
+                        return entity.getUseItem() != stack ? 0.0F : (stack.getUseDuration() - entity.getUseItemRemainingTicks()) / 20.0F;
+                    });
+                    String docs = "stack.getUseDuration()";
+                }
+            }
+        """.trimIndent())
+
+        val pass = TextReplacementPass(MappingDatabase.loadDefault())
+        val result = pass.apply(projectDir)
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "itemproperties-use-duration-livingentity" })
+        assertTrue(transformed.contains("stack.getUseDuration(entity) - entity.getUseItemRemainingTicks()"), transformed)
+        assertTrue(transformed.contains("String docs = \"stack.getUseDuration()\";"), transformed)
+    }
+
+    @Test
+    fun `loot codec owner pre scan recognizes forge registry serializer sources`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ModItemSwap.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonDeserializationContext;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSerializationContext;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.functions.LootItemConditionalFunction;
+            import net.minecraft.world.level.storage.loot.functions.LootItemFunctionType;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+            import net.minecraftforge.registries.ForgeRegistries;
+
+            public class ModItemSwap extends LootItemConditionalFunction {
+                private final Item item;
+                private final Item oldItem;
+                private final boolean success;
+
+                protected ModItemSwap(LootItemCondition[] conditions, Item item, Item old, boolean success) {
+                    super(conditions);
+                    this.item = item;
+                    this.oldItem = old;
+                    this.success = success;
+                }
+
+                public LootItemFunctionType getType() {
+                    return TestLoot.ITEM_OR_DEFAULT.get();
+                }
+
+                public ItemStack run(ItemStack stack, LootContext context) {
+                    return new ItemStack(this.item, stack.getCount());
+                }
+
+                public static class Serializer extends LootItemConditionalFunction.Serializer<ModItemSwap> {
+                    public void serialize(JsonObject object, ModItemSwap function, JsonSerializationContext context) {
+                        if (function.success) object.addProperty("item", ForgeRegistries.ITEMS.getKey(function.item).toString());
+                        else object.addProperty("default", ForgeRegistries.ITEMS.getKey(function.item).toString());
+                        object.addProperty("default", ForgeRegistries.ITEMS.getKey(function.oldItem).toString());
+                    }
+
+                    public ModItemSwap deserialize(JsonObject object, JsonDeserializationContext context, LootItemCondition[] conditions) {
+                        Item item = GsonHelper.getAsItem(object, "item");
+                        Item oldItem = GsonHelper.getAsItem(object, "default");
+                        return new ModItemSwap(conditions, item, oldItem, true);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TestLoot.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.storage.loot.functions.LootItemFunctionType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class TestLoot {
+                public static final DeferredRegister<LootItemFunctionType> FUNCTIONS = DeferredRegister.create(Registries.LOOT_FUNCTION_TYPE, "example");
+                public static final DeferredHolder<LootItemFunctionType, LootItemFunctionType> ITEM_OR_DEFAULT =
+                        FUNCTIONS.register("item_or_default", () -> new LootItemFunctionType(new ModItemSwap.Serializer()));
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(tempDir)
+        val registry = srcDir.resolve("TestLoot.java").readText()
+        val function = srcDir.resolve("ModItemSwap.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "loot-serializer-mapcodec" })
+        assertTrue(function.contains("public static final MapCodec<ModItemSwap> CODEC"), function)
+        assertTrue(registry.contains("DeferredRegister<LootItemFunctionType<?>> FUNCTIONS"), registry)
+        assertTrue(registry.contains("DeferredHolder<LootItemFunctionType<?>, LootItemFunctionType<ModItemSwap>> ITEM_OR_DEFAULT"), registry)
+        assertTrue(registry.contains("new LootItemFunctionType<>(ModItemSwap.CODEC)"), registry)
+        assertFalse(registry.contains("new ModItemSwap.Serializer()"), registry)
+    }
+
+    @Test
+    fun `dry run does not modify files`() {
+        val original = """
+            import net.minecraftforge.common.MinecraftForge;
+        """.trimIndent()
+        val projectDir = createTestFile(original)
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.analyze(projectDir)
+
+        val content = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+        assertEquals(original, content, "Dry run should not modify files")
+        assertTrue(result.changeCount > 0, "Dry run should still report changes")
+    }
+
+    @Test
+    fun `player event field rewrite leaves qualified package names alone`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import org.bukkit.event.player.PlayerTeleportEvent.TeleportCause;
+            import net.minecraftforge.event.TickEvent;
+
+            public class TestMod {
+                void onTick(TickEvent.PlayerTickEvent event) {
+                    event.player.sendSystemMessage(null);
+                    org.bukkit.event.player.PlayerTeleportEvent cause = null;
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+        val content = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "tick-event-player-field" }, result.changes.joinToString("\n") { it.ruleId })
+        assertTrue(content.contains("event.getEntity().sendSystemMessage(null);"), content)
+        assertTrue(content.contains("import org.bukkit.event.player.PlayerTeleportEvent.TeleportCause;"), content)
+        assertTrue(content.contains("org.bukkit.event.player.PlayerTeleportEvent cause = null;"), content)
+    }
+
+    @Test
+    fun `migrates chunk progress listener nbt paths armor trims and loot table keys`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import java.nio.file.Path;
+            import java.util.Optional;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.nbt.NbtIo;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.server.level.progress.LoggerChunkProgressListener;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.armortrim.ArmorTrim;
+            import net.minecraft.world.level.Level;
+
+            public class TestMod {
+                static String chunkFileName(int x, int z) { return x + "." + z; }
+
+                void run(Path dir, CompoundTag tag, Level level, ItemStack armor, LivingEntity entity) throws Exception {
+                    LoggerChunkProgressListener listener = new LoggerChunkProgressListener(0);
+                    NbtIo.writeCompressed(tag, dir.resolve("meta.nbt").toFile());
+                    CompoundTag read = NbtIo.readCompressed(dir.resolve("chunk.nbt").toFile());
+                    NbtIo.writeCompressed(tag, dir.resolve(chunkFileName(1, 2)).toFile());
+                    CompoundTag nested = NbtIo.readCompressed(dir.resolve(chunkFileName(0, 0)).toFile());
+                    Optional<ArmorTrim> trim = ArmorTrim.getTrim(level.registryAccess(), armor);
+                    ResourceLocation lootId = entity.getLootTable();
+                }
+            }
+        """.trimIndent())
+
+        TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+        val content = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(content.contains("LoggerChunkProgressListener.create(0)"), content)
+        assertTrue(content.contains("""NbtIo.writeCompressed(tag, dir.resolve("meta.nbt"));"""), content)
+        assertTrue(content.contains("""NbtIo.readCompressed(dir.resolve("chunk.nbt"), net.minecraft.nbt.NbtAccounter.unlimitedHeap())"""), content)
+        assertTrue(content.contains("java.util.Optional.ofNullable(armor.get(net.minecraft.core.component.DataComponents.TRIM))"), content)
+        assertTrue(content.contains("ResourceLocation lootId = entity.getLootTable().location();"), content)
+        assertTrue(content.contains("NbtIo.writeCompressed(tag, dir.resolve(chunkFileName(1, 2)));"), content)
+        assertTrue(content.contains("NbtIo.readCompressed(dir.resolve(chunkFileName(0, 0)), net.minecraft.nbt.NbtAccounter.unlimitedHeap())"), content)
+        assertFalse(content.contains(".toFile()"), content)
+    }
+
+    @Test
+    fun `qualified forge annotations and registry object holders migrate`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraftforge.registries.RegistryObject;
+
+            @net.minecraftforge.fml.common.Mod.EventBusSubscriber(modid="example",value=net.minecraftforge.api.distmarker.Dist.CLIENT)
+            public class TestMod {
+                public static final RegistryObject<com.example.block.HerbBlock> HERB = null;
+            }
+        """.trimIndent())
+
+        TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+        val content = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(content.contains("@net.neoforged.fml.common.EventBusSubscriber(modid=\"example\",value=net.neoforged.api.distmarker.Dist.CLIENT)"), content)
+        assertTrue(content.contains("DeferredHolder<com.example.block.HerbBlock, com.example.block.HerbBlock> HERB"), content)
+    }
+
+    @Test
+    fun `block entity positions open menus directly and create registry constants map to 1_21`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.entity.projectile.AbstractProjectileDispenseBehavior;
+            import net.minecraftforge.network.NetworkHooks;
+            import net.minecraftforge.registries.DeferredRegister;
+            import net.minecraftforge.registries.ForgeRegistries;
+            import org.spongepowered.asm.mixin.Mixin;
+
+            public class TestMod extends SmartBlockEntity {
+                private static final DeferredRegister<Object> REGISTER = DeferredRegister.create(ForgeRegistries.Keys.ENTITY_DATA_SERIALIZERS, "example");
+                static final Object WOODCUTTING = ForgeRegistries.RECIPE_TYPES.getValue(new ResourceLocation("druidcraft", "woodcutting"));
+
+                void open(ServerPlayer player) {
+                    NetworkHooks.openScreen(player, this, worldPosition);
+                }
+
+                @Mixin(AbstractProjectileDispenseBehavior.class)
+                interface AbstractProjectileDispenseBehaviorAccessor {}
+            }
+        """.trimIndent())
+
+        TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+        val content = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(content.contains("(player).openMenu(this, worldPosition);"), content)
+        assertTrue(content.contains("DeferredRegister.create(NeoForgeRegistries.Keys.ENTITY_DATA_SERIALIZERS, \"example\")"), content)
+        assertTrue(content.contains("BuiltInRegistries.RECIPE_TYPE.get(new ResourceLocation(\"druidcraft\", \"woodcutting\"))"), content)
+        assertTrue(content.contains("@Mixin(ProjectileDispenseBehavior.class)"), content)
+        assertTrue(content.contains("interface AbstractProjectileDispenseBehaviorAccessor {}"), content)
+        assertFalse(Regex("(?<!Neo)ForgeRegistries\\.").containsMatchIn(content), content)
+    }
+
+    @Test
+    fun `tick event player field rewrite leaves player() accessor calls alone`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            public class TestMod {
+                void onTick(net.neoforged.neoforge.event.tick.PlayerTickEvent.Post event, org.spongepowered.api.event.network.ServerSideConnectionEvent.Disconnect quit) {
+                    Object tickPlayer = event.player;
+                    Object quitPlayer = quit.player();
+                    Object other = event.player();
+                }
+            }
+        """.trimIndent())
+
+        TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+        val content = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(content.contains("Object tickPlayer = event.getEntity();"), content)
+        assertTrue(content.contains("Object quitPlayer = quit.player();"), content)
+        assertTrue(content.contains("Object other = event.player();"), content)
+    }
+
+    @Test
+    fun `forge convention tags become common tags and tag element writes stay for the structural pass`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.item.ItemStack;
+
+            public class TestMod {
+                static ResourceLocation id(String value) { return ResourceLocation.parse(value); }
+
+                void run(ItemStack stack) {
+                    var milk = TagKey.create(Registries.FLUID, id("forge:milk"));
+                    stack.getOrCreateTagElement("Custom").putString("Id", "x");
+                    var read = stack.getOrCreateTagElement("Custom").getString("Id");
+                }
+            }
+        """.trimIndent())
+
+        TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+        val content = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(content.contains("""TagKey.create(Registries.FLUID, id("c:milk"))"""), content)
+        assertTrue(content.contains("""stack.getOrCreateTagElement("Custom").putString("Id", "x");"""), content)
+        assertTrue(content.contains("""var read = stack.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag().getCompound("Custom").getString("Id");"""), content)
+    }
+
+    @Test
+    fun `shaped recipe checks empty handlers step heights and fire resistance follow 1_21`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.google.common.base.Supplier;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraftforge.common.crafting.IShapedRecipe;
+            import net.minecraftforge.items.IItemHandler;
+            import net.minecraftforge.items.wrapper.EmptyHandler;
+
+            public class TestMod {
+                Supplier<ItemStack> result;
+
+                int width(Recipe<?> recipe) {
+                    return recipe instanceof IShapedRecipe<?> ? ((IShapedRecipe<?>) recipe).getWidth() : 1;
+                }
+
+                IItemHandler empty() {
+                    return EmptyHandler.INSTANCE;
+                }
+
+                float step(Entity entity) {
+                    return entity.getStepHeight();
+                }
+
+                boolean fireproof(ItemStack stack) {
+                    return stack.getItem().isFireResistant();
+                }
+            }
+        """.trimIndent())
+
+        TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+        val content = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(content.contains("return recipe instanceof ShapedRecipe ? ((ShapedRecipe) recipe).getWidth() : 1;"), content)
+        assertTrue(content.contains("import net.minecraft.world.item.crafting.ShapedRecipe;"), content)
+        assertFalse(content.contains("IShapedRecipe"), content)
+        assertTrue(content.contains("return EmptyItemHandler.INSTANCE;"), content)
+        assertTrue(content.contains("import net.neoforged.neoforge.items.wrapper.EmptyItemHandler;"), content)
+        assertFalse(content.contains("wrapper.EmptyHandler;"), content)
+        assertTrue(content.contains("return entity.maxUpStep();"), content)
+        assertTrue(content.contains("return stack.has(net.minecraft.core.component.DataComponents.FIRE_RESISTANT);"), content)
+        assertTrue(content.contains("import java.util.function.Supplier;"), content)
+        assertFalse(content.contains("com.google.common.base.Supplier"), content)
+        assertEquals(1, Regex("import java.util.function.Supplier;").findAll(content).count(), content)
+    }
+
+    @Test
+    fun `widget buttons become sprites and dead returns after playerWillDestroy vanish`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            import static net.minecraft.client.gui.components.AbstractWidget.WIDGETS_LOCATION;
+
+            public class TestMod extends Block {
+                public TestMod(Properties properties) { super(properties); }
+
+                void render(GuiGraphics graphics, int x, int w, int h) {
+                    graphics.blitNineSliced(WIDGETS_LOCATION, x, 0, w, h, 20, 4, 200, 20, 0, 66);
+                    graphics.blitNineSliced(WIDGETS_LOCATION, x, 0, w, h, 20, 4, 200, 20, 0, 46);
+                }
+
+                @Override
+                public void playerWillDestroy(Level level, BlockPos pos, BlockState state, Player player) {
+                    if (true) {
+                        super.playerWillDestroy(level, pos, state, player);
+                        return;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+        val content = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(content.contains("""graphics.blitSprite(net.minecraft.resources.ResourceLocation.withDefaultNamespace("widget/button"), x, 0, w, h);"""), content)
+        assertTrue(content.contains("""graphics.blitSprite(net.minecraft.resources.ResourceLocation.withDefaultNamespace("widget/button_disabled"), x, 0, w, h);"""), content)
+        assertFalse(content.contains("WIDGETS_LOCATION"), content)
+        assertTrue(content.replace("\r\n", "\n").contains("return super.playerWillDestroy(level, pos, state, player);\n        }"), content)
+        assertFalse(content.contains("return;"), content)
+    }
+
+    @Test
+    fun `clone overload family waits for structural ownership proof and preserves direct callers`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class TestMod extends Block {
+                public TestMod(Properties properties) {
+                    super(properties);
+                }
+
+                void equip(Level world, Player player, BlockPos pos, BlockState state) {
+                    player.setItemSlot(EquipmentSlot.CHEST, getCloneItemStack(world, pos, state));
+                }
+
+                @Override
+                public ItemStack getCloneItemStack(BlockGetter level, BlockPos pos, BlockState state) {
+                    return super.getCloneItemStack(level, pos, state);
+                }
+            }
+        """.trimIndent())
+
+        TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+        val afterText = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(afterText.contains("getCloneItemStack(BlockGetter level, BlockPos pos, BlockState state)"), afterText)
+        assertFalse(afterText.contains("getCloneItemStack(LevelReader level, BlockPos pos, BlockState state)"), afterText)
+        assertFalse(afterText.contains("import net.minecraft.world.level.LevelReader;"), afterText)
+
+        StructuralRefactorPass().apply(projectDir)
+        val migrated = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(migrated.contains("getCloneItemStack(LevelReader level, BlockPos pos, BlockState state)"), migrated)
+        assertTrue(Regex("""getCloneItemStack\(\s*BlockState state_,\s*HitResult target,\s*LevelReader level_,\s*BlockPos pos_,\s*Player player_\s*\)""").containsMatchIn(migrated), migrated)
+        assertTrue(migrated.contains("return super.getCloneItemStack(level, pos, state);"), migrated)
+        assertTrue(migrated.contains("player.setItemSlot(EquipmentSlot.CHEST, getCloneItemStack(world, pos, state));"), migrated)
+        assertTrue(migrated.contains("return getCloneItemStack(level_, pos_, state_);"), migrated)
+        assertFalse(migrated.contains("new ItemStack(this)"), migrated)
+        assertFalse(migrated.contains("@SuppressWarnings"), migrated)
+    }
+
+
+    @Test
+    fun `enchantment table types follow vanilla 121 class names`() {
+        val projectDir = createTestFile("""
+            package com.example;
+            import net.minecraft.world.level.block.EnchantmentTableBlock;
+            import net.minecraft.world.level.block.entity.EnchantmentTableBlockEntity;
+            class TestMod {
+                boolean read(Object value) {
+                    return value instanceof EnchantmentTableBlockEntity
+                        && EnchantmentTableBlock.BOOKSHELF_OFFSETS.length > 0;
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(transformed.contains("import net.minecraft.world.level.block.EnchantingTableBlock;"), transformed)
+        assertTrue(transformed.contains("import net.minecraft.world.level.block.entity.EnchantingTableBlockEntity;"), transformed)
+        assertTrue(transformed.contains("value instanceof EnchantingTableBlockEntity"), transformed)
+        assertTrue(transformed.contains("EnchantingTableBlock.BOOKSHELF_OFFSETS"), transformed)
+        assertFalse(transformed.contains("EnchantmentTableBlock"), transformed)
+    }
+
+
+    @Test
+    fun `DistExecutor owner evidence is preserved for the structural pass without placeholders`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.neoforged.fml.DistExecutor;
+
+            public class TestMod {
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.neoforged.fml.DistExecutor;"))
+        assertFalse(transformed.contains("[forge2neo]"))
+        assertFalse(transformed.contains("removed in NeoForge"))
+    }
+
+
+    @Test
+    fun `legacy hand references after useWithoutItem migration use main hand`() {
+        val projectDir = createTestFile("""
+            public class TestMod {
+                void useWithoutItem(Player player, ItemStack heldStack) {
+                    ItemStack stack = player.getItemInHand(hand);
+                    player.swing(handIn);
+                    heldStack.hurtAndBreak(1, player, p -> p.onEquippedItemBroken(hand));
+                    this.takePlates(level, pos, state, player, handIn);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.world.InteractionHand;"))
+        assertTrue(transformed.contains("import net.minecraft.world.entity.EquipmentSlot;"))
+        assertTrue(transformed.contains("ItemStack stack = player.getMainHandItem();"))
+        assertTrue(transformed.contains("player.swing(InteractionHand.MAIN_HAND);"))
+        assertTrue(transformed.contains("heldStack.hurtAndBreak(1, player, EquipmentSlot.MAINHAND);"))
+        assertTrue(transformed.contains("this.takePlates(level, pos, state, player, InteractionHand.MAIN_HAND);"))
+        assertFalse(transformed.contains("handIn"))
+        assertFalse(transformed.contains("onEquippedItemBroken(hand"))
+    }
+
+
+    @Test
+    fun `legacy gui overlay owner migrates method reference fields without touching text`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraftforge.client.gui.overlay.IGuiOverlay;
+
+            public class TestMod {
+                private static final String DOC = "IGuiOverlay OVERLAY";
+                public static final IGuiOverlay OVERLAY = TestMod::render;
+
+                private static void render(Object graphics, Object tracker) {}
+                // IGuiOverlay remains documentation.
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "gui-overlay-layer-owner" })
+        assertTrue(transformed.contains("import net.minecraft.client.gui.LayeredDraw;"), transformed)
+        assertTrue(transformed.contains("public static final LayeredDraw.Layer OVERLAY = TestMod::render;"), transformed)
+        assertTrue(transformed.contains("\"IGuiOverlay OVERLAY\""), transformed)
+        assertTrue(transformed.contains("// IGuiOverlay remains documentation."), transformed)
+    }

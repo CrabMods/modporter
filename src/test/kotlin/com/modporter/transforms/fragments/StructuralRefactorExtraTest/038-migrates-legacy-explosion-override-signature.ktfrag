@@ -1,0 +1,1165 @@
+
+    @Test
+    fun `migrates legacy explosion override signature`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExplosionSignatureSurface.java").writeText("""
+            package com.example;
+
+            public class ExplosionSignatureSurface {
+                @Override
+                public boolean ignoreExplosion() {
+                    return true;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ExplosionSignatureSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.minecraft.world.level.Explosion;"), migrated)
+        assertTrue(migrated.contains("public boolean ignoreExplosion(Explosion explosion)"), migrated)
+        assertFalse(migrated.contains("ignoreExplosion()"), migrated)
+    }
+
+    @Test
+    fun `legacy explosion override signature migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DocumentedExplosionSignatureSurface.java").writeText("""
+            package com.example;
+
+            public class DocumentedExplosionSignatureSurface {
+                private static final String DOC = "public boolean ignoreExplosion()";
+
+                /*
+                public boolean ignoreExplosion() {
+                    return true;
+                }
+                */
+
+                public boolean keep() {
+                    return DOC.length() > 0;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("DocumentedExplosionSignatureSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("private static final String DOC = \"public boolean ignoreExplosion()\";"), migrated)
+        assertTrue(migrated.contains("public boolean ignoreExplosion()"), migrated)
+        assertFalse(migrated.contains("ignoreExplosion(Explosion explosion)"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.world.level.Explosion;"), migrated)
+    }
+
+    @Test
+    fun `migrates dimension special effects cloud renderer signature`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DimensionCloudSignatureSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import net.minecraft.client.multiplayer.ClientLevel;
+            import org.joml.Matrix4f;
+
+            public class DimensionCloudSignatureSurface {
+                @Override
+                public boolean renderClouds(ClientLevel level, int ticks, float partialTick, PoseStack poseStack, double camX, double camY, double camZ, Matrix4f projectionMatrix) {
+                    poseStack.pushPose();
+                    poseStack.translate(camX, camY, camZ);
+                    poseStack.popPose();
+                    return false;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("DimensionCloudSignatureSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("renderClouds(ClientLevel level, int ticks, float partialTick, PoseStack poseStack, double camX, double camY, double camZ, Matrix4f modelViewMatrix, Matrix4f projectionMatrix)"), migrated)
+        assertTrue(migrated.contains("poseStack.mulPose(modelViewMatrix);"), migrated)
+        assertFalse(migrated.contains("double camZ, Matrix4f projectionMatrix)"), migrated)
+    }
+
+    @Test
+    fun `dimension cloud renderer signature migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DocumentedCloudSignatureSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import net.minecraft.client.multiplayer.ClientLevel;
+            import org.joml.Matrix4f;
+
+            public class DocumentedCloudSignatureSurface {
+                private static final String DOC = "renderClouds(ClientLevel level, int ticks, float partialTick, PoseStack poseStack, double camX, double camY, double camZ, Matrix4f projectionMatrix)";
+
+                /*
+                public boolean renderClouds(ClientLevel level, int ticks, float partialTick, PoseStack poseStack, double camX, double camY, double camZ, Matrix4f projectionMatrix) {
+                    poseStack.pushPose();
+                    poseStack.popPose();
+                    return false;
+                }
+                */
+
+                public boolean keep() {
+                    return DOC.length() > 0;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("DocumentedCloudSignatureSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(
+            migrated.contains("private static final String DOC = \"renderClouds(ClientLevel level, int ticks, float partialTick, PoseStack poseStack, double camX, double camY, double camZ, Matrix4f projectionMatrix)\";"),
+            migrated
+        )
+        assertTrue(
+            migrated.contains("renderClouds(ClientLevel level, int ticks, float partialTick, PoseStack poseStack, double camX, double camY, double camZ, Matrix4f projectionMatrix)"),
+            migrated
+        )
+        assertFalse(migrated.contains("Matrix4f modelViewMatrix"), migrated)
+        assertFalse(migrated.contains("mulPose(modelViewMatrix)"), migrated)
+    }
+
+    @Test
+    fun `migrates LevelRenderer cloud build invokers to Tesselator`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LevelRendererAccessor.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.BufferBuilder;
+            import com.mojang.blaze3d.vertex.MeshData;
+            import net.minecraft.client.renderer.LevelRenderer;
+            import net.minecraft.world.phys.Vec3;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.gen.Invoker;
+
+            @Mixin(LevelRenderer.class)
+            public interface LevelRendererAccessor {
+                @Invoker
+                MeshData callBuildClouds(BufferBuilder builder, double x, double y, double z, Vec3 cloudColor);
+            }
+        """.trimIndent())
+        srcDir.resolve("CloudRenderSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.systems.RenderSystem;
+            import com.mojang.blaze3d.vertex.BufferBuilder;
+            import com.mojang.blaze3d.vertex.MeshData;
+            import com.mojang.blaze3d.vertex.Tesselator;
+            import com.mojang.blaze3d.vertex.VertexBuffer;
+            import net.minecraft.client.renderer.ShaderInstance;
+            import net.minecraft.client.renderer.GameRenderer;
+            import org.joml.Matrix4f;
+
+            public class CloudRenderSurface {
+                public void render(LevelRendererAccessor accessor, VertexBuffer cloudBuffer, Matrix4f pose, Matrix4f projectionMatrix, Object vec3) {
+                    BufferBuilder bufferbuilder = Tesselator.getInstance().getBuilder();
+                    MeshData renderedBuffer = accessor.callBuildClouds(bufferbuilder, 1.0D, 2.0D, 3.0D, (net.minecraft.world.phys.Vec3) vec3);
+                    cloudBuffer.upload(renderedBuffer);
+                    RenderSystem.setShader(GameRenderer::getPositionTexColorNormalShader);
+                    RenderSystem.setShaderTexture(0, CLOUDS_LOCATION);
+                    for (int i1 = 0; i1 < 2; ++i1) {
+                        if (i1 == 0) {
+                            RenderSystem.colorMask(false, false, false, false);
+                        } else {
+                            RenderSystem.colorMask(true, true, true, true);
+                        }
+
+                        ShaderInstance shaderInstance = RenderSystem.getShader();
+                        cloudBuffer.drawWithShader(pose, projectionMatrix, shaderInstance);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val accessor = srcDir.resolve("LevelRendererAccessor.java").readText()
+        val render = srcDir.resolve("CloudRenderSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(accessor.contains("import com.mojang.blaze3d.vertex.Tesselator;"), accessor)
+        assertTrue(accessor.contains("MeshData callBuildClouds(Tesselator builder, double x, double y, double z, Vec3 cloudColor);"), accessor)
+        assertFalse(accessor.contains("BufferBuilder builder"), accessor)
+        assertTrue(render.contains("accessor.callBuildClouds(Tesselator.getInstance(), 1.0D, 2.0D, 3.0D"), render)
+        assertFalse(render.contains("Tesselator.getInstance().getBuilder()"), render)
+        assertFalse(render.contains("getPositionTexColorNormalShader"), render)
+        assertTrue(render.contains("RenderType rendertype = i1 == 0 ? RenderType.cloudsDepthOnly() : RenderType.clouds();"), render)
+        assertTrue(render.contains("rendertype.setupRenderState();"), render)
+        assertTrue(render.contains("rendertype.clearRenderState();"), render)
+    }
+
+    @Test
+    fun `migrates mutable tesselator builder parameters to tesselator begin calls`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("MutableTesselatorSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.BufferBuilder;
+            import com.mojang.blaze3d.vertex.DefaultVertexFormat;
+            import com.mojang.blaze3d.vertex.Tesselator;
+            import com.mojang.blaze3d.vertex.VertexFormat;
+
+            public class MutableTesselatorSurface {
+                public void render() {
+                    BufferBuilder bufferBuilder = Tesselator.getInstance().getBuilder();
+                    bufferBuilder = Tesselator.getInstance().begin(VertexFormat.Mode.TRIANGLE_FAN, DefaultVertexFormat.POSITION_COLOR);
+                    drawCelestialBodies(bufferBuilder);
+                }
+
+                private void drawCelestialBodies(BufferBuilder bufferBuilder) {
+                    bufferBuilder = Tesselator.getInstance().begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_TEX);
+                    bufferBuilder.addVertex(0.0F, 1.0F, 0.0F);
+                    bufferBuilder = Tesselator.getInstance().begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_TEX);
+                    bufferBuilder.addVertex(1.0F, 0.0F, 0.0F);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("MutableTesselatorSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("Tesselator bufferBuilderTesselator = Tesselator.getInstance();"), migrated)
+        assertTrue(migrated.contains("BufferBuilder bufferBuilder = bufferBuilderTesselator.begin(VertexFormat.Mode.TRIANGLE_FAN, DefaultVertexFormat.POSITION_COLOR);"), migrated)
+        assertTrue(migrated.contains("drawCelestialBodies(bufferBuilderTesselator);"), migrated)
+        assertTrue(migrated.contains("private void drawCelestialBodies(Tesselator tesselator)"), migrated)
+        assertTrue(migrated.contains("BufferBuilder bufferBuilder = tesselator.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_TEX);"), migrated)
+        assertTrue(migrated.contains("bufferBuilder = tesselator.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_TEX);"), migrated)
+        assertFalse(migrated.contains("Tesselator.getInstance().getBuilder()"), migrated)
+    }
+
+    @Test
+    fun `migrates attachment getData ifPresent to hasData guarded direct data`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AttachmentIfPresentSurface.java").writeText("""
+            package com.example;
+
+            public class AttachmentIfPresentSurface {
+                public void close(Level level) {
+                    level.getData(ExampleAttachments.TIME.get()).ifPresent((time) -> {
+                        time.setEnabled(false);
+                        if (time.shouldSync()) {
+                            time.sync(level);
+                        }
+                    });
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("AttachmentIfPresentSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("if (level.hasData(ExampleAttachments.TIME.get())) {"), migrated)
+        assertTrue(migrated.contains("var time = level.getData(ExampleAttachments.TIME.get());"), migrated)
+        assertTrue(migrated.contains("if (time.shouldSync()) {"), migrated)
+        assertFalse(migrated.contains(".ifPresent("), migrated)
+    }
+
+    @Test
+    fun `attachment getData ifPresent migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AttachmentIfPresentDocs.java").writeText("""
+            package com.example;
+
+            public class AttachmentIfPresentDocs {
+                /*
+                level.getData(ExampleAttachments.TIME.get()).ifPresent((time) -> {
+                    time.sync(level);
+                });
+                */
+                private static final String SAMPLE = "level.getData(ExampleAttachments.TIME.get()).ifPresent((time) -> { time.sync(level); });";
+
+                public void real(Level level) {
+                    Object data = level.getData(ExampleAttachments.TIME.get());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("AttachmentIfPresentDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(source.contains("level.getData(ExampleAttachments.TIME.get()).ifPresent((time) -> {"), source)
+        assertTrue(source.contains("private static final String SAMPLE"), source)
+        assertFalse(source.contains("hasData(ExampleAttachments.TIME.get())"), source)
+        assertFalse(source.contains("var time = level.getData"), source)
+    }
+
+    @Test
+    fun `migrates attachment getData resolve Optional branch to hasData direct access`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AttachmentResolveSurface.java").writeText("""
+            package com.example;
+
+            import java.util.Optional;
+
+            public class AttachmentResolveSurface {
+                public void open(Level level) {
+                    Optional<TimeData> timeOptional = level.getData(ExampleAttachments.TIME.get()).resolve();
+                    if (timeOptional.isPresent()) {
+                        if (!timeOptional.get().isLocked()) {
+                            openScreen(timeOptional.get());
+                        }
+                    } else {
+                        openScreen(TimeData.DEFAULT);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("AttachmentResolveSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("if (level.hasData(ExampleAttachments.TIME.get())) {"), migrated)
+        assertTrue(migrated.contains("TimeData timeOptional = level.getData(ExampleAttachments.TIME.get());"), migrated)
+        assertTrue(migrated.contains("if (!timeOptional.isLocked()) {"), migrated)
+        assertTrue(migrated.contains("openScreen(timeOptional);"), migrated)
+        assertTrue(migrated.contains("} else {\n            openScreen(TimeData.DEFAULT);"), migrated)
+        assertFalse(migrated.contains("Optional<TimeData>"), migrated)
+        assertFalse(migrated.contains(".resolve()"), migrated)
+        assertFalse(migrated.contains("timeOptional.get()"), migrated)
+        assertFalse(migrated.contains("import java.util.Optional;"), migrated)
+    }
+
+    @Test
+    fun `entity capability optional chain migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CapabilityOptionalDocs.java").writeText("""
+            package com.example;
+
+            public class CapabilityOptionalDocs {
+                /*
+                return living.getCapability(Capabilities.ItemHandler.ENTITY).map(inv -> {
+                    int slots = inv.getSlots();
+                    return slots > count;
+                }).orElse(false);
+                */
+                private static final String SAMPLE = "return living.getCapability(Capabilities.ItemHandler.ENTITY).map(inv -> { return inv.getSlots() > count; }).orElse(false);";
+
+                public boolean real(LivingEntity living, int count) {
+                    return living.getCapability(Capabilities.ItemHandler.ENTITY) != null;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("CapabilityOptionalDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(source.contains("return living.getCapability(Capabilities.ItemHandler.ENTITY).map(inv -> {"), source)
+        assertTrue(source.contains("private static final String SAMPLE"), source)
+        assertFalse(source.contains("var inv = living.getCapability"), source)
+        assertFalse(source.contains("if (inv == null)"), source)
+    }
+
+    @Test
+    fun `player clone capability lifecycle wrappers are removed only when copyFrom preserves data copy`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PlayerCloneCapabilitySurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.player.Player;
+
+            public class PlayerCloneCapabilitySurface {
+                public static void clone(Player originalPlayer, Player newPlayer, boolean wasDeath) {
+                    originalPlayer.reviveCaps();
+                    PlayerData originalData = PlayerData.get(originalPlayer).orElseThrow();
+                    PlayerData newData = PlayerData.get(newPlayer).orElseThrow();
+                    newData.copyFrom(originalData, wasDeath);
+                    originalPlayer.invalidateCapabilities();
+                }
+
+                public static void manual(Player originalPlayer) {
+                    originalPlayer.reviveCaps();
+                    originalPlayer.invalidateCapabilities();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("PlayerCloneCapabilitySurface.java").readText()
+        val cloneMethod = migrated.substring(
+            migrated.indexOf("public static void clone"),
+            migrated.indexOf("public static void manual")
+        )
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(cloneMethod.contains("newData.copyFrom(originalData, wasDeath);"), migrated)
+        assertFalse(cloneMethod.contains("originalPlayer.reviveCaps();"), migrated)
+        assertFalse(cloneMethod.contains("originalPlayer.invalidateCapabilities();"), migrated)
+        assertTrue(migrated.contains("public static void manual(Player originalPlayer) {\n        originalPlayer.reviveCaps();\n        originalPlayer.invalidateCapabilities();"), migrated)
+    }
+
+    @Test
+    fun `player clone event original lifecycle wrappers are removed only when copyToNewStore preserves data copy`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PlayerCloneEventSurface.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+
+            public class PlayerCloneEventSurface {
+                public static void clone(PlayerEvent.Clone event) {
+                    event.getOriginal().reviveCaps();
+                    PlayerData.get(event.getOriginal()).ifPresent(oldData -> {
+                        PlayerData.get(event.getEntity()).ifPresent(oldData::copyToNewStore);
+                    });
+                    event.getOriginal().invalidateCapabilities();
+                }
+
+                public static void manual(PlayerEvent.Clone event) {
+                    event.getOriginal().reviveCaps();
+                    event.getOriginal().invalidateCapabilities();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("PlayerCloneEventSurface.java").readText()
+        val cloneMethod = migrated.substring(
+            migrated.indexOf("public static void clone"),
+            migrated.indexOf("public static void manual")
+        )
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(cloneMethod.contains("oldData::copyToNewStore"), migrated)
+        assertFalse(cloneMethod.contains("event.getOriginal().reviveCaps();"), migrated)
+        assertFalse(cloneMethod.contains("event.getOriginal().invalidateCapabilities();"), migrated)
+        assertTrue(migrated.contains("public static void manual(PlayerEvent.Clone event) {\n        event.getOriginal().reviveCaps();\n        event.getOriginal().invalidateCapabilities();"), migrated)
+    }
+
+    @Test
+    fun `player clone capability lifecycle migration ignores comments`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PlayerCloneDocs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.player.Player;
+
+            public class PlayerCloneDocs {
+                public static void clone(Player originalPlayer, Player newPlayer, boolean wasDeath) {
+                    /*
+                    originalPlayer.reviveCaps();
+                    originalPlayer.invalidateCapabilities();
+                    */
+                    PlayerData originalData = PlayerData.get(originalPlayer).orElseThrow();
+                    PlayerData newData = PlayerData.get(newPlayer).orElseThrow();
+                    newData.copyFrom(originalData, wasDeath);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("PlayerCloneDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(source.contains("originalPlayer.reviveCaps();"), source)
+        assertTrue(source.contains("originalPlayer.invalidateCapabilities();"), source)
+        assertFalse(source.contains("if (originalPlayer == null)"), source)
+    }
+
+    @Test
+    fun `migrates MobEffect applicable event result API without dropping event dispatch`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("MobEffectApplicableSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.neoforged.neoforge.common.NeoForge;
+            import net.neoforged.neoforge.common.util.TriState;
+            import net.neoforged.neoforge.event.entity.living.MobEffectEvent;
+
+            public class MobEffectApplicableSurface {
+                public boolean canBeAffected(MobEffectInstance effectInstance) {
+                    MobEffectEvent.Applicable event = new MobEffectEvent.Applicable(this, effectInstance);
+                    NeoForge.EVENT_BUS.post(event).isCanceled().isCanceled();
+                    if (event.getResult() != TriState.DEFAULT) {
+                        return event.getResult() == TriState.TRUE;
+                    }
+                    return false;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("MobEffectApplicableSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("new MobEffectEvent.Applicable(this, effectInstance, null)"), migrated)
+        assertTrue(migrated.contains("NeoForge.EVENT_BUS.post(event);"), migrated)
+        assertTrue(migrated.contains("event.getResult() != MobEffectEvent.Applicable.Result.DEFAULT"), migrated)
+        assertTrue(migrated.contains("event.getResult() == MobEffectEvent.Applicable.Result.APPLY"), migrated)
+        assertFalse(migrated.contains("TriState"), migrated)
+        assertFalse(migrated.contains("isCanceled()"), migrated)
+    }
+
+    @Test
+    fun `migrates legacy singleplayer world open and clear calls`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("WorldFlowSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.client.gui.screens.Screen;
+            import net.minecraft.client.gui.screens.worldselection.WorldOpenFlows;
+
+            public class WorldFlowSurface {
+                public void openDirect(Minecraft minecraft, Screen screen, String levelId) {
+                    minecraft.createWorldOpenFlows().loadLevel(screen, levelId);
+                }
+
+                public void openFromFlow(WorldOpenFlows flows, Screen screen, String levelId) {
+                    flows.loadLevel(screen, levelId);
+                }
+
+                public void stop(Minecraft minecraft, Screen screen) {
+                    minecraft.clearLevel(screen);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("WorldFlowSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("minecraft.createWorldOpenFlows().openWorld(levelId, () -> minecraft.setScreen(screen))"), migrated)
+        assertTrue(migrated.contains("flows.openWorld(levelId, () -> Minecraft.getInstance().setScreen(screen))"), migrated)
+        assertTrue(migrated.contains("minecraft.disconnect(screen);"), migrated)
+        assertFalse(migrated.contains(".loadLevel("), migrated)
+        assertFalse(migrated.contains(".clearLevel("), migrated)
+    }
+
+    @Test
+    fun `migrates legacy WorldOpenFlows mixin injection points to split open-world flow`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("WorldOpenFlowsMixin.java").writeText("""
+            package com.example;
+
+            import com.llamalad7.mixinextras.sugar.Local;
+            import com.mojang.serialization.Dynamic;
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.client.gui.screens.GenericMessageScreen;
+            import net.minecraft.client.gui.screens.Screen;
+            import net.minecraft.client.gui.screens.worldselection.WorldOpenFlows;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.level.storage.LevelStorageSource;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.injection.At;
+            import org.spongepowered.asm.mixin.injection.Inject;
+            import org.spongepowered.asm.mixin.injection.ModifyVariable;
+            import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+            import java.io.IOException;
+
+            @Mixin(WorldOpenFlows.class)
+            public class WorldOpenFlowsMixin {
+                @Inject(method = "loadLevel(Lnet/minecraft/client/gui/screens/Screen;Ljava/lang/String;)V", at = @At(value = "HEAD"), cancellable = true)
+                private void openWorld(Screen lastScreen, String levelName, CallbackInfo ci) {
+                    if (PreviewState.isActive() && Minecraft.getInstance().hasSingleplayerServer()) {
+                        PreviewState.enterLoadedLevel(levelName);
+                        ci.cancel();
+                    }
+                }
+
+                @ModifyVariable(method = "doLoadLevel(Lnet/minecraft/client/gui/screens/Screen;Ljava/lang/String;ZZZ)V", at = @At("HEAD"), ordinal = 2, argsOnly = true, remap = false)
+                private boolean confirmExperimentalWarning(boolean confirmExperimentalWarning) {
+                    if (PreviewState.isActive()) {
+                        return true;
+                    } else {
+                        return confirmExperimentalWarning;
+                    }
+                }
+
+                @Inject(method = "doLoadLevel(Lnet/minecraft/client/gui/screens/Screen;Ljava/lang/String;ZZZ)V", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/packs/repository/ServerPacksSource;createPackRepository(Lnet/minecraft/world/level/storage/LevelStorageSource${'$'}LevelStorageAccess;)Lnet/minecraft/server/packs/repository/PackRepository;", shift = At.Shift.BEFORE, remap = true), remap = false)
+                private void doLoadLevel(Screen lastScreen, String levelName, boolean safeMode, boolean checkAskForBackup, boolean confirmExperimentalWarning, CallbackInfo ci, @Local LevelStorageSource.LevelStorageAccess levelStorage) {
+                    try {
+                        if (PreviewState.isActive() && !PreviewState.sameSummaries(levelStorage.getSummary(levelStorage.getDataTag()))) {
+                            PreviewState.stopLevel(new GenericMessageScreen(Component.translatable("menu.savingLevel")));
+                            PreviewState.resetSummary();
+                        }
+                    } catch (IOException e) {
+                        return;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("WorldOpenFlowsMixin.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.minecraft.server.WorldStem;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.server.packs.repository.PackRepository;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.level.storage.PrimaryLevelData;"), migrated)
+        assertTrue(migrated.contains("""method = "openWorld(Ljava/lang/String;Ljava/lang/Runnable;)V""""), migrated)
+        assertTrue(migrated.contains("private void openWorld(String levelName, Runnable onFail, CallbackInfo ci)"), migrated)
+        assertTrue(migrated.contains("""method = "openWorldCheckWorldStemCompatibility(Lnet/minecraft/world/level/storage/LevelStorageSource${'$'}LevelStorageAccess;Lnet/minecraft/server/WorldStem;Lnet/minecraft/server/packs/repository/PackRepository;Ljava/lang/Runnable;)V""""), migrated)
+        assertTrue(migrated.contains("private void confirmExperimentalWarning(LevelStorageSource.LevelStorageAccess levelStorage, WorldStem worldStem, PackRepository packRepository, Runnable onFail, CallbackInfo ci)"), migrated)
+        assertTrue(migrated.contains("PreviewState.isActive() && worldStem.worldData() instanceof PrimaryLevelData modporterPrimaryLevelData"), migrated)
+        assertTrue(migrated.contains("modporterPrimaryLevelData.withConfirmedWarning(true);"), migrated)
+        assertTrue(migrated.contains("""method = "openWorldLoadLevelStem(Lnet/minecraft/world/level/storage/LevelStorageSource${'$'}LevelStorageAccess;Lcom/mojang/serialization/Dynamic;ZLjava/lang/Runnable;)V""""), migrated)
+        assertTrue(migrated.contains("private void doLoadLevel(LevelStorageSource.LevelStorageAccess levelStorage, Dynamic<?> levelData, boolean safeMode, Runnable onFail, CallbackInfo ci)"), migrated)
+        assertFalse(migrated.contains("loadLevel(Lnet/minecraft/client/gui/screens/Screen;Ljava/lang/String;)V"), migrated)
+        assertFalse(migrated.contains("doLoadLevel(Lnet/minecraft/client/gui/screens/Screen;Ljava/lang/String;ZZZ)V"), migrated)
+        assertFalse(migrated.contains("@ModifyVariable"), migrated)
+        assertFalse(migrated.contains("@Local"), migrated)
+        assertFalse(migrated.contains("import org.spongepowered.asm.mixin.injection.ModifyVariable;"), migrated)
+        assertFalse(migrated.contains("import com.llamalad7.mixinextras.sugar.Local;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.client.gui.screens.Screen;"), migrated)
+    }
+
+    @Test
+    fun `migrates LevelStorageAccess summary reads through data tag`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LevelSummarySurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.storage.LevelStorageSource;
+            import net.minecraft.world.level.storage.LevelSummary;
+
+            import javax.annotation.Nullable;
+
+            public class LevelSummarySurface {
+                @Nullable
+                private static LevelSummary loadedSummary = null;
+
+                @Nullable
+                public static LevelSummary getLoaded(LevelStorageSource.LevelStorageAccess source) {
+                    loadedSummary = source.getSummary();
+                    return loadedSummary;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("LevelSummarySurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import java.io.IOException;"), migrated)
+        assertTrue(migrated.contains("try {"), migrated)
+        assertTrue(migrated.contains("loadedSummary = source.getSummary(source.getDataTag());"), migrated)
+        assertTrue(migrated.contains("} catch (IOException e) {"), migrated)
+        assertTrue(migrated.contains("return null;"), migrated)
+        assertFalse(migrated.contains("source.getSummary();"), migrated)
+    }
+
+    @Test
+    fun `level summary nullable migration does not use previous method fallback`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LevelSummarySurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.storage.LevelStorageSource;
+            import net.minecraft.world.level.storage.LevelSummary;
+
+            import javax.annotation.Nullable;
+
+            public class LevelSummarySurface {
+                @Nullable
+                public static LevelSummary previous(LevelStorageSource.LevelStorageAccess source) {
+                    return null;
+                }
+
+                public static Object current(LevelStorageSource.LevelStorageAccess source) {
+                    LevelSummary summary = null;
+                    summary = source.getSummary();
+                    return summary;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("LevelSummarySurface.java").readText()
+        val currentMethod = migrated.substringAfter("public static Object current")
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("summary = source.getSummary(source.getDataTag());"), migrated)
+        assertFalse(migrated.contains("catch (IOException"), migrated)
+        assertFalse(currentMethod.contains("return null;"), currentMethod)
+    }
+
+    @Test
+    fun `wraps void LevelStorageAccess data tag reads in IOException guard`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LevelStorageCallback.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.Screen;
+            import net.minecraft.world.level.storage.LevelStorageSource;
+            import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+            public class LevelStorageCallback {
+                private void beforeLoad(Screen screen, String levelName, CallbackInfo ci, LevelStorageSource.LevelStorageAccess levelStorage) {
+                    if (PreviewState.isActive() && !PreviewState.sameSummaries(levelStorage.getSummary(levelStorage.getDataTag()))) {
+                        PreviewState.stop();
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("LevelStorageCallback.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import java.io.IOException;"), migrated)
+        assertTrue(migrated.contains("try {\n            if (PreviewState.isActive() && !PreviewState.sameSummaries(levelStorage.getSummary(levelStorage.getDataTag()))) {"), migrated)
+        assertTrue(migrated.contains("} catch (IOException e) {\n            return;\n        }"), migrated)
+    }
+
+    @Test
+    fun `deduplicates global loot modifier provider lookup constructor arguments`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LegacyGlobalLootModifierGenerator.java").writeText("""
+            package com.example;
+
+            import java.util.concurrent.CompletableFuture;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.common.data.GlobalLootModifierProvider;
+
+            public class LegacyGlobalLootModifierGenerator extends GlobalLootModifierProvider {
+                public LegacyGlobalLootModifierGenerator(PackOutput output, CompletableFuture<HolderLookup.Provider> provider) {
+                    super(output, provider, "example");
+                }
+
+                @Override
+                protected void start() {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LegacyGlobalLootModifierData.java").writeText("""
+            package com.example;
+
+            import java.util.concurrent.CompletableFuture;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.data.DataGenerator;
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            public class LegacyGlobalLootModifierData {
+                public static void gatherData(GatherDataEvent event) {
+                    DataGenerator generator = event.getGenerator();
+                    PackOutput output = event.getGenerator().getPackOutput();
+                    CompletableFuture<HolderLookup.Provider> provider = event.getLookupProvider();
+                    generator.addProvider(event.includeServer(), new LegacyGlobalLootModifierGenerator(output, provider, provider));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("LegacyGlobalLootModifierData.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("new LegacyGlobalLootModifierGenerator(output, provider)"), migrated)
+        assertFalse(migrated.contains("provider, provider"), migrated)
+    }
+
+    @Test
+    fun `migrates pack metadata pack type maps to supported format range`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PackMetadataMapSurface.java").writeText("""
+            package com.example;
+
+            import java.util.Map;
+            import net.minecraft.SharedConstants;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.server.packs.PackType;
+            import net.minecraft.server.packs.metadata.pack.PackMetadataSection;
+
+            public class PackMetadataMapSurface {
+                public PackMetadataSection metadata() {
+                    Map<PackType, Integer> packTypes = Map.of(PackType.SERVER_DATA, SharedConstants.getCurrentVersion().getPackVersion(PackType.SERVER_DATA));
+                    return new PackMetadataSection(Component.literal("Data"), SharedConstants.getCurrentVersion().getPackVersion(PackType.CLIENT_RESOURCES), packTypes);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("PackMetadataMapSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.minecraft.util.InclusiveRange;"), migrated)
+        assertTrue(migrated.contains("new PackMetadataSection(Component.literal(\"Data\"),"), migrated)
+        assertTrue(migrated.contains("SharedConstants.getCurrentVersion().getPackVersion(PackType.SERVER_DATA),"), migrated)
+        assertTrue(migrated.contains("java.util.Optional.of(new InclusiveRange<>(0, Integer.MAX_VALUE))"), migrated)
+        assertFalse(migrated.contains("Map<PackType, Integer> packTypes"), migrated)
+        assertFalse(migrated.contains("import java.util.Map;"), migrated)
+    }
+
+    @Test
+    fun `migrates Optional getValue and MapCodec serialization calls structurally`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("MapCodecOptionalSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Dynamic;
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import java.util.Optional;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.nbt.NbtOps;
+            import net.minecraft.nbt.Tag;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class MapCodecOptionalSurface {
+                private static final Logger LOGGER = new Logger();
+                // Properties.CODEC.parse(new Dynamic<Tag>(NbtOps.INSTANCE, tag.get("Properties"))).getOrThrow(true, LOGGER::error);
+                private static final String DOC = "Properties.CODEC.encodeStart(NbtOps.INSTANCE, parsed).getOrThrow(true, LOGGER::error)";
+
+                public void migrate(CompoundTag tag, Optional<BlockState> state) {
+                    Properties parsed = Properties.CODEC.parse(new Dynamic<Tag>(NbtOps.INSTANCE, tag.get("Properties"))).getOrThrow(true, LOGGER::error);
+                    Properties.CODEC.encodeStart(NbtOps.INSTANCE, parsed).getOrThrow(true, LOGGER::error);
+                    if (state.getValue().isAir()) {
+                        BlockState next = state.getValue();
+                    }
+                }
+
+                public static class Properties {
+                    public static final MapCodec<Properties> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group().apply(instance, Properties::new));
+                }
+
+                private static class Logger {
+                    void error(String message) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("MapCodecOptionalSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("Properties.CODEC.codec().parse(new Dynamic<Tag>(NbtOps.INSTANCE, tag.get(\"Properties\"))).promotePartial(LOGGER::error).getOrThrow(IllegalStateException::new)"), migrated)
+        assertTrue(migrated.contains("Properties.CODEC.codec().encodeStart(NbtOps.INSTANCE, parsed).promotePartial(LOGGER::error).getOrThrow(IllegalStateException::new)"), migrated)
+        assertTrue(migrated.contains("if (state.get().isAir())"), migrated)
+        assertTrue(migrated.contains("BlockState next = state.get();"), migrated)
+        assertTrue(migrated.contains("""// Properties.CODEC.parse(new Dynamic<Tag>(NbtOps.INSTANCE, tag.get("Properties"))).getOrThrow(true, LOGGER::error);"""), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "Properties.CODEC.encodeStart(NbtOps.INSTANCE, parsed).getOrThrow(true, LOGGER::error)";"""), migrated)
+        assertFalse(migrated.contains("state.getValue()"), migrated)
+        assertFalse(migrated.contains("""Properties parsed = Properties.CODEC.parse(new Dynamic<Tag>(NbtOps.INSTANCE, tag.get("Properties"))).getOrThrow(true, LOGGER::error);"""), migrated)
+        assertFalse(migrated.contains("Properties.CODEC.encodeStart(NbtOps.INSTANCE, parsed).getOrThrow(true, LOGGER::error);"), migrated)
+    }
+
+    @Test
+    fun `migrates registry-required codecs to MapCodec without unsafe wrappers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ProcessorRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessorType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ProcessorRegistry {
+                public static final DeferredRegister<StructureProcessorType<?>> STRUCTURE_PROCESSOR_TYPES = DeferredRegister.create(BuiltInRegistries.STRUCTURE_PROCESSOR, "example");
+                public static final DeferredHolder<StructureProcessorType<?>, StructureProcessorType<ExampleProcessor>> EXAMPLE = STRUCTURE_PROCESSOR_TYPES.register("example", () -> () -> ExampleProcessor.CODEC);
+                public static final DeferredHolder<StructureProcessorType<?>, StructureProcessorType<UnitProcessor>> UNIT = STRUCTURE_PROCESSOR_TYPES.register("unit", () -> () -> UnitProcessor.CODEC);
+                public static final DeferredHolder<StructureProcessorType<?>, StructureProcessorType<AgeProcessor>> AGE = STRUCTURE_PROCESSOR_TYPES.register("age", () -> () -> AgeProcessor.CODEC);
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleProcessor.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessor;
+
+            public class ExampleProcessor extends StructureProcessor {
+                public static final Codec<ExampleProcessor> CODEC = RecordCodecBuilder.create(instance -> instance.group().apply(instance, ExampleProcessor::new));
+            }
+        """.trimIndent())
+        srcDir.resolve("UnitProcessor.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessor;
+
+            public class UnitProcessor extends StructureProcessor {
+                public static final UnitProcessor INSTANCE = new UnitProcessor();
+                public static final Codec<UnitProcessor> CODEC = Codec.unit(UnitProcessor.INSTANCE);
+            }
+        """.trimIndent())
+        srcDir.resolve("AgeProcessor.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessor;
+
+            public class AgeProcessor extends StructureProcessor {
+                private final float mossiness;
+
+                public AgeProcessor(float mossiness) {
+                    this.mossiness = mossiness;
+                }
+
+                public static final Codec<AgeProcessor> CODEC = Codec.FLOAT.fieldOf("mossiness").xmap(AgeProcessor::new, value -> value.mossiness).codec();
+            }
+        """.trimIndent())
+        srcDir.resolve("PlacementRegistry.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.core.Registry;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifier;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifierType;
+
+            public class PlacementRegistry {
+                public static final PlacementModifierType<ConfigFilter> CONFIG = register(ResourceLocation.parse("example:config"), ConfigFilter.CODEC);
+
+                public static <P extends PlacementModifier> PlacementModifierType<P> register(ResourceLocation name, Codec<P> codec) {
+                    return Registry.register(BuiltInRegistries.PLACEMENT_MODIFIER_TYPE, name, () -> codec);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ConfigFilter.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import com.mojang.serialization.DataResult;
+            import net.minecraft.world.level.levelgen.placement.PlacementContext;
+            import net.minecraft.world.level.levelgen.placement.PlacementFilter;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifierType;
+
+            public class ConfigFilter extends PlacementFilter {
+                public static final Codec<ConfigFilter> CODEC = Codec.STRING.comapFlatMap(ConfigFilter::buildDeserialization, filter -> ConfigCodecUtil.serialize(filter.config));
+
+                private final ConfigValue config;
+
+                public ConfigFilter(ConfigValue config) {
+                    this.config = config;
+                }
+
+                @Override
+                protected boolean shouldPlace(PlacementContext context, net.minecraft.util.RandomSource random, net.minecraft.core.BlockPos pos) {
+                    return true;
+                }
+
+                @Override
+                public PlacementModifierType<?> type() {
+                    return PlacementRegistry.CONFIG;
+                }
+
+                private static DataResult<ConfigFilter> buildDeserialization(String configId) {
+                    return DataResult.success(new ConfigFilter(new ConfigValue()));
+                }
+
+                private static class ConfigValue {
+                }
+
+                private static class ConfigCodecUtil {
+                    static String serialize(ConfigValue config) {
+                        return "config";
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("MisnamedPlacementRegistry.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.core.Registry;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifier;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifierType;
+
+            @Deprecated class ActualPlacementRegistry {
+                static final PlacementModifierType<MisnamedFilter> SCATTER = register(ResourceLocation.parse("example:scatter"), MisnamedFilter.CODEC);
+
+                static <P extends PlacementModifier> PlacementModifierType<P> register(ResourceLocation name, Codec<P> codec) {
+                    return Registry.register(BuiltInRegistries.PLACEMENT_MODIFIER_TYPE, name, () -> codec);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("MisnamedFilter.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.world.level.levelgen.placement.PlacementContext;
+            import net.minecraft.world.level.levelgen.placement.PlacementFilter;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifierType;
+
+            public class MisnamedFilter extends PlacementFilter {
+                public static final Codec<MisnamedFilter> CODEC = Codec.unit(new MisnamedFilter());
+
+                @Override
+                protected boolean shouldPlace(PlacementContext context, net.minecraft.util.RandomSource random, net.minecraft.core.BlockPos pos) {
+                    return true;
+                }
+
+                @Override
+                public PlacementModifierType<?> type() {
+                    return ActualPlacementRegistry.SCATTER;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TreeDecoratorRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.levelgen.feature.treedecorators.TreeDecoratorType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class TreeDecoratorRegistry {
+                public static final DeferredRegister<TreeDecoratorType<?>> TREE_DECORATORS = DeferredRegister.create(Registries.TREE_DECORATOR_TYPE, "example");
+                public static final DeferredHolder<TreeDecoratorType<?>, TreeDecoratorType<HolidayTreeDecorator>> HOLIDAY = TREE_DECORATORS.register("holiday", () -> new TreeDecoratorType<>(HolidayTreeDecorator.CODEC));
+            }
+        """.trimIndent())
+        srcDir.resolve("HolidayTreeDecorator.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.world.level.levelgen.feature.stateproviders.BlockStateProvider;
+            import net.minecraft.world.level.levelgen.feature.treedecorators.TreeDecorator;
+            import net.minecraft.world.level.levelgen.feature.treedecorators.TreeDecoratorType;
+
+            public class HolidayTreeDecorator extends TreeDecorator {
+                public static final Codec<HolidayTreeDecorator> CODEC = BlockStateProvider.CODEC.fieldOf("provider").xmap(HolidayTreeDecorator::new, value -> value.provider).codec();
+                private final BlockStateProvider provider;
+
+                public HolidayTreeDecorator(BlockStateProvider provider) {
+                    this.provider = provider;
+                }
+
+                @Override
+                protected TreeDecoratorType<?> type() {
+                    return TreeDecoratorRegistry.HOLIDAY.get();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val processor = srcDir.resolve("ExampleProcessor.java").readText()
+        val unitProcessor = srcDir.resolve("UnitProcessor.java").readText()
+        val ageProcessor = srcDir.resolve("AgeProcessor.java").readText()
+        val placement = srcDir.resolve("PlacementRegistry.java").readText()
+        val configFilter = srcDir.resolve("ConfigFilter.java").readText()
+        val misnamedPlacement = srcDir.resolve("MisnamedPlacementRegistry.java").readText()
+        val misnamedFilter = srcDir.resolve("MisnamedFilter.java").readText()
+        val treeDecorator = srcDir.resolve("HolidayTreeDecorator.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(processor.contains("import com.mojang.serialization.MapCodec;"), processor)
+        assertTrue(processor.contains("public static final MapCodec<ExampleProcessor> CODEC = RecordCodecBuilder.<ExampleProcessor>mapCodec("), processor)
+        assertFalse(processor.contains("import com.mojang.serialization.Codec;"), processor)
+        assertFalse(processor.contains("assumeMapUnsafe"), processor)
+        assertTrue(unitProcessor.contains("import com.mojang.serialization.MapCodec;"), unitProcessor)
+        assertTrue(unitProcessor.contains("public static final MapCodec<UnitProcessor> CODEC = MapCodec.unit(UnitProcessor.INSTANCE);"), unitProcessor)
+        assertFalse(unitProcessor.contains("import com.mojang.serialization.Codec;"), unitProcessor)
+        assertTrue(ageProcessor.contains("import com.mojang.serialization.MapCodec;"), ageProcessor)
+        assertTrue(ageProcessor.contains("public static final MapCodec<AgeProcessor> CODEC = Codec.FLOAT.fieldOf(\"mossiness\").xmap(AgeProcessor::new, value -> value.mossiness);"), ageProcessor)
+        assertTrue(ageProcessor.contains("import com.mojang.serialization.Codec;"), ageProcessor)
+        assertFalse(ageProcessor.contains(".codec();"), ageProcessor)
+        assertTrue(placement.contains("import com.mojang.serialization.MapCodec;"), placement)
+        assertTrue(placement.contains("import net.neoforged.neoforge.registries.DeferredHolder;"), placement)
+        assertTrue(placement.contains("import net.neoforged.neoforge.registries.DeferredRegister;"), placement)
+        assertTrue(placement.contains("DeferredRegister.create(Registries.PLACEMENT_MODIFIER_TYPE, \"example\")"), placement)
+        assertTrue(placement.contains("DeferredHolder<PlacementModifierType<?>, PlacementModifierType<ConfigFilter>> CONFIG = register(\"config\", ConfigFilter.CODEC);"), placement)
+        assertTrue(placement.contains("DeferredHolder<PlacementModifierType<?>, PlacementModifierType<P>> register(String name, MapCodec<P> codec)"), placement)
+        assertTrue(placement.contains("return PLACEMENT_MODIFIER_TYPES.register(name, () -> () -> codec);"), placement)
+        assertFalse(placement.contains("Registry.register(BuiltInRegistries.PLACEMENT_MODIFIER_TYPE"), placement)
+        assertFalse(placement.contains("import net.minecraft.core.Registry;"), placement)
+        assertFalse(placement.contains("import net.minecraft.core.registries.BuiltInRegistries;"), placement)
+        assertFalse(Regex("""(?<!Map)\bCodec\s*<\s*P\s*>\s+codec""").containsMatchIn(placement), placement)
+        assertFalse(placement.contains("import com.mojang.serialization.Codec;"), placement)
+        assertTrue(configFilter.contains("import com.mojang.serialization.MapCodec;"), configFilter)
+        assertTrue(configFilter.contains("public static final MapCodec<ConfigFilter> CODEC = Codec.STRING.comapFlatMap(ConfigFilter::buildDeserialization, filter -> ConfigCodecUtil.serialize(filter.config)).fieldOf(\"value\");"), configFilter)
+        assertFalse(configFilter.contains(".fieldOf(\"config\")"), configFilter)
+        assertTrue(configFilter.contains("import com.mojang.serialization.Codec;"), configFilter)
+        assertTrue(configFilter.contains("return PlacementRegistry.CONFIG.get();"), configFilter)
+        assertTrue(misnamedPlacement.contains("DeferredHolder<PlacementModifierType<?>, PlacementModifierType<MisnamedFilter>> SCATTER = register(\"scatter\", MisnamedFilter.CODEC);"), misnamedPlacement)
+        assertTrue(misnamedFilter.contains("return ActualPlacementRegistry.SCATTER.get();"), misnamedFilter)
+        assertFalse(misnamedFilter.contains("MisnamedPlacementRegistry"), misnamedFilter)
+        assertTrue(treeDecorator.contains("import com.mojang.serialization.MapCodec;"), treeDecorator)
+        assertTrue(treeDecorator.contains("public static final MapCodec<HolidayTreeDecorator> CODEC = BlockStateProvider.CODEC.fieldOf(\"provider\").xmap(HolidayTreeDecorator::new, value -> value.provider);"), treeDecorator)
+        assertFalse(treeDecorator.contains("import com.mojang.serialization.Codec;"), treeDecorator)
+        assertFalse(treeDecorator.contains(".codec();"), treeDecorator)
+    }
+
+    @Test
+    fun `placement modifier type migration does not use project mod id when registry name lacks namespace`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("main_mod")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("UnscopedPlacementRegistry.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.core.Registry;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifier;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifierType;
+
+            public class UnscopedPlacementRegistry {
+                public static final PlacementModifierType<ConfigFilter> CONFIG = register(ResourceLocation.parse("config"), ConfigFilter.CODEC);
+
+                public static <P extends PlacementModifier> PlacementModifierType<P> register(ResourceLocation name, Codec<P> codec) {
+                    return Registry.register(BuiltInRegistries.PLACEMENT_MODIFIER_TYPE, name, () -> codec);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ConfigFilter.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+
+            public class ConfigFilter {
+                public static final Codec<ConfigFilter> CODEC = null;
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val placement = srcDir.resolve("UnscopedPlacementRegistry.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(placement.contains("register(ResourceLocation.parse(\"config\"), ConfigFilter.CODEC)"), placement)
+        assertFalse(placement.contains("DeferredRegister.create(Registries.PLACEMENT_MODIFIER_TYPE, \"main_mod\")"), placement)
+        assertFalse(placement.contains("DeferredHolder<PlacementModifierType<?>"), placement)
+    }

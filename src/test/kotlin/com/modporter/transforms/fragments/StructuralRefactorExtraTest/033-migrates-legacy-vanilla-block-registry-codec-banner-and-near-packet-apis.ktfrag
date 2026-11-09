@@ -1,0 +1,1150 @@
+
+    @Test
+    fun `migrates legacy vanilla block registry codec banner and near packet APIs by source shape`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BlockRegistrySurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.ButtonBlock;
+            import net.minecraft.world.level.block.DoorBlock;
+            import net.minecraft.world.level.block.FenceGateBlock;
+            import net.minecraft.world.level.block.PressurePlateBlock;
+            import net.minecraft.world.level.block.StairBlock;
+            import net.minecraft.world.level.block.TorchBlock;
+            import net.minecraft.world.level.block.TrapDoorBlock;
+            import net.minecraft.world.level.block.WallTorchBlock;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+            import net.minecraft.core.particles.ParticleTypes;
+
+            public class BlockRegistrySurface {
+                public Object stair() {
+                    return new StairBlock(() -> Blocks.STONE.get().defaultBlockState(), BlockBehaviour.Properties.ofFullCopy(Blocks.STONE.get()));
+                }
+
+                public Object button() {
+                    return new ButtonBlock(BlockBehaviour.Properties.of().noCollission(), ModBlockSets.WOOD_SET, 30, true);
+                }
+
+                public Object gate() {
+                    return new FenceGateBlock(BlockBehaviour.Properties.ofFullCopy(Blocks.PLANKS.get()), ModWoodTypes.WOOD);
+                }
+
+                public Object plate() {
+                    return new PressurePlateBlock(PressurePlateBlock.Sensitivity.EVERYTHING, BlockBehaviour.Properties.of().strength(0.5F), ModBlockSets.WOOD_SET);
+                }
+
+                public Object door() {
+                    return new DoorBlock(BlockBehaviour.Properties.of().noOcclusion(), ModBlockSets.WOOD_SET);
+                }
+
+                public Object trapdoor() {
+                    return new TrapDoorBlock(BlockBehaviour.Properties.of().noOcclusion(), ModBlockSets.WOOD_SET);
+                }
+
+                public Object torch() {
+                    return new TorchBlock(BlockBehaviour.Properties.ofFullCopy(Blocks.TORCH), ParticleTypes.SMOKE);
+                }
+
+                public Object wallTorch() {
+                    return new WallTorchBlock(BlockBehaviour.Properties.ofFullCopy(Blocks.WALL_TORCH), ModParticleTypes.SPARKLE.get());
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BannerSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.block.entity.BannerPattern;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BannerSurface {
+                public static final DeferredRegister<BannerPattern> BANNER_PATTERNS = DeferredRegister.create(Registries.BANNER_PATTERN, ExampleMod.ID);
+                public static final Object EXAMPLE = BANNER_PATTERNS.register("example", () -> new BannerPattern("ex"));
+            }
+        """.trimIndent())
+        srcDir.resolve("MagicPaintingVariant.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.MapCodec;
+
+            public record MagicPaintingVariant(String id) {
+                public static final MapCodec<MagicPaintingVariant> CODEC = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("RegistrySurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.core.Holder;
+            import net.minecraft.core.Registry;
+            import net.minecraft.resources.RegistryFileCodec;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.util.ExtraCodecs;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class RegistrySurface {
+                public static final ResourceKey<Registry<BiomeLayerType>> BIOME_LAYER_TYPE_KEY = null;
+                public static final DeferredRegister<BiomeLayerType> BIOME_LAYER_TYPES = DeferredRegister.create(BIOME_LAYER_TYPE_KEY, ExampleMod.ID);
+                public static final Registry<BiomeLayerType> REGISTRY = BIOME_LAYER_TYPES.makeRegistry(builder -> builder.allowModification().disableSync());
+                public static final Codec<BiomeLayerType> CODEC = ExtraCodecs.lazyInitializedCodec(() -> REGISTRY.getCodec());
+                public static final ResourceKey<Registry<MagicPaintingVariant>> MAGIC_KEY = null;
+                public static final Codec<Holder<MagicPaintingVariant>> HOLDER_CODEC = RegistryFileCodec.create(MAGIC_KEY, MagicPaintingVariant.CODEC, false);
+            }
+        """.trimIndent())
+        srcDir.resolve("BiomeLayerType.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+
+            @FunctionalInterface
+            public interface BiomeLayerType {
+                Codec<? extends BiomeLayerFactory> getCodec();
+            }
+        """.trimIndent())
+        srcDir.resolve("NetworkSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.Level;
+            import net.neoforged.neoforge.network.PacketDistributor;
+
+            public class NetworkSurface {
+                private static void send(Level level, BlockPos pos, DemoPacket packet) {
+                    PacketDistributor.TargetPoint targetPoint = new PacketDistributor.TargetPoint(pos.getX(), pos.getY(), pos.getZ(), 64, level.dimension());
+                    NetworkHandler.CHANNEL.send(PacketDistributor.NEAR.with(() -> targetPoint), packet);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BlockHelperSurface.java").writeText("""
+            package com.example;
+
+            import java.util.function.Supplier;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.StairBlock;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockHelperSurface {
+                public static final DeferredRegister<Block> BLOCKS = null;
+                public static final DeferredHolder<CustomBlock, CustomBlock> CUSTOM = register("custom", () -> new CustomBlock());
+                public static final DeferredHolder<StairBlock, StairBlock> STAIRS = register("stairs", () -> new StairBlock(null, null));
+
+                public static <T extends Block> DeferredHolder<T, T> register(String name, Supplier<Block> block) {
+                    DeferredHolder<Block, ? extends Block> ret = BLOCKS.register(name, block);
+                    return (DeferredHolder<T, T>) ret;
+                }
+            }
+
+            class CustomBlock extends Block {
+                CustomBlock() {
+                    super(null);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("FeatureSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import java.util.List;
+            import net.minecraft.world.level.levelgen.feature.Feature;
+            import net.minecraft.world.level.levelgen.feature.configurations.FeatureConfiguration;
+            import net.minecraft.world.level.levelgen.feature.treedecorators.TreeDecorator;
+            import net.minecraft.world.level.levelgen.structure.templatesystem.ProcessorRule;
+
+            class ConfigSurface implements FeatureConfiguration {
+                public static final Codec<ConfigSurface> CODEC = RecordCodecBuilder.create(instance -> instance.group(
+                        TreeDecorator.CODEC.codec().listOf().fieldOf("decorators").forGetter(obj -> obj.decorators),
+                        ProcessorRule.CODEC.codec().listOf().fieldOf("rules").forGetter(obj -> obj.rules)
+                ).apply(instance, ConfigSurface::new));
+                final List<TreeDecorator> decorators;
+                final List<ProcessorRule> rules;
+
+                ConfigSurface(List<TreeDecorator> decorators, List<ProcessorRule> rules) {
+                    this.decorators = decorators;
+                    this.rules = rules;
+                }
+            }
+
+            record MapConfig(int value) implements FeatureConfiguration {
+                public static final MapCodec<MapConfig> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
+                        Codec.INT.fieldOf("value").forGetter(MapConfig::value)
+                ).apply(instance, MapConfig::new));
+            }
+
+            class MapConfigFeature extends Feature<MapConfig> {
+                MapConfigFeature(Codec<MapConfig> codec) {
+                    super(codec);
+                }
+            }
+
+            public class FeatureSurface {
+                Object value = new MapConfigFeature(MapConfig.CODEC);
+            }
+        """.trimIndent())
+        srcDir.resolve("CreativeSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.CreativeModeTab;
+            import net.minecraft.world.item.EnchantedBookItem;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentInstance;
+            import net.minecraft.world.item.enchantment.Enchantments;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class CreativeSurface {
+                public static CreativeModeTab tab() {
+                    return CreativeModeTab.builder()
+                            .displayItems((parameters, output) -> {
+                                output.accept(EnchantedBookItem.createForEnchantment(new EnchantmentInstance(Enchantments.ALL_DAMAGE_PROTECTION, 1)));
+                                custom(output, CreativeModeTab.TabVisibility.PARENT_TAB_ONLY);
+                            })
+                            .build();
+                }
+
+                private static void custom(CreativeModeTab.Output output, CreativeModeTab.TabVisibility visibility) {
+                    for (DeferredHolder<Enchantment, ? extends Enchantment> enchantment : CustomEnchantments.ENCHANTMENTS.getEntries()) {
+                        output.accept(EnchantedBookItem.createForEnchantment(new EnchantmentInstance(enchantment.get(), enchantment.get().getMaxLevel())), visibility);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("MiscSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.core.Registry;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.sounds.Music;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.util.ExtraCodecs;
+            import net.minecraft.util.random.WeightedEntry;
+            import net.neoforged.neoforge.common.CommonHooks;
+            import net.neoforged.neoforge.registries.RegistryObject;
+
+            public class MiscSurface {
+                public static final Registry<BiomeLayerType> REGISTRY = null;
+                public static final Codec<BiomeLayerType> CODEC = ExtraCodecs.lazyInitializedCodec(() -> REGISTRY.byNameCodec());
+
+                public Music music() {
+                    return new Music(Sounds.MUSIC.getHolder().orElseThrow(), 20, 40, true);
+                }
+
+                public boolean tool(BlockState state, Player player) {
+                    return CommonHooks.isCorrectToolForDrops(state, player);
+                }
+
+                public Object refs(java.util.stream.Stream<RegistryObject<String>> stream) {
+                    return stream.map(RegistryObject::get);
+                }
+
+                public Object data(WeightedEntry.Wrapper<Object> wrapper) {
+                    return wrapper.getData();
+                }
+
+                public Object dataRefs(java.util.stream.Stream<WeightedEntry.Wrapper<Object>> stream) {
+                    return stream.map(WeightedEntry.Wrapper::getData);
+                }
+
+                public Object builtinCodec() {
+                    return BuiltInRegistries.ENTITY_TYPE.getCodec().comapFlatMap(MiscSurface::mob, entityType -> entityType);
+                }
+
+                public String textJson() {
+                    return Component.Serializer.toJson(Component.literal("ok"));
+                }
+
+                private static com.mojang.serialization.DataResult<EntityType<? extends Mob>> mob(EntityType<?> type) {
+                    return com.mojang.serialization.DataResult.success((EntityType<? extends Mob>) type);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("MapCodecRequiredSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import java.util.List;
+            import net.minecraft.world.level.levelgen.structure.BoundingBox;
+            import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessor;
+            import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessorType;
+
+            public class MapCodecRequiredSurface extends StructureProcessor {
+                public static final Codec<MapCodecRequiredSurface> CODEC = RecordCodecBuilder.create(instance -> instance.group(
+                        Codec.FLOAT.fieldOf("integrity").forGetter(o -> o.integrity)
+                ).apply(instance, MapCodecRequiredSurface::new));
+                public static final Codec<MapCodecRequiredSurface> LIST_CODEC = BoundingBox.CODEC.codec().listOf().xmap(MapCodecRequiredSurface::new, p -> p.cutouts);
+                public static final Codec<MapCodecRequiredSurface> FIELD_CODEC = BoundingBox.CODEC.codec().listOf().fieldOf("cutouts").xmap(MapCodecRequiredSurface::new, p -> p.cutouts).codec();
+                final float integrity;
+                final List<BoundingBox> cutouts;
+
+                MapCodecRequiredSurface(float integrity) {
+                    this.integrity = integrity;
+                    this.cutouts = List.of();
+                }
+
+                MapCodecRequiredSurface(List<BoundingBox> cutouts) {
+                    this.integrity = 1.0F;
+                    this.cutouts = cutouts;
+                }
+
+                protected StructureProcessorType<?> getType() {
+                    return null;
+                }
+
+                public static class NestedProcessor extends StructureProcessor {
+                    public static final NestedProcessor INSTANCE = new NestedProcessor();
+                    public static final Codec<NestedProcessor> CODEC = Codec.unit(() -> INSTANCE);
+
+                    protected StructureProcessorType<?> getType() {
+                        return null;
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("HolderAndItemSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.item.BowlFoodItem;
+            import net.minecraft.world.item.FoodProperties;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.SwordItem;
+            import net.minecraft.world.item.Tier;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.neoforged.neoforge.common.NeoForgeMod;
+            import net.neoforged.neoforge.fluids.FluidInteractionRegistry;
+            import net.neoforged.neoforge.fluids.FluidType;
+
+            public class HolderAndItemSurface {
+                private final Holder<Widget> widget = null;
+                private final java.util.HashMap<Block, Block> replacements = new java.util.HashMap<>();
+
+                public Object holder(Level level, BlockPos pos, RegistryThing thing) {
+                    this.widget.get().run();
+                    return level.getBiome(pos).get();
+                }
+
+                public void blocks(Holder<Block> ore, Holder<Block> ground) {
+                    ore.defaultBlockState();
+                    replacements.put(ore, ground);
+                }
+
+                public void inferred(TagKey<Block> tag) {
+                    BuiltInRegistries.BLOCK.getOrCreateTag(tag).forEach(ore -> {
+                        if (!ore.defaultBlockState().is(tag)) {
+                            replacements.put(ore, ore);
+                        }
+                    });
+                }
+
+                public Object deferred(RegistryThing thing) {
+                    return thing.VALUE.getHolder().get();
+                }
+
+                public Object vanillaFluidTypes() {
+                    return java.util.List.of(NeoForgeMod.EMPTY_TYPE.get(), NeoForgeMod.WATER_TYPE.get(), NeoForgeMod.LAVA_TYPE.get(), NeoForgeMod.MILK_TYPE.get());
+                }
+
+                public void fluidInteraction() {
+                    FluidInteractionRegistry.addInteraction(NeoForgeMod.WATER_TYPE, new FluidInteractionRegistry.InteractionInformation(null, null));
+                }
+
+                public boolean fluidChecks(Entity entity, FluidType type) {
+                    return entity.isEyeInFluidType(NeoForgeMod.WATER_TYPE)
+                            || type == NeoForgeMod.MILK_TYPE
+                            || net.neoforged.neoforge.common.NeoForgeMod.LAVA_TYPE != type;
+                }
+
+                public Object sword(Tier tier) {
+                    return new SwordItem(tier, 3, -2.4F, new Item.Properties());
+                }
+
+                public Object food() {
+                    return new BowlFoodItem(new Item.Properties().food(new FoodProperties.Builder().nutrition(1).meat().build()));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("RecipeAndMenuSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.MenuScreens;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.inventory.CraftingContainer;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.CraftingBookCategory;
+            import net.minecraft.world.item.crafting.CustomRecipe;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.level.Level;
+
+            public class RecipeAndMenuSurface extends CustomRecipe {
+                public RecipeAndMenuSurface(CraftingBookCategory category) {
+                    super(id, category);
+                }
+
+                public boolean matches(CraftingContainer container, Level level) {
+                    for (int i = 0; i < container.getContainerSize(); i++) {
+                        container.getItem(i);
+                    }
+                    return true;
+                }
+
+                public ItemStack assemble(CraftingContainer container, HolderLookup.Provider access) {
+                    return ItemStack.EMPTY;
+                }
+
+                public RecipeSerializer<?> getSerializer() {
+                    return null;
+                }
+
+                public static void renderScreens() {
+                    MenuScreens.register(ModMenus.EXAMPLE.get(), ExampleScreen::new);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("RecipeBoundarySurface.java").writeText("""
+            package com.example;
+
+            import java.util.HashMap;
+            import java.util.Map;
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.inventory.CraftingContainer;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeType;
+
+            public class RecipeBoundarySurface {
+                private final CraftingContainer assemblyMatrix = null;
+                private final Map<Integer, ItemStack> temp = new HashMap<>();
+
+                public void take(Player player, ItemStack stack) {
+                    for (Recipe<CraftingContainer> recipe : player.level().getRecipeManager().getRecipesFor(RecipeType.CRAFTING, this.assemblyMatrix, player.level())) {
+                        recipe.getResultItem(player.level().registryAccess());
+                    }
+                    NonNullList<ItemStack> remainingItems = player.level().getRecipeManager().getRemainingItemsFor(RecipeType.CRAFTING, this.assemblyMatrix, player.level());
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("EnchantmentIterationSurface.java").writeText("""
+            package com.example;
+
+            import java.util.Objects;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentHelper;
+            import net.minecraft.world.item.enchantment.Enchantments;
+
+            public class EnchantmentIterationSurface extends Item {
+                public EnchantmentIterationSurface(Properties properties) {
+                    super(properties);
+                }
+
+                public boolean isBookEnchantable(ItemStack stack, ItemStack book) {
+                    EnchantmentHelper.getEnchantments(book).forEach((enchantment, level) -> {
+                        if (Objects.equals(Enchantments.THORNS, enchantment) || ModEnchantments.COLD.get().equals(enchantment)) {
+                        }
+                    });
+                    return true;
+                }
+
+                public boolean supportsEnchantment(ItemStack stack, Holder<Enchantment> enchantment) {
+                    return !ModEnchantments.COLD.get().equals(enchantment) && super.canApplyAtEnchantingTable(stack, enchantment);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val blocks = srcDir.resolve("BlockRegistrySurface.java").readText()
+        val banner = srcDir.resolve("BannerSurface.java").readText()
+        val registry = srcDir.resolve("RegistrySurface.java").readText()
+        val layerType = srcDir.resolve("BiomeLayerType.java").readText()
+        val network = srcDir.resolve("NetworkSurface.java").readText()
+        val blockHelper = srcDir.resolve("BlockHelperSurface.java").readText()
+        val feature = srcDir.resolve("FeatureSurface.java").readText()
+        val creative = srcDir.resolve("CreativeSurface.java").readText()
+        val misc = srcDir.resolve("MiscSurface.java").readText()
+        val requiredMapCodec = srcDir.resolve("MapCodecRequiredSurface.java").readText()
+        val holderAndItem = srcDir.resolve("HolderAndItemSurface.java").readText()
+        val recipeAndMenu = srcDir.resolve("RecipeAndMenuSurface.java").readText()
+        val recipeBoundary = srcDir.resolve("RecipeBoundarySurface.java").readText()
+        val enchantmentIteration = srcDir.resolve("EnchantmentIterationSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(blocks.contains("new StairBlock(Blocks.STONE.get().defaultBlockState(), BlockBehaviour.Properties.ofFullCopy(Blocks.STONE.get()))"))
+        assertTrue(blocks.contains("new ButtonBlock(ModBlockSets.WOOD_SET, 30, BlockBehaviour.Properties.of().noCollission())"))
+        assertTrue(blocks.contains("new FenceGateBlock(ModWoodTypes.WOOD, BlockBehaviour.Properties.ofFullCopy(Blocks.PLANKS.get()))"))
+        assertTrue(blocks.contains("new PressurePlateBlock(ModBlockSets.WOOD_SET, BlockBehaviour.Properties.of().strength(0.5F))"))
+        assertTrue(blocks.contains("new DoorBlock(ModBlockSets.WOOD_SET, BlockBehaviour.Properties.of().noOcclusion())"))
+        assertTrue(blocks.contains("new TrapDoorBlock(ModBlockSets.WOOD_SET, BlockBehaviour.Properties.of().noOcclusion())"))
+        assertTrue(blocks.contains("new TorchBlock(ParticleTypes.SMOKE, BlockBehaviour.Properties.ofFullCopy(Blocks.TORCH))"))
+        assertTrue(blocks.contains("new WallTorchBlock(ModParticleTypes.SPARKLE.get(), BlockBehaviour.Properties.ofFullCopy(Blocks.WALL_TORCH))"))
+        assertTrue(banner.contains("new BannerPattern(ResourceLocation.fromNamespaceAndPath(ExampleMod.ID, \"ex\"), \"ex\")"))
+        assertTrue(registry.contains("makeRegistry(builder -> {})"))
+        assertTrue(registry.contains("REGISTRY.byNameCodec()"))
+        assertTrue(registry.contains("RegistryFileCodec.create(MAGIC_KEY, MagicPaintingVariant.CODEC.codec(), false)"))
+        assertTrue(layerType.contains("import com.mojang.serialization.MapCodec;"))
+        assertTrue(layerType.contains("MapCodec<? extends BiomeLayerFactory> getCodec();"))
+        assertTrue(!layerType.contains("import com.mojang.serialization.Codec;"))
+        assertTrue(network.contains("import net.minecraft.server.level.ServerLevel;"))
+        assertTrue(network.contains("PacketDistributor.sendToPlayersNear((ServerLevel) level, null, pos.getX(), pos.getY(), pos.getZ(), 64, packet)"))
+        assertTrue(!network.contains("TargetPoint"))
+        assertTrue(!network.contains("CHANNEL.send"))
+        assertTrue(blockHelper.contains("DeferredHolder<Block, CustomBlock> CUSTOM"))
+        assertTrue(blockHelper.contains("DeferredHolder<Block, StairBlock> STAIRS"))
+        assertTrue(blockHelper.contains("DeferredHolder<Block, T> register(String name, Supplier<T> block)"))
+        assertTrue(blockHelper.contains("DeferredHolder<Block, T> ret = BLOCKS.register(name, block);"))
+        assertTrue(blockHelper.contains("return ret;"))
+        assertTrue(feature.contains("RecordCodecBuilder.<ConfigSurface>create"))
+        assertTrue(feature.contains("TreeDecorator.CODEC.listOf()"))
+        assertTrue(feature.contains("ProcessorRule.CODEC.listOf()"))
+        assertTrue(feature.contains("new MapConfigFeature(MapConfig.CODEC.codec())"))
+        assertTrue(creative.contains("new EnchantmentInstance(parameters.holders().lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.PROTECTION), 1)"))
+        assertTrue(creative.contains("custom(parameters, output, CreativeModeTab.TabVisibility.PARENT_TAB_ONLY)"))
+        assertTrue(creative.contains("private static void custom(CreativeModeTab.ItemDisplayParameters parameters, CreativeModeTab.Output output, CreativeModeTab.TabVisibility visibility)"))
+        assertTrue(creative.contains("for (ResourceKey<Enchantment> enchantmentKey : CustomEnchantments.ENCHANTMENTS)"))
+        assertTrue(creative.contains("Holder<Enchantment> enchantment = parameters.holders().lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(enchantmentKey);"))
+        assertTrue(creative.contains("new EnchantmentInstance(enchantment, enchantment.value().getMaxLevel())"))
+        assertTrue(misc.contains("REGISTRY.byNameCodec()"))
+        assertTrue(misc.contains("BuiltInRegistries.ENTITY_TYPE.byNameCodec()"))
+        assertTrue(misc.contains("net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(com.mojang.serialization.JsonOps.INSTANCE, Component.literal(\"ok\")).getOrThrow().toString()"))
+        assertTrue(misc.contains("return wrapper.data();"))
+        assertTrue(misc.contains("stream.map(WeightedEntry.Wrapper::data)"))
+        assertFalse(misc.contains("getData"))
+        assertFalse(misc.contains("Component.Serializer.toJson(Component.literal(\"ok\"))"))
+        assertFalse(misc.contains("this.registryAccess()"))
+        assertTrue(!misc.contains("RegistryAccess.EMPTY"))
+        assertTrue(!misc.contains("ExtraCodecs.lazyInitializedCodec"))
+        assertTrue(misc.contains("new Music(Sounds.MUSIC.getDelegate(), 20, 40, true)"))
+        assertTrue(misc.contains("player.getMainHandItem().isCorrectToolForDrops(state)"))
+        assertTrue(misc.contains("DeferredHolder::get"))
+        assertTrue(misc.contains("wrapper.data()"))
+        assertTrue(requiredMapCodec.contains("MapCodec<MapCodecRequiredSurface> CODEC = RecordCodecBuilder.<MapCodecRequiredSurface>mapCodec"))
+        assertTrue(requiredMapCodec.contains("MapCodec<MapCodecRequiredSurface> LIST_CODEC = BoundingBox.CODEC.listOf().fieldOf(\"value\").xmap"))
+        assertTrue(requiredMapCodec.contains("MapCodec<MapCodecRequiredSurface> FIELD_CODEC = BoundingBox.CODEC.listOf().fieldOf(\"cutouts\").xmap"))
+        assertTrue(requiredMapCodec.contains("MapCodec<NestedProcessor> CODEC = MapCodec.unit(INSTANCE);"))
+        assertTrue(holderAndItem.contains("this.widget.value().run()"))
+        assertTrue(holderAndItem.contains("level.getBiome(pos).value()"))
+        assertTrue(holderAndItem.contains("ore.value().defaultBlockState()"))
+        assertTrue(holderAndItem.contains("replacements.put(ore.value(), ground.value())"))
+        assertTrue(holderAndItem.contains("replacements.put(ore.value(), ore.value())"))
+        assertTrue(holderAndItem.contains("thing.VALUE.getDelegate()"))
+        assertTrue(holderAndItem.contains("NeoForgeMod.EMPTY_TYPE.value()"))
+        assertTrue(holderAndItem.contains("NeoForgeMod.WATER_TYPE.value()"))
+        assertTrue(holderAndItem.contains("NeoForgeMod.LAVA_TYPE.value()"))
+        assertTrue(holderAndItem.contains("NeoForgeMod.MILK_TYPE.get()"))
+        assertTrue(holderAndItem.contains("FluidInteractionRegistry.addInteraction(NeoForgeMod.WATER_TYPE.value(), new FluidInteractionRegistry.InteractionInformation(null, null))"), holderAndItem)
+        assertTrue(holderAndItem.contains("entity.isEyeInFluidType(NeoForgeMod.WATER_TYPE.value())"), holderAndItem)
+        assertTrue(holderAndItem.contains("type == NeoForgeMod.MILK_TYPE.value()"), holderAndItem)
+        assertTrue(holderAndItem.contains("net.neoforged.neoforge.common.NeoForgeMod.LAVA_TYPE.value() != type"), holderAndItem)
+        assertTrue(holderAndItem.contains("new SwordItem(tier, new Item.Properties().attributes(SwordItem.createAttributes(tier, 3, -2.4F)))"))
+        assertTrue(holderAndItem.contains("new Item(new Item.Properties().food(new FoodProperties.Builder().nutrition(1).build()))"))
+        assertTrue(recipeAndMenu.contains("super(category);"))
+        assertTrue(!recipeAndMenu.contains("net.minecraft.world.inventory.CraftingInput"))
+        assertTrue(recipeAndMenu.contains("matches(CraftingInput container, Level level)"))
+        assertTrue(recipeAndMenu.contains("container.size()"))
+        assertTrue(recipeAndMenu.contains("assemble(CraftingInput container, HolderLookup.Provider access)"))
+        assertTrue(recipeAndMenu.contains("public static void renderScreens(RegisterMenuScreensEvent event)"))
+        assertTrue(recipeAndMenu.contains("event.register(ModMenus.EXAMPLE.get(), ExampleScreen::new)"))
+        assertTrue(recipeBoundary.contains("for (RecipeHolder<CraftingRecipe> recipeHolder : player.level().getRecipeManager().getRecipesFor(RecipeType.CRAFTING, this.assemblyMatrix.asCraftInput(), player.level()))"))
+        assertTrue(recipeBoundary.contains("CraftingRecipe recipe = recipeHolder.value();"))
+        assertTrue(recipeBoundary.contains("getRemainingItemsFor(RecipeType.CRAFTING, this.assemblyMatrix.asCraftInput(), player.level())"))
+        assertTrue(!recipeBoundary.contains("Recipe<CraftingContainer>"))
+        assertTrue(enchantmentIteration.contains("EnchantmentHelper.getEnchantmentsForCrafting(book)"))
+        assertTrue(enchantmentIteration.contains("enchantment.is(Enchantments.THORNS)"))
+        assertTrue(enchantmentIteration.contains("enchantment.is(ModEnchantments.COLD)"))
+        assertTrue(enchantmentIteration.contains("super.supportsEnchantment(stack, enchantment)"))
+    }
+
+    @Test
+    fun `legacy creative enchantment instance migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val sourceFile = srcDir.resolve("CreativeEnchantmentDocs.java")
+        sourceFile.writeText("""
+            package com.example;
+
+            public class CreativeEnchantmentDocs {
+                /*
+                public static CreativeModeTab tab() {
+                    return CreativeModeTab.builder()
+                            .displayItems((parameters, output) -> {
+                                output.accept(EnchantedBookItem.createForEnchantment(new EnchantmentInstance(Enchantments.ALL_DAMAGE_PROTECTION, 1)));
+                                custom(output, CreativeModeTab.TabVisibility.PARENT_TAB_ONLY);
+                            })
+                            .build();
+                }
+
+                private static void custom(CreativeModeTab.Output output, CreativeModeTab.TabVisibility visibility) {
+                    for (DeferredHolder<Enchantment, ? extends Enchantment> enchantment : CustomEnchantments.ENCHANTMENTS.getEntries()) {
+                        output.accept(EnchantedBookItem.createForEnchantment(new EnchantmentInstance(enchantment.get(), enchantment.get().getMaxLevel())), visibility);
+                    }
+                }
+                */
+                private static final String VANILLA_DOC = "new EnchantmentInstance(Enchantments.ALL_DAMAGE_PROTECTION, 1)";
+                private static final String LOOP_DOC = "for (DeferredHolder<Enchantment, ? extends Enchantment> enchantment : CustomEnchantments.ENCHANTMENTS.getEntries()) { new EnchantmentInstance(enchantment.get(), enchantment.get().getMaxLevel()); }";
+
+                public int keep() {
+                    return VANILLA_DOC.length() + LOOP_DOC.length();
+                }
+            }
+        """.trimIndent())
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = sourceFile.readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertEquals(0, result.changeCount)
+        assertEquals(original, transformed)
+        assertFalse(transformed.contains("lookupOrThrow(Registries.ENCHANTMENT)"), transformed)
+        assertFalse(transformed.contains("Holder<Enchantment> enchantment ="), transformed)
+        assertFalse(transformed.contains("ResourceKey<Enchantment>"), transformed)
+    }
+
+    @Test
+    fun `legacy item constructor migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val sourceFile = srcDir.resolve("ItemConstructorDocs.java")
+        sourceFile.writeText("""
+            package com.example;
+
+            public class ItemConstructorDocs {
+                /*
+                public Object sword(Tier tier) {
+                    return new SwordItem(tier, 3, -2.4F, new Item.Properties());
+                }
+
+                public class DocumentedSword extends SwordItem {
+                    public DocumentedSword(Tier tier, Item.Properties properties) {
+                        super(tier, 3, -2.4F, properties);
+                    }
+                }
+
+                public class DocumentedPickaxe extends PickaxeItem {
+                    public DocumentedPickaxe(Tier tier, Item.Properties properties) {
+                        super(tier, 1, -2.8F, properties);
+                    }
+                }
+                */
+                private static final String SWORD_DOC = "new SwordItem(tier, 3, -2.4F, new Item.Properties())";
+                private static final String BOWL_DOC = "new BowlFoodItem(new Item.Properties().food(new FoodProperties.Builder().nutrition(1).meat().build()))";
+                private static final String SUPER_DOC = "class DocSword extends SwordItem { DocSword(Tier tier, Item.Properties properties) { super(tier, 3, -2.4F, properties); } }";
+
+                public int keep() {
+                    return SWORD_DOC.length() + BOWL_DOC.length() + SUPER_DOC.length();
+                }
+            }
+        """.trimIndent())
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = sourceFile.readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertEquals(0, result.changeCount)
+        assertEquals(original, transformed)
+        assertFalse(transformed.contains("SwordItem.createAttributes"), transformed)
+        assertTrue(transformed.contains(".meat()"), transformed)
+        assertTrue(transformed.contains("new BowlFoodItem("), transformed)
+    }
+
+    @Test
+    fun `legacy BowlFoodItem subclasses migrate to item food component bowl remainder`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BaseBowl.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.BowlFoodItem;
+
+            public class BaseBowl extends BowlFoodItem {
+                public BaseBowl(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ColdBowl.java").writeText("""
+            package com.example;
+
+            public class ColdBowl extends BaseBowl {
+                public ColdBowl(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Registry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.effect.MobEffects;
+            import net.minecraft.world.food.FoodProperties;
+            import net.minecraft.world.item.Item;
+
+            public class Registry {
+                public static final Object COLD = new ColdBowl(new Item.Properties().food((new FoodProperties.Builder()).nutrition(4).effect(() -> new MobEffectInstance(MobEffects.MOVEMENT_SPEED, 100), 1.0F).build()));
+                private static final String DOC = "new ColdBowl(new Item.Properties().food((new FoodProperties.Builder()).nutrition(4).build()))";
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val base = srcDir.resolve("BaseBowl.java").readText()
+        val registry = srcDir.resolve("Registry.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-bowl-food-item-subclass" })
+        assertTrue(result.changes.any { it.ruleId == "struct-bowl-food-item-food-properties" })
+        assertTrue(base.contains("extends Item"), base)
+        assertFalse(base.contains("BowlFoodItem"), base)
+        assertTrue(registry.contains(".usingConvertsTo(Items.BOWL).build()"), registry)
+        assertTrue(registry.contains("import net.minecraft.world.item.Items;"), registry)
+        assertTrue(registry.contains("private static final String DOC = \"new ColdBowl"), registry)
+        assertFalse(registry.substringAfter("private static final String DOC").contains("usingConvertsTo"), registry)
+    }
+
+    @Test
+    fun `legacy vanilla block constructor migration ignores comments and string literals`() {
+        val projectDir = createFile("BlockConstructorDocs.java", """
+            package com.example;
+
+            public class BlockConstructorDocs {
+                // new StairBlock(() -> Blocks.STONE.get().defaultBlockState(), BlockBehaviour.Properties.ofFullCopy(Blocks.STONE.get()));
+                // new ButtonBlock(BlockBehaviour.Properties.of().noCollission(), ModBlockSets.WOOD_SET, 30, true);
+                private static final String GATE_DOC = "new FenceGateBlock(BlockBehaviour.Properties.ofFullCopy(Blocks.PLANKS.get()), ModWoodTypes.WOOD);";
+                private static final String PLATE_DOC = "new PressurePlateBlock(PressurePlateBlock.Sensitivity.EVERYTHING, BlockBehaviour.Properties.of().strength(0.5F), ModBlockSets.WOOD_SET);";
+                private static final String DOOR_DOC = "new DoorBlock(BlockBehaviour.Properties.of().noOcclusion(), ModBlockSets.WOOD_SET);";
+                private static final String TRAPDOOR_DOC = "new TrapDoorBlock(BlockBehaviour.Properties.of().noOcclusion(), ModBlockSets.WOOD_SET);";
+                private static final String TORCH_DOC = "new TorchBlock(BlockBehaviour.Properties.ofFullCopy(Blocks.TORCH), ParticleTypes.SMOKE);";
+                private static final String WALL_TORCH_DOC = "new WallTorchBlock(BlockBehaviour.Properties.ofFullCopy(Blocks.WALL_TORCH), ModParticleTypes.SPARKLE.get());";
+
+                public int keep() {
+                    return GATE_DOC.length() + PLATE_DOC.length() + DOOR_DOC.length() + TRAPDOOR_DOC.length() + TORCH_DOC.length() + WALL_TORCH_DOC.length();
+                }
+            }
+        """.trimIndent())
+        val sourceFile = tempDir.resolve("src/main/java/com/example/BlockConstructorDocs.java")
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = sourceFile.readText()
+
+        assertEquals(original, migrated)
+        assertEquals(0, result.changeCount)
+        assertFalse(migrated.contains("new ButtonBlock(ModBlockSets.WOOD_SET, 30, BlockBehaviour.Properties.of().noCollission())"), migrated)
+        assertFalse(migrated.contains("new TorchBlock(ParticleTypes.SMOKE, BlockBehaviour.Properties.ofFullCopy(Blocks.TORCH))"), migrated)
+    }
+
+    @Test
+    fun `legacy banner pattern constructors require deferred register namespace evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BannerSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.block.entity.BannerPattern;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            @Mod("main_mod")
+            public class BannerSurface {
+                public static final DeferredRegister<BannerPattern> BANNER_PATTERNS =
+                        DeferredRegister.create(Registries.BANNER_PATTERN, "registry_namespace");
+
+                public static final Object EXAMPLE =
+                        BANNER_PATTERNS.register("example", () -> new BannerPattern("ex"));
+            }
+        """.trimIndent())
+        srcDir.resolve("UnregisteredBannerSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BannerPattern;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("main_mod")
+            public class UnregisteredBannerSurface {
+                public static final Object EXAMPLE = new BannerPattern("ex");
+            }
+        """.trimIndent())
+        srcDir.resolve("AmbiguousBannerSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.block.entity.BannerPattern;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class AmbiguousBannerSurface {
+                public static final DeferredRegister<BannerPattern> FIRST_PATTERNS =
+                        DeferredRegister.create(Registries.BANNER_PATTERN, "first_namespace");
+                public static final DeferredRegister<BannerPattern> SECOND_PATTERNS =
+                        DeferredRegister.create(Registries.BANNER_PATTERN, "second_namespace");
+
+                public static final Object EXAMPLE =
+                        FIRST_PATTERNS.register("example", () -> new BannerPattern("ex"));
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val registered = srcDir.resolve("BannerSurface.java").readText()
+        val unregistered = srcDir.resolve("UnregisteredBannerSurface.java").readText()
+        val ambiguous = srcDir.resolve("AmbiguousBannerSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(registered.contains("new BannerPattern(ResourceLocation.fromNamespaceAndPath(\"registry_namespace\", \"ex\"), \"ex\")"), registered)
+        assertFalse(registered.contains("ResourceLocation.fromNamespaceAndPath(\"main_mod\""), registered)
+        assertTrue(unregistered.contains("new BannerPattern(\"ex\")"), unregistered)
+        assertFalse(unregistered.contains("ResourceLocation.fromNamespaceAndPath"), unregistered)
+        assertTrue(ambiguous.contains("new BannerPattern(\"ex\")"), ambiguous)
+        assertFalse(ambiguous.contains("ResourceLocation.fromNamespaceAndPath"), ambiguous)
+    }
+
+    @Test
+    fun `legacy banner pattern constructor migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val commentedNamespace = srcDir.resolve("CommentedBannerNamespace.java")
+        commentedNamespace.writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BannerPattern;
+
+            public class CommentedBannerNamespace {
+                // public static final DeferredRegister<BannerPattern> BANNER_PATTERNS = DeferredRegister.create(Registries.BANNER_PATTERN, "commented_namespace");
+                public static final Object EXAMPLE = new BannerPattern("ex");
+            }
+        """.trimIndent())
+        val docs = srcDir.resolve("BannerPatternDocs.java")
+        docs.writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.block.entity.BannerPattern;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BannerPatternDocs {
+                public static final DeferredRegister<BannerPattern> BANNER_PATTERNS =
+                        DeferredRegister.create(Registries.BANNER_PATTERN, "registry_namespace");
+
+                // BANNER_PATTERNS.register("example", () -> new BannerPattern("ex"));
+                private static final String DOC = "new BannerPattern(\"ex\")";
+
+                public String keep() {
+                    return DOC;
+                }
+            }
+        """.trimIndent())
+        val originalCommented = commentedNamespace.readText()
+        val originalDocs = docs.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migratedCommented = commentedNamespace.readText()
+        val migratedDocs = docs.readText()
+
+        assertEquals(originalCommented, migratedCommented)
+        assertEquals(originalDocs, migratedDocs)
+        assertEquals(0, result.changeCount)
+        assertFalse(migratedCommented.contains("ResourceLocation.fromNamespaceAndPath"), migratedCommented)
+        assertFalse(migratedDocs.contains("ResourceLocation.fromNamespaceAndPath"), migratedDocs)
+    }
+
+    @Test
+    fun `migrates legacy game event constructors only inside matching deferred registers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("GameEventRegistrySurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.gameevent.GameEvent;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class GameEventRegistrySurface {
+                public static final DeferredRegister<GameEvent> GAME_EVENTS = DeferredRegister.create(Registries.GAME_EVENT, ExampleMod.ID);
+                public static final DeferredHolder<GameEvent, GameEvent> MATCHING =
+                    GAME_EVENTS.register("matching", () -> new GameEvent("matching", 4));
+                public static final DeferredHolder<GameEvent, GameEvent> MISMATCH =
+                    GAME_EVENTS.register("registered_id", () -> new GameEvent("legacy_id", 6));
+
+                public Object unrelated() {
+                    return OtherFactory.register("matching", () -> new GameEvent("matching", 8));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("GameEventRegistrySurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(transformed.contains("GAME_EVENTS.register(\"matching\", () -> new GameEvent(4))"), transformed)
+        assertTrue(transformed.contains("GAME_EVENTS.register(\"registered_id\", () -> new GameEvent(\"legacy_id\", 6))"), transformed)
+        assertTrue(transformed.contains("OtherFactory.register(\"matching\", () -> new GameEvent(\"matching\", 8))"), transformed)
+    }
+
+    @Test
+    fun `legacy game event constructor migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val sourceFile = srcDir.resolve("GameEventDocs.java")
+        sourceFile.writeText("""
+            package com.example;
+
+            public class GameEventDocs {
+                public static final DeferredRegister<GameEvent> GAME_EVENTS = null;
+
+                // GAME_EVENTS.register("matching", () -> new GameEvent("matching", 4));
+                private static final String DOC = "GAME_EVENTS.register(\"matching\", () -> new GameEvent(\"matching\", 4));";
+
+                public String keep() {
+                    return DOC;
+                }
+            }
+        """.trimIndent())
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = sourceFile.readText()
+
+        assertEquals(original, migrated)
+        assertEquals(0, result.changeCount)
+        assertFalse(migrated.contains("new GameEvent(4)"), migrated)
+    }
+
+    @Test
+    fun `game event calls pass deferred holders without resolving values`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ModGameEvents.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.gameevent.GameEvent;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ModGameEvents {
+                public static final DeferredRegister<GameEvent> GAME_EVENTS = DeferredRegister.create(Registries.GAME_EVENT, ExampleMod.ID);
+                public static final DeferredHolder<net.minecraft.world.level.gameevent.GameEvent, GameEvent> CUSTOM =
+                    GAME_EVENTS.register("custom", () -> new GameEvent(4));
+            }
+        """.trimIndent())
+        srcDir.resolve("OtherEvents.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class OtherEvents {
+                public static final DeferredHolder<Widget, Widget> NOT_GAME = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("GameEventCalls.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.level.gameevent.GameEvent;
+
+            public class GameEventCalls {
+                // level.gameEvent(null, ModGameEvents.CUSTOM.get(), pos);
+                private static final String DOC = "level.gameEvent(ModGameEvents.CUSTOM.get(), pos, GameEvent.Context.of(state));";
+
+                public void emit(Level level, BlockPos pos, BlockState state) {
+                    level.gameEvent(null, ModGameEvents.CUSTOM.get(), pos);
+                    level.gameEvent(ModGameEvents.CUSTOM.get(), pos, GameEvent.Context.of(state));
+                    level.gameEvent(null, OtherEvents.NOT_GAME.get(), pos);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("GameEventCalls.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(transformed.contains("level.gameEvent(null, ModGameEvents.CUSTOM, pos);"), transformed)
+        assertTrue(transformed.contains("level.gameEvent(ModGameEvents.CUSTOM, pos, GameEvent.Context.of(state));"), transformed)
+        assertTrue(transformed.contains("level.gameEvent(null, OtherEvents.NOT_GAME.get(), pos);"), transformed)
+        assertTrue(transformed.contains("// level.gameEvent(null, ModGameEvents.CUSTOM.get(), pos);"), transformed)
+        assertTrue(transformed.contains("""private static final String DOC = "level.gameEvent(ModGameEvents.CUSTOM.get(), pos, GameEvent.Context.of(state));";"""), transformed)
+    }
+
+    @Test
+    fun `migrates legacy registry accessors only for declared registry receivers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RegistryOwner.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.Registry;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+            import net.neoforged.neoforge.registries.RegistryBuilder;
+            import java.util.function.Supplier;
+
+            public class RegistryOwner {
+                public static final DeferredRegister<Widget> WIDGETS = null;
+                public static final Registry<Widget> WIDGET_REGISTRY = null;
+                public static final Supplier<Registry<Widget>> LEGACY_WIDGET_REGISTRY = WIDGETS.makeRegistry(() -> new RegistryBuilder<Widget>());
+            }
+        """.trimIndent())
+        srcDir.resolve("NotRegistryOwner.java").writeText("""
+            package com.example;
+
+            public class NotRegistryOwner {
+                public static final NotRegistry NOT_REGISTRY = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("RegistryAccessorSurface.java").writeText("""
+            package com.example;
+
+            import java.util.function.Consumer;
+            import net.minecraft.core.Registry;
+
+            public class RegistryAccessorSurface {
+                public void access(Registry<Widget> localRegistry, Widget widget, Consumer<Widget> consumer) {
+                    RegistryOwner.WIDGET_REGISTRY.getValues().forEach(consumer);
+                    localRegistry.getValues().forEach(consumer);
+                    RegistryOwner.WIDGET_REGISTRY.get().getKey(widget);
+                    RegistryOwner.LEGACY_WIDGET_REGISTRY.get().getKey(widget);
+                    NotRegistryOwner.NOT_REGISTRY.get().getKey(widget);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("RegistryAccessorSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(transformed.contains("RegistryOwner.WIDGET_REGISTRY.stream().forEach(consumer)"), transformed)
+        assertTrue(transformed.contains("localRegistry.stream().forEach(consumer)"), transformed)
+        assertTrue(transformed.contains("RegistryOwner.WIDGET_REGISTRY.getKey(widget)"), transformed)
+        assertTrue(transformed.contains("RegistryOwner.LEGACY_WIDGET_REGISTRY.getKey(widget)"), transformed)
+        assertTrue(transformed.contains("NotRegistryOwner.NOT_REGISTRY.get().getKey(widget)"), transformed)
+        assertTrue(srcDir.resolve("RegistryOwner.java").readText().contains("Registry<Widget> LEGACY_WIDGET_REGISTRY = WIDGETS.makeRegistry(builder -> {})"))
+    }
+
+    @Test
+    fun `migrates cauldron interaction result returns to item interaction results`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CauldronSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.cauldron.CauldronInteraction;
+            import net.minecraft.world.InteractionHand;
+            import net.minecraft.world.InteractionResult;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+
+            public class CauldronSurface {
+                public static final CauldronInteraction FILL = (state, level, pos, player, hand, stack) ->
+                    fill(level, pos, player, hand, stack);
+
+                public static final CauldronInteraction CLEAN = (state, level, pos, player, hand, stack) -> {
+                    player.setItemInHand(hand, ItemStack.EMPTY);
+                    return InteractionResult.sidedSuccess(level.isClientSide());
+                };
+
+                private static InteractionResult fill(Level level, BlockPos pos, Player player, InteractionHand hand, ItemStack stack) {
+                    return InteractionResult.sidedSuccess(level.isClientSide());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("CauldronSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(transformed.contains("import net.minecraft.world.ItemInteractionResult;"), transformed)
+        assertFalse(transformed.contains("import net.minecraft.world.InteractionResult;"), transformed)
+        assertTrue(transformed.contains("private static ItemInteractionResult fill("), transformed)
+        assertTrue(transformed.contains("return ItemInteractionResult.sidedSuccess(level.isClientSide());"), transformed)
+        assertFalse(transformed.contains("return InteractionResult.sidedSuccess"), transformed)
+    }
+
+    @Test
+    fun `migrates legacy structure start custom loads without dropping nbt logic`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleStructureStart.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.ChunkPos;
+            import net.minecraft.world.level.levelgen.structure.Structure;
+            import net.minecraft.world.level.levelgen.structure.StructureStart;
+            import net.minecraft.world.level.levelgen.structure.pieces.PiecesContainer;
+
+            public class ExampleStructureStart extends StructureStart {
+                private boolean conquered;
+
+                public ExampleStructureStart(Structure structure, ChunkPos chunkPos, int references, PiecesContainer pieces) {
+                    super(structure, chunkPos, references, pieces);
+                }
+
+                protected void loadAdditional(CompoundTag nbt, HolderLookup.Provider registries) {
+                    this.conquered = nbt.getBoolean("conquered");
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("StructureFactory.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.ChunkPos;
+            import net.minecraft.world.level.levelgen.structure.Structure;
+            import net.minecraft.world.level.levelgen.structure.pieces.PiecesContainer;
+
+            public interface StructureFactory {
+                default ExampleStructureStart forDeserialization(Structure structure, ChunkPos chunkPos, int references, PiecesContainer pieces, CompoundTag nbt) {
+                    ExampleStructureStart start = new ExampleStructureStart(structure, chunkPos, references, pieces);
+                    start.load(nbt);
+                    return start;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleBlockEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+
+            public class ExampleBlockEntity extends BlockEntity {
+                @Override
+                protected void loadAdditional(CompoundTag tag, HolderLookup.Provider registries) {
+                    super.loadAdditional(tag, registries);
+                    this.setChanged();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+
+        val start = srcDir.resolve("ExampleStructureStart.java").readText()
+        val factory = srcDir.resolve("StructureFactory.java").readText()
+        val blockEntity = srcDir.resolve("ExampleBlockEntity.java").readText()
+        assertTrue(start.contains("public void loadFromTag(CompoundTag nbt)"))
+        assertTrue(start.contains("this.conquered = nbt.getBoolean(\"conquered\");"))
+        assertTrue(!start.contains("HolderLookup.Provider"))
+        assertTrue(factory.contains("start.loadFromTag(nbt);"))
+        assertTrue(!factory.contains("start.load(nbt);"))
+        assertTrue(blockEntity.contains("protected void loadAdditional(CompoundTag tag, HolderLookup.Provider registries)"))
+        assertTrue(blockEntity.contains("super.loadAdditional(tag, registries);"))
+        assertTrue(!blockEntity.contains("loadFromTag"))
+    }

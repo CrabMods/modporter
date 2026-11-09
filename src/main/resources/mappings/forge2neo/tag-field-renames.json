@@ -1,0 +1,355 @@
+{
+  "description": "Forge 1.20.1 Tags fields renamed in NeoForge 1.21.1, joined on the legacy forge tag path (Forge Tags.java + NeoForge TagConventionLogWarning.java); see scripts/forge_tag_renames.py",
+  "forgeSources": "forge-1.20.1-47.1.33-sources.jar",
+  "neoforgeSources": "neoforge-21.1.133-sources.jar",
+  "renames": [
+    {
+      "class": "Biomes",
+      "forgeField": "IS_CONIFEROUS",
+      "neoforgeField": "IS_CONIFEROUS_TREE",
+      "forgePath": "is_coniferous"
+    },
+    {
+      "class": "Biomes",
+      "forgeField": "IS_DENSE",
+      "neoforgeField": "IS_DENSE_VEGETATION",
+      "forgePath": "is_dense"
+    },
+    {
+      "class": "Biomes",
+      "forgeField": "IS_DENSE_END",
+      "neoforgeField": "IS_DENSE_VEGETATION_END",
+      "forgePath": "is_dense/end"
+    },
+    {
+      "class": "Biomes",
+      "forgeField": "IS_DENSE_NETHER",
+      "neoforgeField": "IS_DENSE_VEGETATION_NETHER",
+      "forgePath": "is_dense/nether"
+    },
+    {
+      "class": "Biomes",
+      "forgeField": "IS_DENSE_OVERWORLD",
+      "neoforgeField": "IS_DENSE_VEGETATION_OVERWORLD",
+      "forgePath": "is_dense/overworld"
+    },
+    {
+      "class": "Biomes",
+      "forgeField": "IS_PEAK",
+      "neoforgeField": "IS_MOUNTAIN_PEAK",
+      "forgePath": "is_peak"
+    },
+    {
+      "class": "Biomes",
+      "forgeField": "IS_SLOPE",
+      "neoforgeField": "IS_MOUNTAIN_SLOPE",
+      "forgePath": "is_slope"
+    },
+    {
+      "class": "Biomes",
+      "forgeField": "IS_SPARSE",
+      "neoforgeField": "IS_SPARSE_VEGETATION",
+      "forgePath": "is_sparse"
+    },
+    {
+      "class": "Biomes",
+      "forgeField": "IS_SPARSE_END",
+      "neoforgeField": "IS_SPARSE_VEGETATION_END",
+      "forgePath": "is_sparse/end"
+    },
+    {
+      "class": "Biomes",
+      "forgeField": "IS_SPARSE_NETHER",
+      "neoforgeField": "IS_SPARSE_VEGETATION_NETHER",
+      "forgePath": "is_sparse/nether"
+    },
+    {
+      "class": "Biomes",
+      "forgeField": "IS_SPARSE_OVERWORLD",
+      "neoforgeField": "IS_SPARSE_VEGETATION_OVERWORLD",
+      "forgePath": "is_sparse/overworld"
+    },
+    {
+      "class": "Biomes",
+      "forgeField": "IS_WATER",
+      "neoforgeField": "IS_AQUATIC",
+      "forgePath": "is_water"
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "COBBLESTONE",
+      "neoforgeField": "COBBLESTONES",
+      "forgePath": "cobblestone"
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "COBBLESTONE_DEEPSLATE",
+      "neoforgeField": "COBBLESTONES_DEEPSLATE",
+      "forgePath": "cobblestone/deepslate"
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "COBBLESTONE_INFESTED",
+      "neoforgeField": "COBBLESTONES_INFESTED",
+      "forgePath": "cobblestone/infested"
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "COBBLESTONE_MOSSY",
+      "neoforgeField": "COBBLESTONES_MOSSY",
+      "forgePath": "cobblestone/mossy"
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "COBBLESTONE_NORMAL",
+      "neoforgeField": "COBBLESTONES_NORMAL",
+      "forgePath": "cobblestone/normal"
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS",
+      "neoforgeField": "GLASS_BLOCKS",
+      "forgePath": "glass"
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_COLORLESS",
+      "neoforgeField": "GLASS_BLOCKS_COLORLESS",
+      "forgePath": "glass/colorless"
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_SILICA",
+      "neoforgeField": "GLASS_BLOCKS_CHEAP",
+      "forgePath": "glass/silica"
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_TINTED",
+      "neoforgeField": "GLASS_BLOCKS_TINTED",
+      "forgePath": "glass/tinted"
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GRAVEL",
+      "neoforgeField": "GRAVELS",
+      "forgePath": "gravel"
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "NETHERRACK",
+      "neoforgeField": "NETHERRACKS",
+      "forgePath": "netherrack"
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "OBSIDIAN",
+      "neoforgeField": "OBSIDIANS",
+      "forgePath": "obsidian"
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "SAND",
+      "neoforgeField": "SANDS",
+      "forgePath": "sand"
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "SANDSTONE",
+      "neoforgeField": "SANDSTONE_BLOCKS",
+      "forgePath": "sandstone"
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "SAND_COLORLESS",
+      "neoforgeField": "SANDS_COLORLESS",
+      "forgePath": "sand/colorless"
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "SAND_RED",
+      "neoforgeField": "SANDS_RED",
+      "forgePath": "sand/red"
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "STONE",
+      "neoforgeField": "STONES",
+      "forgePath": "stone"
+    },
+    {
+      "class": "Items",
+      "forgeField": "COBBLESTONE",
+      "neoforgeField": "COBBLESTONES",
+      "forgePath": "cobblestone"
+    },
+    {
+      "class": "Items",
+      "forgeField": "COBBLESTONE_DEEPSLATE",
+      "neoforgeField": "COBBLESTONES_DEEPSLATE",
+      "forgePath": "cobblestone/deepslate"
+    },
+    {
+      "class": "Items",
+      "forgeField": "COBBLESTONE_INFESTED",
+      "neoforgeField": "COBBLESTONES_INFESTED",
+      "forgePath": "cobblestone/infested"
+    },
+    {
+      "class": "Items",
+      "forgeField": "COBBLESTONE_MOSSY",
+      "neoforgeField": "COBBLESTONES_MOSSY",
+      "forgePath": "cobblestone/mossy"
+    },
+    {
+      "class": "Items",
+      "forgeField": "COBBLESTONE_NORMAL",
+      "neoforgeField": "COBBLESTONES_NORMAL",
+      "forgePath": "cobblestone/normal"
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS",
+      "neoforgeField": "GLASS_BLOCKS",
+      "forgePath": "glass"
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_COLORLESS",
+      "neoforgeField": "GLASS_BLOCKS_COLORLESS",
+      "forgePath": "glass/colorless"
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_SILICA",
+      "neoforgeField": "GLASS_BLOCKS_CHEAP",
+      "forgePath": "glass/silica"
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_TINTED",
+      "neoforgeField": "GLASS_BLOCKS_TINTED",
+      "forgePath": "glass/tinted"
+    },
+    {
+      "class": "Items",
+      "forgeField": "GRAVEL",
+      "neoforgeField": "GRAVELS",
+      "forgePath": "gravel"
+    },
+    {
+      "class": "Items",
+      "forgeField": "GUNPOWDER",
+      "neoforgeField": "GUNPOWDERS",
+      "forgePath": "gunpowder"
+    },
+    {
+      "class": "Items",
+      "forgeField": "INGOTS_BRICK",
+      "neoforgeField": "BRICKS_NORMAL",
+      "forgePath": "ingots/brick"
+    },
+    {
+      "class": "Items",
+      "forgeField": "INGOTS_NETHER_BRICK",
+      "neoforgeField": "BRICKS_NETHER",
+      "forgePath": "ingots/nether_brick"
+    },
+    {
+      "class": "Items",
+      "forgeField": "LEATHER",
+      "neoforgeField": "LEATHERS",
+      "forgePath": "leather"
+    },
+    {
+      "class": "Items",
+      "forgeField": "NETHERRACK",
+      "neoforgeField": "NETHERRACKS",
+      "forgePath": "netherrack"
+    },
+    {
+      "class": "Items",
+      "forgeField": "OBSIDIAN",
+      "neoforgeField": "OBSIDIANS",
+      "forgePath": "obsidian"
+    },
+    {
+      "class": "Items",
+      "forgeField": "SAND",
+      "neoforgeField": "SANDS",
+      "forgePath": "sand"
+    },
+    {
+      "class": "Items",
+      "forgeField": "SANDSTONE",
+      "neoforgeField": "SANDSTONE_BLOCKS",
+      "forgePath": "sandstone"
+    },
+    {
+      "class": "Items",
+      "forgeField": "SAND_COLORLESS",
+      "neoforgeField": "SANDS_COLORLESS",
+      "forgePath": "sand/colorless"
+    },
+    {
+      "class": "Items",
+      "forgeField": "SAND_RED",
+      "neoforgeField": "SANDS_RED",
+      "forgePath": "sand/red"
+    },
+    {
+      "class": "Items",
+      "forgeField": "SHEARS",
+      "neoforgeField": "TOOLS_SHEAR",
+      "forgePath": "shears"
+    },
+    {
+      "class": "Items",
+      "forgeField": "SLIMEBALLS",
+      "neoforgeField": "SLIME_BALLS",
+      "forgePath": "slimeballs"
+    },
+    {
+      "class": "Items",
+      "forgeField": "STONE",
+      "neoforgeField": "STONES",
+      "forgePath": "stone"
+    },
+    {
+      "class": "Items",
+      "forgeField": "STRING",
+      "neoforgeField": "STRINGS",
+      "forgePath": "string"
+    },
+    {
+      "class": "Items",
+      "forgeField": "TOOLS_BOWS",
+      "neoforgeField": "TOOLS_BOW",
+      "forgePath": "tools/bows"
+    },
+    {
+      "class": "Items",
+      "forgeField": "TOOLS_CROSSBOWS",
+      "neoforgeField": "TOOLS_CROSSBOW",
+      "forgePath": "tools/crossbows"
+    },
+    {
+      "class": "Items",
+      "forgeField": "TOOLS_FISHING_RODS",
+      "neoforgeField": "TOOLS_FISHING_ROD",
+      "forgePath": "tools/fishing_rods"
+    },
+    {
+      "class": "Items",
+      "forgeField": "TOOLS_SHIELDS",
+      "neoforgeField": "TOOLS_SHIELD",
+      "forgePath": "tools/shields"
+    },
+    {
+      "class": "Items",
+      "forgeField": "TOOLS_TRIDENTS",
+      "neoforgeField": "TOOLS_SPEAR",
+      "forgePath": "tools/tridents"
+    }
+  ]
+}

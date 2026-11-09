@@ -1,0 +1,1195 @@
+
+    @Test
+    fun `serializer backed cooking builders migrate to factory based recipe output`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BookCategory.java").writeText("""
+            package com.example;
+
+            public enum BookCategory {
+                HEATED
+            }
+        """.trimIndent())
+        srcDir.resolve("SpecialCookingSerializer.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public class SpecialCookingSerializer<T extends AbstractCookingRecipe> implements RecipeSerializer<T> {
+                private final SpecialCookingSerializer.CookieBaker<T> factory;
+
+                public SpecialCookingSerializer(SpecialCookingSerializer.CookieBaker<T> factory, int defaultCookingTime) {
+                    this.factory = factory;
+                }
+
+                public interface CookieBaker<T extends AbstractCookingRecipe> {
+                    T create(String group, BookCategory category, Ingredient ingredient, ItemStack result, float experience, int cookingTime);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("HeatedRecipe.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeType;
+
+            public class HeatedRecipe extends AbstractCookingRecipe {
+                public HeatedRecipe(String group, BookCategory category, Ingredient ingredient, ItemStack result, float experience, int cookingTime) {
+                    super((RecipeType<?>) null, group, null, ingredient, result, experience, cookingTime);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleSerializers.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class ExampleSerializers {
+                public static final DeferredHolder<RecipeSerializer<?>, SpecialCookingSerializer<HeatedRecipe>> HEATED = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("SpecialCookingRecipeBuilder.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.advancements.AdvancementRewards;
+            import net.minecraft.advancements.AdvancementRequirements;
+            import net.minecraft.advancements.Criterion;
+            import net.minecraft.advancements.critereon.RecipeUnlockedTrigger;
+            import net.minecraft.data.recipes.RecipeBuilder;
+            import net.minecraft.data.recipes.RecipeCategory;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.level.ItemLike;
+
+            import java.util.LinkedHashMap;
+            import java.util.Map;
+
+            public class SpecialCookingRecipeBuilder implements RecipeBuilder {
+                private final RecipeCategory recipeCategory;
+                private final BookCategory category;
+                private final Item result;
+                private final Ingredient ingredient;
+                private final float experience;
+                private final int cookingTime;
+                private final Map<String, Criterion<?>> criteria = new LinkedHashMap<>();
+                private String group;
+                private final RecipeSerializer<? extends AbstractCookingRecipe> serializer;
+
+                public SpecialCookingRecipeBuilder(RecipeCategory recipeCategory, BookCategory category, ItemLike result, Ingredient ingredient, float experience, int cookingTime, RecipeSerializer<? extends AbstractCookingRecipe> serializer) {
+                    this.recipeCategory = recipeCategory;
+                    this.category = category;
+                    this.result = result.asItem();
+                    this.ingredient = ingredient;
+                    this.experience = experience;
+                    this.cookingTime = cookingTime;
+                    this.serializer = serializer;
+                }
+
+                public static SpecialCookingRecipeBuilder generic(Ingredient ingredient, RecipeCategory recipeCategory, ItemLike result, float experience, int cookingTime, RecipeSerializer<? extends AbstractCookingRecipe> serializer) {
+                    return new SpecialCookingRecipeBuilder(recipeCategory, BookCategory.HEATED, result, ingredient, experience, cookingTime, serializer);
+                }
+
+                public RecipeBuilder unlockedBy(String name, Criterion<?> criterion) {
+                    this.criteria.put(name, criterion);
+                    return this;
+                }
+
+                public RecipeBuilder group(String group) {
+                    this.group = group;
+                    return this;
+                }
+
+                public Item getResult() {
+                    return this.result;
+                }
+
+                public void save(RecipeOutput output, ResourceLocation id) {
+                    Advancement.Builder advancement = output.advancement().addCriterion("has_the_recipe", RecipeUnlockedTrigger.unlocked(id)).rewards(AdvancementRewards.Builder.recipe(id)).requirements(AdvancementRequirements.Strategy.OR);
+                    this.criteria.forEach(advancement::addCriterion);
+                    output.accept(new SpecialCookingRecipeBuilder.Result(id, this.group == null ? "" : this.group, this.category, this.ingredient, this.result, this.experience, this.cookingTime, advancement, id.withPrefix("recipes/" + this.recipeCategory.getFolderName() + "/"), this.serializer));
+                }
+
+                static class Result implements RecipeOutput {
+                    private final ResourceLocation id;
+                    private final String group;
+                    private final BookCategory category;
+                    private final Ingredient ingredient;
+                    private final Item result;
+                    private final float experience;
+                    private final int cookingTime;
+                    private final Advancement.Builder advancement;
+                    private final ResourceLocation advancementId;
+                    private final RecipeSerializer<? extends AbstractCookingRecipe> serializer;
+
+                    public Result(ResourceLocation id, String group, BookCategory category, Ingredient ingredient, Item result, float experience, int cookingTime, Advancement.Builder advancement, ResourceLocation advancementId, RecipeSerializer<? extends AbstractCookingRecipe> serializer) {
+                        this.id = id;
+                        this.group = group;
+                        this.category = category;
+                        this.ingredient = ingredient;
+                        this.result = result;
+                        this.experience = experience;
+                        this.cookingTime = cookingTime;
+                        this.advancement = advancement;
+                        this.advancementId = advancementId;
+                        this.serializer = serializer;
+                    }
+
+                    public void serializeRecipeData(JsonObject json) {
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleProvider.java").writeText("""
+            package com.example;
+
+            import net.minecraft.data.recipes.RecipeCategory;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.crafting.Ingredient;
+
+            public class ExampleProvider {
+                public void build() {
+                    SpecialCookingRecipeBuilder.generic(Ingredient.of(Items.BEEF), RecipeCategory.FOOD, Items.COOKED_BEEF, 0.3F, 200, ExampleSerializers.HEATED.get());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val builder = srcDir.resolve("SpecialCookingRecipeBuilder.java").readText()
+        val provider = srcDir.resolve("ExampleProvider.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-recipe-builder-factory-output" })
+        assertTrue(builder.contains("private final com.example.SpecialCookingSerializer.CookieBaker<?> factory;"), builder)
+        assertTrue(builder.contains("RecipeSerializer<? extends AbstractCookingRecipe> serializer, com.example.SpecialCookingSerializer.CookieBaker<?> serializerFactory"), builder)
+        assertTrue(builder.contains("this.factory = serializerFactory;"), builder)
+        assertTrue(builder.contains("AbstractCookingRecipe recipe = this.factory.create(this.group == null ? \"\" : this.group, this.category, this.ingredient, new ItemStack(this.result), this.experience, this.cookingTime);"), builder)
+        assertTrue(builder.contains("output.accept(id, recipe, advancement.build(id.withPrefix(\"recipes/\" + this.recipeCategory.getFolderName() + \"/\")));"), builder)
+        assertTrue(builder.contains("import net.minecraft.world.item.ItemStack;"), builder)
+        assertFalse(builder.contains("class Result"), builder)
+        assertTrue(provider.contains("ExampleSerializers.HEATED.get(), com.example.HeatedRecipe::new"), provider)
+    }
+
+    @Test
+    fun `recipe serializer factory generic call migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("HeatedRecipe.java").writeText("""
+            package com.example;
+
+            public class HeatedRecipe {
+            }
+        """.trimIndent())
+        srcDir.resolve("SpecialCookingSerializer.java").writeText("""
+            package com.example;
+
+            public class SpecialCookingSerializer<T> {
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleSerializers.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class ExampleSerializers {
+                public static final DeferredHolder<RecipeSerializer<?>, SpecialCookingSerializer<HeatedRecipe>> HEATED = null;
+            }
+        """.trimIndent())
+        val docs = srcDir.resolve("RecipeBuilderDocs.java")
+        docs.writeText("""
+            package com.example;
+
+            public class RecipeBuilderDocs {
+                // SpecialCookingRecipeBuilder.generic(ingredient, category, result, 0.3F, 200, ExampleSerializers.HEATED.get());
+                private static final String DOC = "SpecialCookingRecipeBuilder.generic(ingredient, category, result, 0.3F, 200, ExampleSerializers.HEATED.get());";
+
+                public String keep() {
+                    return DOC;
+                }
+            }
+        """.trimIndent())
+        val original = docs.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = docs.readText()
+
+        assertEquals(original, migrated)
+        assertEquals(0, result.changeCount)
+        assertFalse(migrated.contains("com.example.HeatedRecipe::new"), migrated)
+    }
+
+    @Test
+    fun `serializer backed cooking builder migration requires call site or source serializer evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("SpecialCookingSerializer.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public class SpecialCookingSerializer<T extends AbstractCookingRecipe> implements RecipeSerializer<T> {
+                public SpecialCookingSerializer(SpecialCookingSerializer.CookieBaker<T> factory) {
+                }
+
+                public interface CookieBaker<T extends AbstractCookingRecipe> {
+                    T create(String group, BookCategory category, Ingredient ingredient, ItemStack result, float experience, int cookingTime);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BookCategory.java").writeText("""
+            package com.example;
+
+            public enum BookCategory {
+                HEATED
+            }
+        """.trimIndent())
+        srcDir.resolve("HeatedRecipe.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+
+            public class HeatedRecipe extends AbstractCookingRecipe {
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleSerializers.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class ExampleSerializers {
+                public static final DeferredHolder<RecipeSerializer<?>, SpecialCookingSerializer<HeatedRecipe>> HEATED = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("OrphanCookingRecipeBuilder.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.data.recipes.RecipeBuilder;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public class OrphanCookingRecipeBuilder implements RecipeBuilder {
+                private final BookCategory category;
+                private final Ingredient ingredient;
+                private final Item result;
+                private final float experience;
+                private final int cookingTime;
+                private final RecipeSerializer<? extends AbstractCookingRecipe> serializer;
+
+                public OrphanCookingRecipeBuilder(BookCategory category, Ingredient ingredient, Item result, float experience, int cookingTime, RecipeSerializer<? extends AbstractCookingRecipe> serializer) {
+                    this.category = category;
+                    this.ingredient = ingredient;
+                    this.result = result;
+                    this.experience = experience;
+                    this.cookingTime = cookingTime;
+                    this.serializer = serializer;
+                }
+
+                public void save(RecipeOutput output, ResourceLocation id) {
+                    Advancement.Builder advancement = output.advancement();
+                    output.accept(new OrphanCookingRecipeBuilder.Result(id, "", this.category, this.ingredient, this.result, this.experience, this.cookingTime, advancement, id, this.serializer));
+                }
+
+                static class Result implements RecipeOutput {
+                    public Result(ResourceLocation id, String group, BookCategory category, Ingredient ingredient, Item result, float experience, int cookingTime, Advancement.Builder advancement, ResourceLocation advancementId, RecipeSerializer<? extends AbstractCookingRecipe> serializer) {
+                    }
+
+                    public void serializeRecipeData(JsonObject json) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val builder = srcDir.resolve("OrphanCookingRecipeBuilder.java").readText()
+
+        assertTrue(
+            result.changes.none { it.ruleId == "struct-recipe-builder-factory-output" },
+            "Builder must not be migrated from a globally unique compatible serializer factory: ${result.changes}"
+        )
+        assertTrue(builder.contains("private final RecipeSerializer<? extends AbstractCookingRecipe> serializer;"), builder)
+        assertTrue(builder.contains("static class Result implements RecipeOutput"), builder)
+        assertFalse(builder.contains("private final com.example.SpecialCookingSerializer.CookieBaker<?> factory;"), builder)
+    }
+
+    @Test
+    fun `factory cooking serializers derive category and result accessors from source`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("SpecialCookingSerializer.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonElement;
+            import com.google.gson.JsonObject;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import java.util.Objects;
+
+            public class SpecialCookingSerializer<T extends AbstractSpecialCookingRecipe> implements RecipeSerializer<T> {
+                private final int defaultCookingTime;
+                private final SpecialCookingSerializer.CookieBaker<T> factory;
+
+                public SpecialCookingSerializer(SpecialCookingSerializer.CookieBaker<T> factory, int defaultCookingTime) {
+                    this.defaultCookingTime = defaultCookingTime;
+                    this.factory = factory;
+                }
+
+                public T fromJson(ResourceLocation id, JsonObject json) {
+                    String group = GsonHelper.getAsString(json, "group", "");
+                    BookCategory bookCategory = BookCategory.CODEC.byName(GsonHelper.getAsString(json, "category", null), BookCategory.HEATED);
+                    JsonElement ingredientJson = GsonHelper.getAsJsonObject(json, "ingredient");
+                    Ingredient ingredient = Ingredient.fromJson(ingredientJson);
+                    ItemStack result = ItemStack.EMPTY;
+                    float experience = GsonHelper.getAsFloat(json, "experience", 0.0F);
+                    int cookingTime = GsonHelper.getAsInt(json, "cookingtime", this.defaultCookingTime);
+                    return this.factory.create(id, group, bookCategory, ingredient, result, experience, cookingTime);
+                }
+
+                public T fromNetwork(ResourceLocation id, FriendlyByteBuf buffer) {
+                    String group = buffer.readUtf();
+                    BookCategory bookCategory = buffer.readEnum(BookCategory.class);
+                    Ingredient ingredient = Ingredient.fromNetwork(buffer);
+                    ItemStack result = buffer.readItem();
+                    float experience = buffer.readFloat();
+                    int cookingTime = buffer.readVarInt();
+                    return this.factory.create(id, group, bookCategory, ingredient, result, experience, cookingTime);
+                }
+
+                public void toNetwork(FriendlyByteBuf buffer, T recipe) {
+                    buffer.writeUtf(recipe.getGroup());
+                    buffer.writeEnum(Objects.requireNonNullElse(recipe.bookCategory(), BookCategory.HEATED));
+                    recipe.getIngredients().get(0).toNetwork(buffer);
+                    buffer.writeItem(recipe.output());
+                    buffer.writeFloat(recipe.getExperience());
+                    buffer.writeVarInt(recipe.getCookingTime());
+                }
+
+                public interface CookieBaker<T extends AbstractSpecialCookingRecipe> {
+                    T create(ResourceLocation id, String group, BookCategory category, Ingredient ingredient, ItemStack result, float experience, int cookingTime);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val serializer = srcDir.resolve("SpecialCookingSerializer.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-recipe-codec-121" })
+        assertTrue(serializer.contains("public StreamCodec<RegistryFriendlyByteBuf, T> streamCodec()"), serializer)
+        assertTrue(serializer.contains("""BookCategory.CODEC.fieldOf("category").forGetter(AbstractSpecialCookingRecipe::bookCategory)"""), serializer)
+        assertTrue(serializer.contains("""ItemStack.CODEC.fieldOf("result").forGetter(AbstractSpecialCookingRecipe::output)"""), serializer)
+        assertTrue(serializer.contains("buffer.writeEnum(Objects.requireNonNullElse(recipe.bookCategory(), BookCategory.HEATED));"), serializer)
+        assertTrue(serializer.contains("ItemStack.STREAM_CODEC.encode(buffer, recipe.output());"), serializer)
+        assertFalse(serializer.contains("aetherCategory"), serializer)
+        assertFalse(serializer.contains("fromJson(ResourceLocation"), serializer)
+    }
+
+    @Test
+    fun `datagen registry and loot table key wrappers migrate by declared key structure`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LootKeys.java").writeText("""
+            package com.example;
+
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.storage.loot.LootTable;
+
+            public class LootKeys {
+                public static final ResourceKey<LootTable> BONUS = ResourceKey.create(Registries.LOOT_TABLE, ResourceLocation.fromNamespaceAndPath("example", "bonus"));
+            }
+        """.trimIndent())
+        srcDir.resolve("LootProvider.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.storage.loot.LootTable;
+            import net.minecraft.world.level.storage.loot.entries.NestedLootTable;
+
+            public class LootProvider {
+                public void add(ResourceLocation id) {
+                    NestedLootTable.lootTableReference(ResourceKey.create(Registries.LOOT_TABLE, LootKeys.BONUS));
+                    NestedLootTable.lootTableReference(ResourceKey.create(Registries.LOOT_TABLE, id));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("RegistrySets.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.core.RegistryAccess;
+            import net.minecraft.core.RegistrySetBuilder;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.data.PackOutput;
+            import net.minecraft.data.registries.VanillaRegistries;
+            import net.neoforged.neoforge.common.data.DatapackBuiltinEntriesProvider;
+
+            import java.util.Collections;
+            import java.util.concurrent.CompletableFuture;
+
+            public class RegistrySets extends DatapackBuiltinEntriesProvider {
+                public static final RegistrySetBuilder BUILDER = new RegistrySetBuilder();
+
+                public RegistrySets(PackOutput output, CompletableFuture<HolderLookup.Provider> registries) {
+                    super(output, registries, BUILDER, Collections.singleton("example"));
+                }
+
+                public static HolderLookup.Provider createLookup() {
+                    return BUILDER.buildPatch(RegistryAccess.fromRegistryOfRegistries(BuiltInRegistries.REGISTRY), VanillaRegistries.createLookup());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val lootProvider = srcDir.resolve("LootProvider.java").readText()
+        val registrySets = srcDir.resolve("RegistrySets.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-loot-table-resourcekey-reference" })
+        assertTrue(lootProvider.contains("NestedLootTable.lootTableReference(LootKeys.BONUS);"), lootProvider)
+        assertTrue(lootProvider.contains("NestedLootTable.lootTableReference(ResourceKey.create(Registries.LOOT_TABLE, id));"), lootProvider)
+        assertFalse(registrySets.contains("createLookup()"), registrySets)
+        assertFalse(registrySets.contains("buildPatch("), registrySets)
+        assertFalse(registrySets.contains("RegistryAccess.fromRegistryOfRegistries"), registrySets)
+        assertFalse(registrySets.contains("BuiltInRegistries"), registrySets)
+        assertFalse(registrySets.contains("VanillaRegistries"), registrySets)
+    }
+
+    @Test
+    fun `loot provider holder lookups and deferred holders migrate from proven structure`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleBlocks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.Block;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class ExampleBlocks {
+                public static final DeferredHolder<Block, Block> GEM_BLOCK = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleFeatureStates.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class ExampleFeatureStates {
+                public static final BlockState GEM = ExampleBlocks.GEM_BLOCK.getValue().defaultBlockState();
+                public BlockState passThrough(BlockState state) {
+                    return state.setValue(null, state.getValue(null));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleEntityLoot.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.data.loot.LootTableSubProvider;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.world.item.enchantment.Enchantments;
+            import net.minecraft.world.level.storage.loot.LootPool;
+            import net.minecraft.world.level.storage.loot.LootTable;
+            import net.minecraft.world.level.storage.loot.entries.LootItem;
+            import net.minecraft.world.level.storage.loot.entries.NestedLootTable;
+            import net.minecraft.world.level.storage.loot.functions.ApplyBonusCount;
+            import net.minecraft.world.level.storage.loot.functions.EnchantRandomlyFunction;
+
+            import java.util.function.BiConsumer;
+
+            public class ExampleEntityLoot implements LootTableSubProvider {
+                public void generate(BiConsumer<ResourceKey<LootTable>, LootTable.Builder> builder) {
+                    LootPool.lootPool()
+                        .add(LootItem.lootTableItem(null).apply(EnchantRandomlyFunction.randomApplicableEnchantment()))
+                        .add(LootItem.lootTableItem(null).apply(ApplyBonusCount.addOreBonusCount(Enchantments.FORTUNE)))
+                        .add(NestedLootTable.lootTableReference(ResourceKey.create(Registries.LOOT_TABLE, ExampleEntityTypes.COW.get().getDefaultLootTable())));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val featureStates = srcDir.resolve("ExampleFeatureStates.java").readText()
+        val entityLoot = srcDir.resolve("ExampleEntityLoot.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-deferredholder-getvalue" })
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(result.changes.any { it.ruleId == "struct-loot-table-resourcekey-reference" })
+        assertTrue(featureStates.contains("ExampleBlocks.GEM_BLOCK.get().defaultBlockState()"), featureStates)
+        assertTrue(featureStates.contains("state.getValue(null)"), featureStates)
+        assertTrue(entityLoot.contains("private final HolderLookup.Provider registries;"), entityLoot)
+        assertTrue(entityLoot.contains("this.registries = registries;"), entityLoot)
+        assertTrue(entityLoot.contains("EnchantRandomlyFunction.randomApplicableEnchantment(this.registries)"), entityLoot)
+        assertTrue(entityLoot.contains("ApplyBonusCount.addOreBonusCount(this.registries.holderOrThrow(Enchantments.FORTUNE))"), entityLoot)
+        assertTrue(entityLoot.contains("NestedLootTable.lootTableReference(ExampleEntityTypes.COW.get().getDefaultLootTable())"), entityLoot)
+        assertFalse(entityLoot.contains("ResourceKey.create(Registries.LOOT_TABLE, ExampleEntityTypes.COW.get().getDefaultLootTable())"), entityLoot)
+    }
+
+    @Test
+    fun `mmlib recipe id tracking reads ids from holder tracked recipe id`() {
+        val projectDir = createFile("CookingPotBlockEntity.java", """
+            package com.example;
+
+            import javax.annotation.Nullable;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.crafting.Recipe;
+
+            public class CookingPotBlockEntity {
+                private ResourceLocation lastRecipeID;
+
+                public void finish(Recipe<?> recipe) {
+                    trackRecipeExperience(recipe);
+                }
+
+                public void trackRecipeExperience(@Nullable Recipe<?> recipe) {
+                    if (recipe != null) {
+                        ResourceLocation recipeID = recipe.getId();
+                        add(recipeID);
+                    }
+                }
+
+                private void add(ResourceLocation id) {}
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/CookingPotBlockEntity.java").readText()
+
+        assertTrue(migrated.contains("trackRecipeExperience(lastRecipeID);"))
+        assertTrue(migrated.contains("trackRecipeExperience(@Nullable ResourceLocation recipeId)"))
+        assertTrue(migrated.contains("if (recipeId != null)"))
+        assertTrue(migrated.contains("add(recipeId);"))
+        assertTrue(!migrated.contains("trackRecipeExperience(@Nullable Recipe"))
+        assertTrue(!migrated.contains("recipe.getId()"))
+    }
+
+    @Test
+    fun `client screen registration migrates to RegisterMenuScreensEvent`() {
+        val projectDir = createFile("ScreensRegistry.java", """
+            package com.example;
+
+            import net.minecraft.client.gui.screens.MenuScreens;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
+
+            public class ScreensRegistry {
+                @SubscribeEvent
+                public static void screenRegistry(final FMLClientSetupEvent event) {
+                    event.enqueueWork(() -> {
+                        MenuScreens.register(ContainerRegistry.STONE_MORTAR.get(), StoneMortarScreen::new);
+                    });
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/ScreensRegistry.java").readText()
+
+        assertTrue(migrated.contains("import net.neoforged.neoforge.client.event.RegisterMenuScreensEvent;"))
+        assertTrue(migrated.contains("screenRegistry(final RegisterMenuScreensEvent event)"))
+        assertTrue(migrated.contains("event.register(ContainerRegistry.STONE_MORTAR.get(), StoneMortarScreen::new);"))
+        assertTrue(!migrated.contains("MenuScreens.register"))
+        assertTrue(!migrated.contains("enqueueWork"))
+    }
+
+    @Test
+    fun `half migrated client screen event register uses RegisterMenuScreensEvent`() {
+        val projectDir = createFile("ScreensRegistry.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
+
+            public class ScreensRegistry {
+                @SubscribeEvent
+                public static void screenRegistry(final FMLClientSetupEvent event) {
+                    event.enqueueWork(() -> {
+                        event.register(ContainerRegistry.STONE_MORTAR.get(), StoneMortarScreen::new);
+                    });
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/ScreensRegistry.java").readText()
+
+        assertTrue(migrated.contains("import net.neoforged.neoforge.client.event.RegisterMenuScreensEvent;"))
+        assertTrue(migrated.contains("screenRegistry(final RegisterMenuScreensEvent event)"))
+        assertTrue(migrated.contains("event.register(ContainerRegistry.STONE_MORTAR.get(), StoneMortarScreen::new);"))
+        assertTrue(!migrated.contains("FMLClientSetupEvent"))
+        assertTrue(!migrated.contains("enqueueWork"))
+    }
+
+    @Test
+    fun `mixed client setup keeps lifecycle event when extracting menu screen helper`() {
+        val projectDir = createFile("ClientSetup.java", """
+            package com.example;
+
+            import net.minecraft.client.gui.screens.MenuScreens;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
+
+            public class ClientSetup {
+                @SubscribeEvent
+                public static void clientSetup(FMLClientSetupEvent event) {
+                    initializeRenderers();
+                    event.enqueueWork(() -> {
+                        registerGuiFactories();
+                        registerItemModelProperties();
+                    });
+                    registerLoreOverrides();
+                }
+
+                public static void registerGuiFactories() {
+                    MenuScreens.register(ContainerRegistry.STONE_MORTAR.get(), StoneMortarScreen::new);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/ClientSetup.java").readText()
+
+        assertTrue(migrated.contains("import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;"))
+        assertTrue(migrated.contains("import net.neoforged.neoforge.client.event.RegisterMenuScreensEvent;"))
+        assertTrue(migrated.contains("public static void clientSetup(FMLClientSetupEvent event)"))
+        assertTrue(migrated.contains("initializeRenderers();"))
+        assertTrue(migrated.contains("registerItemModelProperties();"))
+        assertTrue(migrated.contains("registerLoreOverrides();"))
+        assertTrue(migrated.contains("@SubscribeEvent\n    public static void registerGuiFactories(RegisterMenuScreensEvent event)"))
+        assertTrue(migrated.contains("event.register(ContainerRegistry.STONE_MORTAR.get(), StoneMortarScreen::new);"))
+        assertTrue(!migrated.contains("registerGuiFactories();"))
+        assertTrue(!migrated.contains("MenuScreens.register"))
+    }
+
+    @Test
+    fun `useItemOn maps helper InteractionResult to ItemInteractionResult`() {
+        val projectDir = createFile("NabeBlock.java", """
+            package com.example;
+
+            import net.minecraft.world.InteractionResult;
+
+            public class NabeBlock {
+                protected net.minecraft.world.ItemInteractionResult useItemOn(Object itemstack, Object state, Object level, Object pos, Object player, Object hand, Object hitResult) {
+                    return eat(level, pos, state, player);
+                }
+
+                protected InteractionResult eat(Object level, Object pos, Object state, Object player) {
+                    return InteractionResult.SUCCESS;
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/NabeBlock.java").readText()
+
+        assertTrue(migrated.contains("return switch (eat(level, pos, state, player))"))
+        assertTrue(migrated.contains("case SUCCESS -> net.minecraft.world.ItemInteractionResult.SUCCESS;"))
+        assertTrue(migrated.contains("default -> net.minecraft.world.ItemInteractionResult.PASS_TO_DEFAULT_BLOCK_INTERACTION;"))
+    }
+
+    @Test
+    fun `detects EventNetworkChannel`() {
+        val projectDir = createFile("EventNet.java", """
+            package com.example;
+            public class EventNet {
+                private EventNetworkChannel channel;
+            }
+        """.trimIndent())
+        val pass = StructuralRefactorPass()
+        val result = pass.analyze(projectDir)
+        assertTrue(result.changes.any { it.ruleId == "struct-networking-channel" })
+    }
+
+    @Test
+    fun `apply mode writes changes to file`() {
+        val projectDir = createFile("ApplyTest.java", """
+            package com.example;
+            import net.minecraftforge.common.capabilities.ICapabilityProvider;
+            public class ApplyTest implements ICapabilityProvider {
+                public <T> LazyOptional<T> getCapability(Capability<T> cap, Direction side) {
+                    return null;
+                }
+            }
+        """.trimIndent())
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        assertTrue(result.changeCount > 0)
+    }
+
+    @Test
+    fun `detects newSimpleChannel call`() {
+        val projectDir = createFile("NetReg.java", """
+            package com.example;
+            public class NetReg {
+                void init() {
+                    Object ch = NetworkRegistry.newSimpleChannel(id, ver, c, s);
+                }
+            }
+        """.trimIndent())
+        val pass = StructuralRefactorPass()
+        val result = pass.analyze(projectDir)
+        assertTrue(result.changes.any { it.ruleId == "struct-networking-register" })
+    }
+
+    @Test
+    fun `migrates legacy living tick events and removes split tick phase checks`() {
+        val projectDir = createFile("TickHandlers.java", """
+            package com.example;
+
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.LogicalSide;
+            import net.neoforged.neoforge.client.event.ClientTickEvent;
+            import net.neoforged.neoforge.event.TickEvent;
+            import net.neoforged.neoforge.event.entity.living.LivingEvent;
+            import net.neoforged.neoforge.event.tick.LevelTickEvent;
+            import net.neoforged.neoforge.event.tick.PlayerTickEvent;
+
+            public class TickHandlers {
+                private static int pending;
+                private static final String SIDE_DOC = "event.side == LogicalSide.SERVER";
+
+                @SubscribeEvent
+                public static void onLivingTick(LivingEvent.LivingTickEvent event) {
+                    if (event.getEntity().level().isClientSide()) return;
+                    LivingEntity entity = event.getEntity();
+                    use(entity);
+                }
+
+                @SubscribeEvent
+                public static void onCancelableLivingTick(LivingEvent.LivingTickEvent event) {
+                    LivingEntity entity = event.getEntity();
+                    if (!event.isCanceled()) {
+                        use(entity);
+                    }
+                }
+
+                @SubscribeEvent
+                public static void onDirectLivingTick(LivingEvent.LivingTickEvent event) {
+                    use(event.getEntity());
+                }
+
+                @SubscribeEvent
+                public static void onPlayerTick(LivingEvent.LivingTickEvent event) {
+                    if (!(event.getEntity() instanceof ServerPlayer player)) return;
+                    String playerTickDoc = "scheduler.tick(player);";
+                    String playerTickBlock = ${"\"\"\""}
+                        scheduler.tick(player);
+                        ${"\"\"\""};
+                    // scheduler.tick(player);
+                    scheduler.tick(player);
+                    use(player);
+                }
+
+                @SubscribeEvent
+                public static void onSplitPlayerTick(PlayerTickEvent.Post event) {
+                    if (event.side.isClient() || event.phase == TickEvent.Phase.START) {
+                        return;
+                    }
+                    var player = event.getEntity();
+                    player.pick(player.getEntityReach(), 0, false);
+                }
+
+                @SubscribeEvent
+                public static void onClientTick(ClientTickEvent.Post event) {
+                    // [forge2neo] TickEvent.Phase.END guard removed
+                    // phase check removed in NeoForge
+                    if (event.phase == TickEvent.Phase.END) {
+                        ping();
+                    }
+                    if (event.phase != TickEvent.Phase.END || pending <= 0) {
+                        return;
+                    }
+                    pending--;
+                }
+
+                @SubscribeEvent
+                public static void onNamedClientTick(ClientTickEvent.Post tick) {
+                    if (tick.phase == TickEvent.Phase.END && pending > 0) {
+                        ping();
+                    }
+                }
+
+                @SubscribeEvent
+                public static void onLevelTick(LevelTickEvent.Post event) {
+                    String textBlock = ${"\"\"\""}
+                        LogicalSide.SERVER == event.side
+                        event.side != LogicalSide.CLIENT
+                        ${"\"\"\""};
+                    // event.side == LogicalSide.SERVER
+                    if (event.side == LogicalSide.SERVER) {
+                        ping();
+                    }
+                }
+
+                private static void use(LivingEntity entity) {}
+                private static void ping() {}
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/TickHandlers.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-tick-events" })
+        assertTrue(migrated.contains("import net.neoforged.neoforge.event.tick.EntityTickEvent;"))
+        assertTrue(migrated.contains("import net.neoforged.neoforge.event.tick.PlayerTickEvent;"))
+        assertTrue(migrated.contains("public static void onLivingTick(EntityTickEvent.Pre event)"))
+        assertTrue(migrated.contains("if (!(event.getEntity() instanceof LivingEntity entity)) return;"))
+        assertTrue(migrated.contains("public static void onCancelableLivingTick(EntityTickEvent.Pre event)"))
+        assertTrue(migrated.contains("if (!event.isCanceled())"))
+        assertTrue(migrated.contains("public static void onDirectLivingTick(EntityTickEvent.Pre event)"))
+        assertTrue(migrated.contains("if (!(event.getEntity() instanceof LivingEntity modporterLivingEntity)) return;"))
+        assertTrue(migrated.contains("use(modporterLivingEntity);"))
+        assertTrue(migrated.contains("public static void onPlayerTick(EntityTickEvent.Pre event)"))
+        assertTrue(migrated.contains("public static void onSplitPlayerTick(PlayerTickEvent.Post event)"))
+        assertTrue(migrated.contains("if (event.getEntity().level().isClientSide()) {"), migrated)
+        assertTrue(migrated.contains("player.pick(player.entityInteractionRange(), 0, false);"), migrated)
+        assertTrue(migrated.contains("scheduler.tick(player);"), migrated)
+        assertTrue(migrated.contains("""String playerTickDoc = "scheduler.tick(player);";"""), migrated)
+        assertTrue(migrated.contains("scheduler.tick(player);\n            \"\"\";"), migrated)
+        assertTrue(migrated.contains("// scheduler.tick(player);"), migrated)
+        assertTrue(migrated.contains("if (pending <= 0) {"))
+        assertTrue(migrated.contains("public static void onNamedClientTick(ClientTickEvent.Post tick)"))
+        assertTrue(migrated.contains("if (pending > 0) {"))
+        assertTrue(migrated.contains("if (!event.getLevel().isClientSide()) {"))
+        assertTrue(!migrated.contains("LivingEvent.LivingTickEvent"))
+        assertTrue(!migrated.contains("TickEvent.Phase"))
+        assertTrue(!migrated.contains("event.phase"))
+        assertTrue(!migrated.contains("tick.phase"))
+        assertFalse(migrated.contains("import net.neoforged.fml.LogicalSide;"), migrated)
+        assertFalse(migrated.contains("if (event.side == LogicalSide.SERVER) {"), migrated)
+        assertTrue(migrated.contains("private static final String SIDE_DOC = \"event.side == LogicalSide.SERVER\";"), migrated)
+        assertTrue(migrated.contains("LogicalSide.SERVER == event.side"), migrated)
+        assertTrue(migrated.contains("event.side != LogicalSide.CLIENT"), migrated)
+        assertTrue(migrated.contains("// event.side == LogicalSide.SERVER"), migrated)
+        assertTrue(!migrated.contains("phase check removed"), migrated)
+    }
+
+    @Test
+    fun `migrates BlockEntity provider signatures and packet update tag loading`() {
+        val projectDir = createFile("CustomBE.java", """
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.network.Connection;
+            import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
+            import net.minecraft.world.ContainerHelper;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import org.jetbrains.annotations.NotNull;
+
+            public class CustomBE extends BlockEntity {
+                private final NonNullList<ItemStack> items = NonNullList.withSize(1, ItemStack.EMPTY);
+                private Component name;
+
+                public CustomBE(BlockPos pos, BlockState state) {
+                    super(null, pos, state);
+                }
+
+                @Override
+                protected void saveAdditional(@NotNull CompoundTag tag) {
+                    super.saveAdditional(tag);
+                    ContainerHelper.saveAllItems(tag, this.items, net.minecraft.core.RegistryAccess.EMPTY);
+                    String serializerDoc = "Component.Serializer.toJson(this.name)";
+                    // Component.Serializer.toJson(this.name);
+                    tag.putString("Name", Component.Serializer.toJson(this.name));
+                }
+
+                @Override
+                public void load(@NotNull CompoundTag tag) {
+                    super.load(tag);
+                    ContainerHelper.loadAllItems(tag, this.items, net.minecraft.core.RegistryAccess.EMPTY);
+                    String parserDoc = "Component.Serializer.fromJson(tag.getString(\"Name\"))";
+                    // Component.Serializer.fromJson(tag.getString("Name"));
+                    this.name = Component.Serializer.fromJson(tag.getString("Name"));
+                }
+
+                @Override
+                public @NotNull CompoundTag getUpdateTag() {
+                    String updateDoc = "super.getUpdateTag() saveAdditional(tag) saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY)";
+                    String updateBlock = ${"\"\"\""}
+                        super.getUpdateTag()
+                        saveAdditional(tag);
+                        this.saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY)
+                        ${"\"\"\""};
+                    // super.getUpdateTag();
+                    // saveAdditional(tag);
+                    // this.saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY);
+                    CompoundTag tag = super.getUpdateTag();
+                    saveAdditional(tag);
+                    CompoundTag copy = this.saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY);
+                    return tag;
+                }
+
+                @Override
+                public void handleUpdateTag(@NotNull CompoundTag tag) {
+                    super.handleUpdateTag(tag);
+                    this.load(tag);
+                }
+
+                @Override
+                public void onDataPacket(@NotNull Connection net, @NotNull ClientboundBlockEntityDataPacket pkt) {
+                    CompoundTag tag = pkt.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag();
+                    if (tag != null) {
+                        this.handleUpdateTag(tag);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/CustomBE.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-blockentity-holderlookup" })
+        assertTrue(migrated.contains("import net.minecraft.core.HolderLookup;"))
+        assertTrue(migrated.contains("protected void saveAdditional(@NotNull CompoundTag tag, HolderLookup.Provider registries)"))
+        assertTrue(migrated.contains("protected void loadAdditional(@NotNull CompoundTag tag, HolderLookup.Provider registries)"))
+        assertTrue(migrated.contains("public @NotNull CompoundTag getUpdateTag(HolderLookup.Provider registries)"))
+        assertTrue(migrated.contains("public void handleUpdateTag(@NotNull CompoundTag tag, HolderLookup.Provider lookupProvider)"))
+        assertTrue(migrated.contains("public void onDataPacket(@NotNull Connection net, @NotNull ClientboundBlockEntityDataPacket pkt, HolderLookup.Provider lookupProvider)"))
+        assertTrue(migrated.contains("CompoundTag tag = pkt.getTag();"))
+        assertTrue(migrated.contains("ContainerHelper.saveAllItems(tag, this.items, registries);"))
+        assertTrue(migrated.contains("ContainerHelper.loadAllItems(tag, this.items, registries);"))
+        assertTrue(migrated.contains("super.saveAdditional(tag, registries);"), migrated)
+        assertTrue(migrated.contains("super.loadAdditional(tag, registries);"), migrated)
+        assertTrue(migrated.contains("CompoundTag tag = super.getUpdateTag(registries);"), migrated)
+        assertTrue(migrated.contains("saveAdditional(tag, registries);"), migrated)
+        assertTrue(migrated.contains("CompoundTag copy = this.saveWithoutMetadata(registries);"), migrated)
+        assertTrue(migrated.contains("Component.Serializer.toJson(this.name, registries)"))
+        assertTrue(migrated.contains("Component.Serializer.fromJson(tag.getString(\"Name\"), registries)"))
+        assertTrue(migrated.contains("""String serializerDoc = "Component.Serializer.toJson(this.name)";"""), migrated)
+        assertTrue(migrated.contains("// Component.Serializer.toJson(this.name);"), migrated)
+        assertTrue(migrated.contains("""String parserDoc = "Component.Serializer.fromJson(tag.getString(\"Name\"))";"""), migrated)
+        assertTrue(migrated.contains("// Component.Serializer.fromJson(tag.getString(\"Name\"));"), migrated)
+        assertTrue(migrated.contains("""String updateDoc = "super.getUpdateTag() saveAdditional(tag) saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY)";"""), migrated)
+        assertTrue(migrated.contains("super.getUpdateTag()\n            saveAdditional(tag);\n            this.saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY)"), migrated)
+        assertTrue(migrated.contains("// super.getUpdateTag();"), migrated)
+        assertTrue(migrated.contains("// saveAdditional(tag);"), migrated)
+        assertTrue(migrated.contains("// this.saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY);"), migrated)
+        assertTrue(migrated.contains("this.loadAdditional(tag, lookupProvider);"))
+        assertTrue(migrated.contains("this.handleUpdateTag(tag, lookupProvider);"))
+        assertFalse(migrated.contains("ContainerHelper.saveAllItems(tag, this.items, net.minecraft.core.RegistryAccess.EMPTY);"))
+        assertFalse(migrated.contains("ContainerHelper.loadAllItems(tag, this.items, net.minecraft.core.RegistryAccess.EMPTY);"))
+    }
+
+    @Test
+    fun `registry access empty fallback migration ignores comments and string literals`() {
+        val projectDir = createFile("RegistryAccessEmptySurface.java", """
+            package com.example;
+
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.core.RegistryAccess;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.ContainerHelper;
+            import net.minecraft.world.item.ItemStack;
+
+            public class RegistryAccessEmptySurface {
+                public void save(RegistryAccess registryAccess, CompoundTag tag, NonNullList<ItemStack> items) {
+                    String doc = "net.minecraft.core.RegistryAccess.EMPTY";
+                    // ContainerHelper.saveAllItems(tag, items, net.minecraft.core.RegistryAccess.EMPTY);
+                    /*
+                     ContainerHelper.loadAllItems(tag, items, net.minecraft.core.RegistryAccess.EMPTY);
+                     */
+                    ContainerHelper.saveAllItems(tag, items, net.minecraft.core.RegistryAccess.EMPTY);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = tempDir.resolve("src/main/java/com/example/RegistryAccessEmptySurface.java").readText()
+
+        assertTrue(migrated.contains("ContainerHelper.saveAllItems(tag, items, registryAccess);"), migrated)
+        assertTrue(migrated.contains("String doc = \"net.minecraft.core.RegistryAccess.EMPTY\";"), migrated)
+        assertTrue(migrated.contains("// ContainerHelper.saveAllItems(tag, items, net.minecraft.core.RegistryAccess.EMPTY);"), migrated)
+        assertTrue(migrated.contains("ContainerHelper.loadAllItems(tag, items, net.minecraft.core.RegistryAccess.EMPTY);"), migrated)
+        assertFalse(
+            Regex("""(?m)^[ \t]*ContainerHelper\.saveAllItems\(tag, items, net\.minecraft\.core\.RegistryAccess\.EMPTY\);""")
+                .containsMatchIn(migrated),
+            migrated
+        )
+        assertFalse(migrated.contains("\"registryAccess\""), migrated)
+    }
+
+    @Test
+    fun `block entity saveWithoutMetadata callers use proven registry providers`() {
+        val projectDir = createFile("BlockEntityDropSurface.java", """
+            package com.example;
+
+            import java.util.Collections;
+            import java.util.List;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.BlockItem;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.block.BaseEntityBlock;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.level.storage.loot.LootParams;
+            import net.minecraft.world.level.storage.loot.parameters.LootContextParams;
+
+            class ExampleBlock extends BaseEntityBlock {
+                ExampleBlock(Properties properties) {
+                    super(properties);
+                }
+
+                @Override
+                public List<ItemStack> getDrops(BlockState state, LootParams.Builder params) {
+                    BlockEntity blockEntity = params.getOptionalParameter(LootContextParams.BLOCK_ENTITY);
+                    if (blockEntity instanceof ExampleBE be) {
+                        ItemStack stack = new ItemStack(this);
+                        CompoundTag tag = be.saveWithoutMetadata();
+                        BlockItem.setBlockEntityData(stack, blockEntity.getType(), tag);
+                        return Collections.singletonList(stack);
+                    }
+                    return super.getDrops(state, params);
+                }
+
+                @Override
+                public ItemStack getCloneItemStack(BlockGetter level, BlockPos pos, BlockState state) {
+                    ItemStack stack = super.getCloneItemStack(level, pos, state);
+                    BlockEntity blockEntity = level.getBlockEntity(pos);
+                    if (blockEntity instanceof ExampleBE be) {
+                        CompoundTag tag = be.saveWithoutMetadata();
+                        BlockItem.setBlockEntityData(stack, blockEntity.getType(), tag);
+                    }
+                    return stack;
+                }
+            }
+
+            class ExampleBE extends BlockEntity {
+                ExampleBE(BlockPos pos, BlockState state) {
+                    super((BlockEntityType<?>) null, pos, state);
+                }
+
+                @Override
+                public CompoundTag getUpdateTag() {
+                    return this.saveWithoutMetadata();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/BlockEntityDropSurface.java").readText()
+
+        assertTrue(migrated.contains("import net.minecraft.core.HolderLookup;"), migrated)
+        assertTrue(migrated.contains("CompoundTag tag = be.saveWithoutMetadata(params.getLevel().registryAccess());"), migrated)
+        assertTrue(migrated.contains("CompoundTag tag = be.saveWithoutMetadata(be.getLevel().registryAccess());"), migrated)
+        assertTrue(migrated.contains("public CompoundTag getUpdateTag(HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("return this.saveWithoutMetadata(registries);"), migrated)
+        assertFalse(migrated.contains("saveWithoutMetadata();"), migrated)
+    }
+
+    @Test
+    fun `block tooltip container helper uses tooltip context registries`() {
+        val projectDir = createFile("BlockTooltipContainerHelperSurface.java", """
+            package com.example;
+
+            import java.util.List;
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.ContainerHelper;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.TooltipFlag;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.block.Block;
+
+            class ExampleBlock extends Block {
+                ExampleBlock(Properties properties) {
+                    super(properties);
+                }
+
+                @Override
+                public void appendHoverText(ItemStack stack, BlockGetter level, List<Component> tooltip, TooltipFlag flag) {
+                    CompoundTag tag = new CompoundTag();
+                    NonNullList<ItemStack> items = NonNullList.withSize(1, ItemStack.EMPTY);
+                    ContainerHelper.loadAllItems(tag, items);
+                    super.appendHoverText(stack, level, tooltip, flag);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/BlockTooltipContainerHelperSurface.java").readText()
+
+        assertTrue(migrated.contains("import net.minecraft.world.item.Item;"), migrated)
+        assertTrue(migrated.contains("appendHoverText(ItemStack stack, Item.TooltipContext level, List<Component> tooltip, TooltipFlag flag)"), migrated)
+        assertTrue(migrated.contains("ContainerHelper.loadAllItems(tag, items, level.registries());"), migrated)
+        assertFalse(migrated.contains("ContainerHelper.loadAllItems(tag, items);"), migrated)
+    }
+
+    @Test
+    fun `migrates component json tree and removed Nitrogen Curios language helpers`() {
+        val projectDir = createFile("LegacyLanguageProvider.java", """
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.ChatFormatting;
+            import net.minecraft.network.chat.Component;
+
+            public class LegacyLanguageProvider {
+                public void tips(JsonObject object, String key) {
+                    object.add("title", Component.Serializer.toJsonTree(Component.translatable("tips.title").withStyle(ChatFormatting.BOLD, ChatFormatting.YELLOW)));
+                    object.add("tip", Component.Serializer.toJsonTree(Component.translatable(key)));
+                }
+
+                public void add(String key, String value) {
+                }
+
+                public void addTranslations() {
+                    this.addCuriosIdentifier("aether_ring", "Ring");
+                    this.addCuriosModifier("aether_ring", "When worn as ring:");
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/LegacyLanguageProvider.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(com.mojang.serialization.JsonOps.INSTANCE, Component.translatable(\"tips.title\").withStyle(ChatFormatting.BOLD, ChatFormatting.YELLOW)).getOrThrow()"), migrated)
+        assertTrue(migrated.contains("net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(com.mojang.serialization.JsonOps.INSTANCE, Component.translatable(key)).getOrThrow()"), migrated)
+        assertTrue(migrated.contains("this.add(\"curios.identifier.\" + \"aether_ring\", \"Ring\");"), migrated)
+        assertTrue(migrated.contains("this.add(\"curios.modifiers.\" + \"aether_ring\", \"When worn as ring:\");"), migrated)
+        assertFalse(migrated.contains("Component.Serializer.toJsonTree"), migrated)
+        assertFalse(migrated.contains("addCuriosIdentifier"), migrated)
+        assertFalse(migrated.contains("addCuriosModifier"), migrated)
+    }

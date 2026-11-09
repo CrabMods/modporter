@@ -729,6 +729,98 @@ class ExactProjectProviderCallMigrationTest {
     }
 
     @Test
+    fun `constructor assigned final entity field alone does not prove a provider`() {
+        val codec = write("sample/Codec.java", """
+            package sample;
+            import net.minecraft.core.HolderLookup;
+            class Codec {
+                void decode(HolderLookup.Provider registries) { registries.toString(); }
+            }
+        """.trimIndent())
+        val file = write("sample/Holder.java", """
+            package sample;
+            import net.minecraft.server.level.ServerPlayer;
+            class Holder {
+                private final ServerPlayer player;
+                private final Codec codec = new Codec();
+                Holder(ServerPlayer player) { this.player = player; }
+                void run() { codec.decode(); }
+            }
+        """.trimIndent())
+        val before = listOf(codec.readText(), file.readText())
+
+        val error = assertFailsWith<IllegalStateException> {
+            ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
+        }
+
+        assertTrue(error.message.orEmpty().contains("Exact provider demands do not reach a declared provider boundary"))
+        assertTrue(before == listOf(codec.readText(), file.readText()))
+    }
+
+    @Test
+    fun `stable final entity field prior dereference proves the callsite provider`() {
+        write("sample/Codec.java", """
+            package sample;
+            import net.minecraft.core.HolderLookup;
+            class Codec {
+                void decode(HolderLookup.Provider registries) { registries.toString(); }
+            }
+        """.trimIndent())
+        val file = write("sample/Holder.java", """
+            package sample;
+            import net.minecraft.server.level.ServerPlayer;
+            class Holder {
+                private final ServerPlayer player;
+                private final Codec codec = new Codec();
+                Holder(ServerPlayer player) { this.player = player; }
+                void run() {
+                    player.getUUID();
+                    codec.decode();
+                }
+            }
+        """.trimIndent())
+
+        ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
+        val migrated = file.readText()
+
+        assertTrue(migrated.contains("void run()"), migrated)
+        assertTrue(migrated.contains("codec.decode(this.player.registryAccess());") || migrated.contains("codec.decode(player.registryAccess());"), migrated)
+        assertTrue(!migrated.contains("HolderLookup.Provider modporterRegistries"), migrated)
+    }
+
+    @Test
+    fun `conditional final field dereference does not prove the later callsite provider`() {
+        val codec = write("sample/Codec.java", """
+            package sample;
+            import net.minecraft.core.HolderLookup;
+            class Codec {
+                void decode(HolderLookup.Provider registries) { registries.toString(); }
+            }
+        """.trimIndent())
+        val file = write("sample/Holder.java", """
+            package sample;
+            import net.minecraft.server.level.ServerPlayer;
+            class Holder {
+                private final ServerPlayer player;
+                private final Codec codec = new Codec();
+                Holder(ServerPlayer player) { this.player = player; }
+                void run(boolean probe) {
+                    if (probe) player.getUUID();
+                    codec.decode();
+                }
+            }
+        """.trimIndent())
+        val before = listOf(codec.readText(), file.readText())
+
+        val error = assertFailsWith<IllegalStateException> {
+            ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
+        }
+
+        assertTrue(error.message.orEmpty().contains("Exact provider demands do not reach a declared provider boundary"))
+        assertTrue(before == listOf(codec.readText(), file.readText()))
+    }
+
+    @Test
     fun `unused generated provider is removed instead of propagated`() {
         val file = write("sample/Codec.java", """
             package sample;

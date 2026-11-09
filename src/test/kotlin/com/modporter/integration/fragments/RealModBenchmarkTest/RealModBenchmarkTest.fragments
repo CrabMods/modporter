@@ -1,5 +1,7 @@
 001-header.ktfrag
-002-benchmark-client-world-harness-is-staged-in-per-mod-package.ktfrag
-003-run-runtime-process.ktfrag
-004-summarize-allowed-runtime-issues.ktfrag
-005-render-report.ktfrag
+002-runtime-log-audit-keeps-texture-mip-warning-when-input-dimensions-differ.ktfrag
+003-run-case.ktfrag
+004-held-log-game-test-shutdown-command.ktfrag
+005-audit-runtime-log.ktfrag
+006-source-declares-sound-event.ktfrag
+007-check-status.ktfrag

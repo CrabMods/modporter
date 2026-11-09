@@ -126,10 +126,10 @@ class ProviderAwareNbtContractMigrationTest {
             migratedInventory
         )
         val writeProvider = Regex(
-            """write\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+), boolean clientPacket\)"""
+            """write\(CompoundTag tag, boolean clientPacket, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)"""
         ).find(migratedOwner)?.groupValues?.get(1)
         val readProvider = Regex(
-            """read\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+), boolean clientPacket\)"""
+            """read\(CompoundTag tag, boolean clientPacket, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)"""
         ).find(migratedOwner)?.groupValues?.get(1)
         assertTrue(writeProvider != null, migratedOwner)
         assertTrue(readProvider != null, migratedOwner)
@@ -755,7 +755,7 @@ class ProviderAwareNbtContractMigrationTest {
     }
 
     @Test
-    fun `ambiguous provider roots become an explicit project contract`() {
+    fun `inferred level root outranks an entity without widening project methods`() {
         val helper = javaFile(
             "AmbiguousProviderHelper.java",
             """
@@ -782,13 +782,10 @@ class ProviderAwareNbtContractMigrationTest {
         val migrated = helper.readText()
 
         assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        val provider = Regex(
-            """load\(Level world, Player player, BlockEntity blockEntity, CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)"""
-        ).find(migrated)?.groupValues?.get(1)
-        assertTrue(provider != null, migrated)
-        assertTrue(migrated.contains("blockEntity.loadWithComponents(tag, $provider)"), migrated)
-        assertTrue(migrated.contains("load(world, player, blockEntity, tag, "), migrated)
-        assertFalse(migrated.contains("blockEntity.loadWithComponents(tag, world.registryAccess())"), migrated)
+        assertTrue(migrated.contains("load(Level world, Player player, BlockEntity blockEntity, CompoundTag tag)"), migrated)
+        assertTrue(migrated.contains("blockEntity.loadWithComponents(tag, world.registryAccess())"), migrated)
+        assertTrue(migrated.contains("load(world, player, blockEntity, tag);"), migrated)
+        assertFalse(migrated.contains("HolderLookup.Provider"), migrated)
         assertFalse(migrated.contains("blockEntity.loadWithComponents(tag, player.registryAccess())"), migrated)
     }
 

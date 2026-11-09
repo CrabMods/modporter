@@ -417,6 +417,14 @@
       "isRegex": true
     },
     {
+      "id": "forgeregistries-keys-ENTITY_DATA_SERIALIZERS",
+      "pattern": "ForgeRegistries\\.Keys\\.ENTITY_DATA_SERIALIZERS",
+      "replacement": "NeoForgeRegistries.Keys.ENTITY_DATA_SERIALIZERS",
+      "description": "ForgeRegistries.Keys.ENTITY_DATA_SERIALIZERS -> NeoForgeRegistries.Keys.ENTITY_DATA_SERIALIZERS (Create's AllEntityDataSerializers on 1.21.1)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "forgeregistries-keys-GLOBAL_LOOT_MODIFIER_SERIALIZERS",
       "pattern": "ForgeRegistries\\.Keys\\.GLOBAL_LOOT_MODIFIER_SERIALIZERS",
       "replacement": "NeoForgeRegistries.Keys.GLOBAL_LOOT_MODIFIER_SERIALIZERS",
@@ -960,14 +968,6 @@
       "isRegex": true
     },
     {
-      "id": "deferred-holder-accept-get",
-      "pattern": "\\.accept\\(([A-Z][A-Z_0-9]+)\\)",
-      "replacement": ".accept($1.get())",
-      "description": "DeferredHolder passed to accept() needs .get() — DeferredHolder is not ItemLike",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "cls-BlockPathTypes",
       "pattern": "\\bBlockPathTypes\\b",
       "replacement": "PathType",
@@ -1052,14 +1052,6 @@
       "pattern": "\\bGlassBlock\\b",
       "replacement": "TransparentBlock",
       "description": "GlassBlock -> TransparentBlock (1.21)",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "cls-AbstractCriterionTriggerInstance",
-      "pattern": "\\bAbstractCriterionTriggerInstance\\b",
-      "replacement": "SimpleCriterionTrigger.SimpleInstance",
-      "description": "AbstractCriterionTriggerInstance -> SimpleCriterionTrigger.SimpleInstance (1.21)",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -1491,18 +1483,18 @@
       "isRegex": true
     },
     {
-      "id": "cls-ForgeRegistries-RECIPE_TYPES",
-      "pattern": "ForgeRegistries\\.RECIPE_TYPES",
-      "replacement": "BuiltInRegistries.RECIPE_TYPE",
-      "description": "ForgeRegistries.RECIPE_TYPES -> BuiltInRegistries.RECIPE_TYPE outside DeferredRegister declarations",
+      "id": "cls-ForgeRegistries-RECIPE_TYPES-getValue",
+      "pattern": "ForgeRegistries\\.RECIPE_TYPES\\.getValue\\(",
+      "replacement": "BuiltInRegistries.RECIPE_TYPE.get(",
+      "description": "ForgeRegistries.RECIPE_TYPES.getValue(id) -> BuiltInRegistries.RECIPE_TYPE.get(id) (Registry#get in 1.21; this rule runs after the registry-getValue rule, so it maps the call itself)",
       "fileGlob": "*.java",
       "isRegex": true
     },
     {
-      "id": "keys-ForgeRegistries-ENTITY_DATA_SERIALIZERS",
-      "pattern": "ForgeRegistries\\.Keys\\.ENTITY_DATA_SERIALIZERS",
-      "replacement": "NeoForgeRegistries.Keys.ENTITY_DATA_SERIALIZERS",
-      "description": "Forge entity data serializer registry key -> NeoForge synchronized registry key",
+      "id": "cls-ForgeRegistries-RECIPE_TYPES",
+      "pattern": "ForgeRegistries\\.RECIPE_TYPES\\b",
+      "replacement": "BuiltInRegistries.RECIPE_TYPE",
+      "description": "ForgeRegistries.RECIPE_TYPES -> BuiltInRegistries.RECIPE_TYPE (non-DeferredRegister context)",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -1596,11 +1588,11 @@
     },
     {
       "id": "abstract-projectile-dispense",
-      "pattern": "AbstractProjectileDispenseBehavior",
+      "pattern": "\\bAbstractProjectileDispenseBehavior\\b",
       "replacement": "ProjectileDispenseBehavior",
-      "description": "AbstractProjectileDispenseBehavior -> ProjectileDispenseBehavior (1.21)",
+      "description": "AbstractProjectileDispenseBehavior -> ProjectileDispenseBehavior (1.21); whole identifier only, a mod's own AbstractProjectileDispenseBehaviorAccessor keeps its file name",
       "fileGlob": "*.java",
-      "isRegex": false
+      "isRegex": true
     },
     {
       "id": "capabilities-package-move",
@@ -1609,22 +1601,6 @@
       "description": "Capabilities package moved: common.capabilities -> capabilities (1.21)",
       "fileGlob": "*.java",
       "isRegex": false
-    },
-    {
-      "id": "planttype-import-remove",
-      "pattern": "import net.neoforged.neoforge.common.PlantType;\\r?\\n",
-      "replacement": "",
-      "description": "PlantType removed in NeoForge 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "iplantable-import-remove",
-      "pattern": "import net.neoforged.neoforge.common.IPlantable;\\r?\\n",
-      "replacement": "",
-      "description": "IPlantable removed in NeoForge 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
     },
     {
       "id": "deserialization-context-import",
@@ -1851,6 +1827,14 @@
       "isRegex": true
     },
     {
+      "id": "cls-ExtendedGui",
+      "pattern": "\\bExtendedGui\\b",
+      "replacement": "Gui",
+      "description": "NeoForge 20.4 ExtendedGui (a Gui subclass) is gone in 1.21; overlay code receives vanilla Gui",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "gui-overlay-manager-import",
       "pattern": "import net.neoforged.neoforge.client.gui.overlay.GuiOverlayManager;\\r?\\n",
       "replacement": "import net.neoforged.neoforge.client.gui.VanillaGuiLayers;\n",
@@ -2003,14 +1987,6 @@
       "isRegex": true
     },
     {
-      "id": "getCloneItemStack-blockgetter-to-levelreader",
-      "pattern": "public ItemStack getCloneItemStack\\(BlockGetter",
-      "replacement": "public ItemStack getCloneItemStack(LevelReader",
-      "description": "Block.getCloneItemStack() takes LevelReader instead of BlockGetter in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": false
-    },
-    {
       "id": "isValidBonemealTarget-remove-bool",
       "pattern": "public\\s+boolean\\s+isValidBonemealTarget\\s*\\(\\s*LevelReader\\s+(\\w+)\\s*,\\s*BlockPos\\s+(\\w+)\\s*,\\s*BlockState\\s+(\\w+)\\s*,\\s*boolean\\s+(\\w+)\\s*\\)",
       "replacement": "public boolean isValidBonemealTarget(LevelReader $1, BlockPos $2, BlockState $3)",
@@ -2031,14 +2007,6 @@
       "pattern": "\\.isValidBonemealTarget\\(\\s*([^,]+?)\\s*,\\s*([^,]+?)\\s*,\\s*([^,]+?)\\s*,\\s*(true|false)\\s*\\)",
       "replacement": ".isValidBonemealTarget($1, $2, $3)",
       "description": "BonemealableBlock.isValidBonemealTarget() call removed isClient param in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "food-getEffects-to-effects",
-      "pattern": "\\.getEffects\\(\\)",
-      "replacement": ".effects()",
-      "description": "FoodProperties.getEffects() -> effects() in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -2170,14 +2138,6 @@
       "isRegex": true
     },
     {
-      "id": "gui-mouseScrolled-4param",
-      "pattern": "mouseScrolled\\(double (\\w+), double (\\w+), double (\\w+)\\)",
-      "replacement": "mouseScrolled(double $1, double $2, double $3, double scrollY)",
-      "description": "mouseScrolled() gained 4th parameter in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "gui-connection-access",
       "pattern": ".connection.connection,",
       "replacement": ".connection.getConnection(),",
@@ -2189,14 +2149,6 @@
       "pattern": "ResourceLocation\\.parse\\(([^,)]+),\\s*([^)]+)\\)",
       "replacement": "ResourceLocation.fromNamespaceAndPath($1, $2)",
       "description": "ResourceLocation.parse() takes 1 arg, use fromNamespaceAndPath for 2 args",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "gui-mouseScrolled-call-3to4",
-      "pattern": "\\.mouseScrolled\\(([^,]+), ([^,]+), ([^)]+)\\)",
-      "replacement": ".mouseScrolled($1, $2, 0, $3)",
-      "description": "mouseScrolled call: add scrollX=0 parameter (3 args -> 4 args in 1.21)",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -2305,14 +2257,6 @@
       "pattern": "\\w+\\.\\w+\\.sendTo\\(([^;]+?),\\s*\\w+\\.connection\\.(?:connection|getConnection\\(\\)),\\s*NetworkDirection\\.PLAY_TO_CLIENT\\)",
       "replacement": "PacketDistributor.sendToPlayer(serverPlayer, $1)",
       "description": "network.sendTo(pkt, conn, PLAY_TO_CLIENT) -> PacketDistributor.sendToPlayer(player, pkt)",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "network-stale-network-null-assign",
-      "pattern": "\\s*network\\s*=\\s*null;[^\\r\\n]*\\r?\\n",
-      "replacement": "",
-      "description": "Remove stale network = null assignment after SimpleChannel removal",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -2710,30 +2654,6 @@
       "isRegex": true
     },
     {
-      "id": "usewithoutitem-getiteminhand-mainhand",
-      "pattern": "\\.getItemInHand\\((?:hand|handIn)\\)",
-      "replacement": ".getMainHandItem()",
-      "description": "useWithoutItem() no longer has a hand parameter; keep simple old item checks on the main hand",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "usewithoutitem-swing-mainhand",
-      "pattern": "\\.swing\\((?:hand|handIn)\\)",
-      "replacement": ".swing(InteractionHand.MAIN_HAND)",
-      "description": "useWithoutItem() no longer has a hand parameter; keep old swing calls on the main hand",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "usewithoutitem-helper-hand-arg-mainhand",
-      "pattern": "\\.takePlates\\(([^;\\r\\n]*),\\s*(?:hand|handIn)\\)",
-      "replacement": ".takePlates($1, InteractionHand.MAIN_HAND)",
-      "description": "Plate helper call after useWithoutItem migration needs an explicit hand",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "annotation-duplicate-override-suppresswarnings",
       "pattern": "@Override\\s*\\r?\\n\\s*(@SuppressWarnings\\(\"deprecation\"\\)\\s*\\r?\\n\\s*)@Override",
       "replacement": "$1@Override",
@@ -2766,14 +2686,6 @@
       "isRegex": true
     },
     {
-      "id": "block-getcloneitemstack-levelreader",
-      "pattern": "getCloneItemStack\\(BlockGetter\\s+(\\w+),\\s*BlockPos\\s+(\\w+),\\s*BlockState\\s+(\\w+)\\)",
-      "replacement": "getCloneItemStack(LevelReader $1, BlockPos $2, BlockState $3)",
-      "description": "Block.getCloneItemStack uses LevelReader in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "event-getScrollDelta-to-getScrollDeltaY",
       "pattern": "\\.getScrollDelta\\(\\)",
       "replacement": ".getScrollDeltaY()",
@@ -2802,6 +2714,14 @@
       "pattern": "SimpleCraftingRecipeSerializer\\(([^:]+)::new\\)",
       "replacement": "SimpleCraftingRecipeSerializer<>($1::new)",
       "description": "SimpleCraftingRecipeSerializer add diamond operator for generic type resolution in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "nbt-getOrCreateTagElement-to-component",
+      "pattern": "\\.getOrCreateTagElement\\((?!(?:[^()]|\\([^()]*\\))*\\)\\s*\\.put)",
+      "replacement": ".getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag().getCompound(",
+      "description": "ItemStack.getOrCreateTagElement() -> DataComponents sub-compound access in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -2908,11 +2828,105 @@
       "isRegex": true
     },
     {
+      "id": "tick-event-nested-import-client",
+      "pattern": "import net\\.(?:minecraftforge|neoforged\\.neoforge)\\.event\\.TickEvent\\.ClientTickEvent;",
+      "replacement": "import net.neoforged.neoforge.client.event.ClientTickEvent;",
+      "description": "Nested TickEvent.ClientTickEvent import -> net.neoforged.neoforge.client.event.ClientTickEvent (class location in neoforge-21.1.86)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tick-event-nested-import-server",
+      "pattern": "import net\\.(?:minecraftforge|neoforged\\.neoforge)\\.event\\.TickEvent\\.ServerTickEvent;",
+      "replacement": "import net.neoforged.neoforge.event.tick.ServerTickEvent;",
+      "description": "Nested TickEvent.ServerTickEvent import -> net.neoforged.neoforge.event.tick.ServerTickEvent (class location in neoforge-21.1.86)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tick-event-nested-import-level",
+      "pattern": "import net\\.(?:minecraftforge|neoforged\\.neoforge)\\.event\\.TickEvent\\.LevelTickEvent;",
+      "replacement": "import net.neoforged.neoforge.event.tick.LevelTickEvent;",
+      "description": "Nested TickEvent.LevelTickEvent import -> net.neoforged.neoforge.event.tick.LevelTickEvent (class location in neoforge-21.1.86)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tick-event-nested-import-player",
+      "pattern": "import net\\.(?:minecraftforge|neoforged\\.neoforge)\\.event\\.TickEvent\\.PlayerTickEvent;",
+      "replacement": "import net.neoforged.neoforge.event.tick.PlayerTickEvent;",
+      "description": "Nested TickEvent.PlayerTickEvent import -> net.neoforged.neoforge.event.tick.PlayerTickEvent (class location in neoforge-21.1.86)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "guava-supplier-import-jdk",
+      "pattern": "import com.google.common.base.Supplier;",
+      "replacement": "import java.util.function.Supplier;",
+      "description": "Guava's Supplier extends java.util.function.Supplier; registry entries and 1.21 APIs hand out JDK suppliers, which a Guava-typed parameter rejects",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "ishapedrecipe-instanceof-shaped",
+      "pattern": "\\binstanceof\\s+(?:net\\.(?:minecraftforge|neoforged\\.neoforge)\\.common\\.crafting\\.)?IShapedRecipe\\s*<\\s*\\?\\s*>",
+      "replacement": "instanceof ShapedRecipe",
+      "isRegex": true,
+      "description": "IShapedRecipe is gone from NeoForge 21.1; vanilla ShapedRecipe is the shaped crafting recipe (instanceof)",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "ishapedrecipe-cast-shaped",
+      "pattern": "\\(\\s*(?:net\\.(?:minecraftforge|neoforged\\.neoforge)\\.common\\.crafting\\.)?IShapedRecipe\\s*<\\s*\\?\\s*>\\s*\\)",
+      "replacement": "(ShapedRecipe)",
+      "isRegex": true,
+      "description": "IShapedRecipe is gone from NeoForge 21.1; vanilla ShapedRecipe is the shaped crafting recipe (cast)",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "empty-item-handler-import",
+      "pattern": "import net.neoforged.neoforge.items.wrapper.EmptyHandler;",
+      "replacement": "import net.neoforged.neoforge.items.wrapper.EmptyItemHandler;",
+      "description": "EmptyHandler -> EmptyItemHandler (NeoForge 21.1 items.wrapper)",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "empty-item-handler-instance",
+      "pattern": "\\bEmptyHandler\\.INSTANCE\\b",
+      "replacement": "EmptyItemHandler.INSTANCE",
+      "isRegex": true,
+      "description": "EmptyHandler.INSTANCE -> EmptyItemHandler.INSTANCE",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "entity-step-height-max-up-step",
+      "pattern": "\\.getStepHeight\\(\\)",
+      "replacement": ".maxUpStep()",
+      "isRegex": true,
+      "description": "Forge's IForgeEntity#getStepHeight() -> Entity#maxUpStep() (1.20.5 step height attribute)",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "item-fire-resistant-component",
+      "pattern": "\\.getItem\\(\\)\\.isFireResistant\\(\\)",
+      "replacement": ".has(net.minecraft.core.component.DataComponents.FIRE_RESISTANT)",
+      "isRegex": true,
+      "description": "Item#isFireResistant() -> the FIRE_RESISTANT data component on the stack (1.20.5)",
+      "fileGlob": "*.java"
+    },
+    {
       "id": "entity-item-pickup-event",
       "pattern": "EntityItemPickupEvent",
       "replacement": "ItemEntityPickupEvent.Pre",
       "description": "EntityItemPickupEvent -> ItemEntityPickupEvent.Pre in 1.21",
       "fileGlob": "*.java"
+    },
+    {
+      "id": "tick-event-player-field",
+      "pattern": "(?<!\\.)event\\.player\\b(?!\\s*\\()",
+      "replacement": "event.getEntity()",
+      "description": "TickEvent.player field -> getEntity() method in 1.21; a preceding dot means a package or qualified name such as org.bukkit.event.player.X, not a field access",
+      "fileGlob": "*.java",
+      "isRegex": true
     },
     {
       "id": "import-entity-item-pickup",
@@ -3196,14 +3210,6 @@
       "isRegex": true
     },
     {
-      "id": "gui-overlay-render-signature",
-      "pattern": "public\\s+void\\s+render\\(\\s*(?:ExtendedGui|Gui)\\s+\\w+\\s*,\\s*GuiGraphics\\s+(\\w+)\\s*,\\s*float\\s+\\w+\\s*,\\s*int\\s+\\w+\\s*,\\s*int\\s+\\w+\\s*\\)",
-      "replacement": "public void render(GuiGraphics $1, DeltaTracker deltaTracker)",
-      "description": "IGuiOverlay render signature -> LayeredDraw.Layer render signature",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "gui-overlay-vanilla-hotbar",
       "pattern": "VanillaGuiOverlay\\.HOTBAR\\.id\\(\\)",
       "replacement": "VanillaGuiLayers.HOTBAR",
@@ -3284,14 +3290,6 @@
       "isRegex": true
     },
     {
-      "id": "chunkaccess-getstatus-persistedstatus",
-      "pattern": "\\.getStatus\\(\\)",
-      "replacement": ".getPersistedStatus()",
-      "description": "ChunkAccess.getStatus() -> getPersistedStatus() in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "gametest-mock-survival-player",
       "pattern": "\\.makeMockSurvivalPlayer\\(\\)",
       "replacement": ".makeMockPlayer(GameType.SURVIVAL)",
@@ -3328,14 +3326,6 @@
       "pattern": "(\\w+)\\.getEnderChestInventory\\(\\)\\.fromTag\\(([^)]+)\\)",
       "replacement": "$1.getEnderChestInventory().fromTag($2, $1.registryAccess())",
       "description": "PlayerEnderChestContainer.fromTag() gained HolderLookup.Provider in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "blockentity-loadstatic-provider-mirrorworld",
-      "pattern": "(ServerLevel\\s+mirrorWorld[\\s\\S]*?BlockEntity\\.loadStatic\\(\\s*([^,]+),\\s*([^,]+),\\s*([^\\)]+)\\s*)\\)",
-      "replacement": "$1, mirrorWorld.registryAccess())",
-      "description": "BlockEntity.loadStatic() gained HolderLookup.Provider in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -3512,6 +3502,126 @@
       "pattern": "(\\w+)\\.canApplyAtEnchantingTable\\(([^,]+),\\s*ModEnchantments\\.(\\w+)\\.get\\(\\)\\)",
       "replacement": "$1.supportsEnchantment($2, net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(ModEnchantments.$3))",
       "description": "Custom enchantment canApplyAtEnchantingTable() calls migrate to supportsEnchantment() with Holder",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "logger-chunk-progress-listener-create",
+      "pattern": "new\\s+LoggerChunkProgressListener\\s*\\(",
+      "replacement": "LoggerChunkProgressListener.create(",
+      "description": "LoggerChunkProgressListener(int radius) is private in 1.21; create(int radius) computes the same (2r+1)^2 chunk count",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "nbtio-compressed-path-arguments",
+      "pattern": "(NbtIo\\.(?:readCompressed|writeCompressed|parseCompressed)\\((?:[^()]|\\((?:[^()]|\\([^()]*\\))*\\))*?)\\.toFile\\(\\)",
+      "replacement": "$1",
+      "description": "NbtIo.readCompressed/writeCompressed take java.nio.file.Path in 1.21; a Path converted with toFile() is passed directly",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "armor-trim-get-trim-component",
+      "pattern": "ArmorTrim\\.getTrim\\(\\s*(?:[^,()]|\\([^()]*\\))+?\\s*,\\s*((?:[^,()]|\\([^()]*\\))+?)\\s*\\)",
+      "replacement": "java.util.Optional.ofNullable($1.get(net.minecraft.core.component.DataComponents.TRIM))",
+      "description": "ArmorTrim.getTrim(RegistryAccess, ItemStack) was replaced by the minecraft:trim data component in 1.20.5+",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "loot-table-key-location",
+      "pattern": "(\\bResourceLocation\\s+[A-Za-z_$][\\w$]*\\s*=\\s*[^;\\r\\n]*?\\.getLootTable\\(\\))\\s*;",
+      "replacement": "$1.location();",
+      "description": "Entity/RandomizableContainerBlockEntity.getLootTable() returns ResourceKey<LootTable> in 1.21; the identifier is its location()",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "nbtio-readCompressed-single-argument",
+      "pattern": "NbtIo\\.readCompressed\\(((?:[^(),]|\\((?:[^()]|\\([^()]*\\))*\\))+)\\)",
+      "replacement": "NbtIo.readCompressed($1, net.minecraft.nbt.NbtAccounter.unlimitedHeap())",
+      "description": "NbtIo.readCompressed(Path) with nested calls in its only argument also needs the NbtAccounter (1.21)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "annotation-EventBusSubscriber-qualified",
+      "pattern": "net\\.(?:minecraftforge|neoforged)\\.fml\\.common\\.Mod\\.EventBusSubscriber",
+      "replacement": "net.neoforged.fml.common.EventBusSubscriber",
+      "description": "Package-qualified @Mod.EventBusSubscriber -> top-level net.neoforged.fml.common.EventBusSubscriber",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "cls-RegistryObject-to-DeferredHolder-qualified",
+      "pattern": "RegistryObject<((?:\\w+\\.)+\\w+)>",
+      "replacement": "DeferredHolder<$1, $1>",
+      "description": "RegistryObject<a.b.T> -> DeferredHolder<a.b.T, a.b.T> (registry base resolved structurally)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tag-key-forge-namespace-to-common",
+      "pattern": "(TagKey\\.create\\(\\s*Registries\\.[A-Z_]+\\s*,\\s*[A-Za-z_$][\\w$.]*\\(\\s*\")forge:",
+      "replacement": "$1c:",
+      "description": "Forge's forge: convention tags are NeoForge's c: tags (Tags.Fluids.MILK = c:milk)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "gui-blit-nine-sliced-widgets-button-66",
+      "pattern": "\\.blitNineSliced\\(\\s*(?:AbstractWidget\\.)?WIDGETS_LOCATION\\s*,\\s*([^,]+?)\\s*,\\s*([^,]+?)\\s*,\\s*([^,]+?)\\s*,\\s*([^,]+?)\\s*,\\s*20\\s*,\\s*4\\s*,\\s*200\\s*,\\s*20\\s*,\\s*0\\s*,\\s*66\\s*\\)",
+      "replacement": ".blitSprite(net.minecraft.resources.ResourceLocation.withDefaultNamespace(\"widget/button\"), $1, $2, $3, $4)",
+      "description": "1.20.1 nine-sliced widgets.png button (v=66) is the 1.21 nine-sliced widget/button sprite (AbstractButton.SPRITES)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "gui-blit-nine-sliced-widgets-button-46",
+      "pattern": "\\.blitNineSliced\\(\\s*(?:AbstractWidget\\.)?WIDGETS_LOCATION\\s*,\\s*([^,]+?)\\s*,\\s*([^,]+?)\\s*,\\s*([^,]+?)\\s*,\\s*([^,]+?)\\s*,\\s*20\\s*,\\s*4\\s*,\\s*200\\s*,\\s*20\\s*,\\s*0\\s*,\\s*46\\s*\\)",
+      "replacement": ".blitSprite(net.minecraft.resources.ResourceLocation.withDefaultNamespace(\"widget/button_disabled\"), $1, $2, $3, $4)",
+      "description": "1.20.1 nine-sliced widgets.png button (v=46) is the 1.21 nine-sliced widget/button_disabled sprite (AbstractButton.SPRITES)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "gui-blit-nine-sliced-widgets-button-86",
+      "pattern": "\\.blitNineSliced\\(\\s*(?:AbstractWidget\\.)?WIDGETS_LOCATION\\s*,\\s*([^,]+?)\\s*,\\s*([^,]+?)\\s*,\\s*([^,]+?)\\s*,\\s*([^,]+?)\\s*,\\s*20\\s*,\\s*4\\s*,\\s*200\\s*,\\s*20\\s*,\\s*0\\s*,\\s*86\\s*\\)",
+      "replacement": ".blitSprite(net.minecraft.resources.ResourceLocation.withDefaultNamespace(\"widget/button_highlighted\"), $1, $2, $3, $4)",
+      "description": "1.20.1 nine-sliced widgets.png button (v=86) is the 1.21 nine-sliced widget/button_highlighted sprite (AbstractButton.SPRITES)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "gui-widgets-location-static-import",
+      "pattern": "(?m)^[ \\t]*import\\s+static\\s+net\\.minecraft\\.client\\.gui\\.components\\.AbstractWidget\\.WIDGETS_LOCATION;[ \\t]*\\r?\\n",
+      "replacement": "",
+      "description": "AbstractWidget.WIDGETS_LOCATION no longer exists in 1.21 (widgets became sprites)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "block-player-will-destroy-return-dead-return",
+      "pattern": "(return super\\.playerWillDestroy\\([^;]+\\);)\\r?\\n[ \\t]*return;",
+      "replacement": "$1",
+      "description": "A bare return after the now-returning super.playerWillDestroy call is unreachable",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "builtinregistries-qualified-package",
+      "pattern": "\\bnet\\.(?:minecraftforge|neoforged\\.neoforge)\\.registries\\.BuiltInRegistries\\b",
+      "replacement": "net.minecraft.core.registries.BuiltInRegistries",
+      "description": "A fully qualified ForgeRegistries reference becomes vanilla's net.minecraft.core.registries.BuiltInRegistries (NeoForge has no registries.BuiltInRegistries)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "builtinregistries-getkeys-keyset",
+      "pattern": "\\b(BuiltInRegistries\\.[A-Z][A-Z0-9_]*)\\s*\\.\\s*getKeys\\(\\)",
+      "replacement": "$1.keySet()",
+      "description": "IForgeRegistry#getKeys() (Set<ResourceLocation>) is vanilla Registry#keySet() on a BuiltInRegistries constant (javap of forge-1.20.1 and the 1.21.1 member table)",
       "fileGlob": "*.java",
       "isRegex": true
     }

@@ -23,44 +23,73 @@ class Pipeline(
 
         val sortedPasses = passes.sortedBy { it.order }
         val results = mutableListOf<PassResult>()
+        var pipelineFailure: Throwable? = null
+        try {
+            val modDir = GradleModLayout.modModule(projectDir)
+            if (modDir != projectDir) logger.info { "Multi-project build: migrating mod module $modDir" }
+            for (pass in sortedPasses) {
+                val passDir = if (pass.migratesBuildRoot) projectDir else modDir
+                if (!pass.isApplicable(passDir)) {
+                    logger.info { "Skipping pass '${pass.name}' (not applicable)" }
+                    continue
+                }
 
-        for (pass in sortedPasses) {
-            if (!pass.isApplicable(projectDir)) {
-                logger.info { "Skipping pass '${pass.name}' (not applicable)" }
-                continue
+                logger.info { "Running pass ${pass.order}: ${pass.name}" }
+
+                val result = if (dryRun) {
+                    pass.analyze(passDir)
+                } else {
+                    pass.apply(passDir)
+                }
+
+                // Filter by confidence (lower ordinal = higher confidence)
+                // HIGH=0, MEDIUM=1, LOW=2 — keep changes with ordinal <= minConfidence ordinal
+                val filtered = result.copy(
+                    changes = result.changes.filter { it.confidence.ordinal <= minConfidence.ordinal }
+                )
+
+                results.add(filtered)
+                logger.info {
+                    "Pass '${pass.name}' complete: ${filtered.changeCount} changes " +
+                    "(${filtered.highConfidence} high, ${filtered.mediumConfidence} medium, ${filtered.lowConfidence} low)"
+                }
+
+                if (filtered.errors.isNotEmpty()) {
+                    logger.warn { "Pass '${pass.name}' had ${filtered.errors.size} errors" }
+                    filtered.errors.forEach { logger.warn { "  - $it" } }
+                }
+                if (filtered.skipped.isNotEmpty()) {
+                    logger.warn { "Pass '${pass.name}' skipped ${filtered.skipped.size} source shapes" }
+                    filtered.skipped.forEach { logger.warn { "  - $it" } }
+                }
+                if (pass is ProjectScopedPass && pass.abortOnErrors && filtered.errors.isNotEmpty()) {
+                    break
+                }
             }
 
-            logger.info { "Running pass ${pass.order}: ${pass.name}" }
-
-            val result = if (dryRun) {
-                pass.analyze(projectDir)
-            } else {
-                pass.apply(projectDir)
+            return PipelineResult(results, dryRun, pipelineName)
+        } catch (failure: Throwable) {
+            pipelineFailure = failure
+            throw failure
+        } finally {
+            var cleanupFailure: Throwable? = null
+            for (pass in sortedPasses.asReversed()) {
+                if (pass !is ProjectScopedPass) continue
+                try {
+                    pass.finishProject(projectDir)
+                } catch (failure: Throwable) {
+                    val previous = cleanupFailure
+                    if (previous == null) cleanupFailure = failure
+                    else previous.addSuppressed(failure)
+                }
             }
-
-            // Filter by confidence (lower ordinal = higher confidence)
-            // HIGH=0, MEDIUM=1, LOW=2 — keep changes with ordinal <= minConfidence ordinal
-            val filtered = result.copy(
-                changes = result.changes.filter { it.confidence.ordinal <= minConfidence.ordinal }
-            )
-
-            results.add(filtered)
-            logger.info {
-                "Pass '${pass.name}' complete: ${filtered.changeCount} changes " +
-                "(${filtered.highConfidence} high, ${filtered.mediumConfidence} medium, ${filtered.lowConfidence} low)"
-            }
-
-            if (filtered.errors.isNotEmpty()) {
-                logger.warn { "Pass '${pass.name}' had ${filtered.errors.size} errors" }
-                filtered.errors.forEach { logger.warn { "  - $it" } }
-            }
-            if (filtered.skipped.isNotEmpty()) {
-                logger.warn { "Pass '${pass.name}' skipped ${filtered.skipped.size} source shapes" }
-                filtered.skipped.forEach { logger.warn { "  - $it" } }
+            val failedCleanup = cleanupFailure
+            if (failedCleanup != null) {
+                val original = pipelineFailure
+                if (original == null) throw failedCleanup
+                original.addSuppressed(failedCleanup)
             }
         }
-
-        return PipelineResult(results, dryRun, pipelineName)
     }
 }
 

@@ -1,0 +1,709 @@
+
+    @Test
+    fun `migrates legacy criterion trigger singleton and entity spawn tag stack config`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val advancementDir = srcDir.resolve("advancement")
+        srcDir.createDirectories()
+        advancementDir.createDirectories()
+        advancementDir.resolve("ExampleAdvancementTriggers.java").writeText("""
+            package com.example.advancement;
+
+            import net.minecraft.advancements.CriterionTrigger;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class ExampleAdvancementTriggers {
+                public static final DeferredHolder<CriterionTrigger<?>, IncubationTrigger> INCUBATION_TRIGGER = null;
+            }
+        """.trimIndent())
+        advancementDir.resolve("IncubationTrigger.java").writeText("""
+            package com.example.advancement;
+
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.item.ItemStack;
+
+            public class IncubationTrigger {
+                public static final IncubationTrigger INSTANCE = new IncubationTrigger();
+                public void trigger(ServerPlayer player, ItemStack stack) {}
+            }
+        """.trimIndent())
+        srcDir.resolve("IncubatorBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.example.advancement.IncubationTrigger;
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.core.component.DataComponents;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.MobSpawnType;
+            import net.minecraft.world.item.ItemStack;
+
+            public class IncubatorBlockEntity {
+                private ServerPlayer player;
+
+                private boolean incubate(EntityType<?> entityType, NonNullList<ItemStack> stacks, ServerLevel serverLevel) {
+                    ItemStack itemStack = stacks.get(0);
+                    if (!serverLevel.isClientSide()) {
+                        CompoundTag tag = new CompoundTag();
+                        Component customName = itemStack.has(DataComponents.CUSTOM_NAME) ? itemStack.getHoverName() : null;
+                        Entity entity = entityType.spawn(serverLevel, tag, null, serverLevel.getSharedSpawnPos(), MobSpawnType.TRIGGERED, true, false);
+                        if (entity != null && this.player != null) {
+                            IncubationTrigger.INSTANCE.trigger(this.player, itemStack);
+                        }
+                    }
+                    return true;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val blockEntity = srcDir.resolve("IncubatorBlockEntity.java").readText()
+
+        assertTrue(blockEntity.contains("Entity entity = entityType.spawn(serverLevel,"), blockEntity)
+        assertTrue(blockEntity.contains("net.minecraft.world.entity.EntityType.appendDefaultStackConfig(consumerEntity -> {"), blockEntity)
+        assertTrue(blockEntity.contains("if (tag != null && consumerEntity instanceof net.minecraft.world.entity.LivingEntity livingEntity) {"), blockEntity)
+        assertTrue(blockEntity.contains("livingEntity.readAdditionalSaveData(tag);"), blockEntity)
+        assertTrue(blockEntity.contains("}, serverLevel, itemStack, null),"), blockEntity)
+        assertTrue(blockEntity.contains("serverLevel.getSharedSpawnPos(), MobSpawnType.TRIGGERED, true, false);"), blockEntity)
+        assertTrue(blockEntity.contains("com.example.advancement.ExampleAdvancementTriggers.INCUBATION_TRIGGER.get().trigger(this.player, itemStack);"), blockEntity)
+        assertFalse(blockEntity.contains("IncubationTrigger.INSTANCE"), blockEntity)
+        assertFalse(blockEntity.contains("spawn(serverLevel, tag, null"), blockEntity)
+        assertFalse(blockEntity.contains("entitySpawnStack"), blockEntity)
+        assertFalse(blockEntity.contains("DataComponents.ENTITY_DATA"), blockEntity)
+    }
+
+    @Test
+    fun `migrates recipe holder loops to method recipe type parameter bounds`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("Conversion.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.Level;
+
+            public interface Conversion<R extends MatchEventRecipe & BlockStateRecipe> {
+                default <T extends R> boolean convert(RecipeType<T> recipeType, Level level) {
+                    for (R recipe : level.getRecipeManager().getAllRecipesFor(recipeType)) { // existing source comment
+                        if (recipe.matches()) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+
+                default <T extends R> boolean convertWithoutContext(RecipeType<T> recipeType, Level level) {
+                    for (R recipe : level.getRecipeManager().getAllRecipesFor(recipeType)) {
+                        if (recipe.matches()) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            }
+
+            interface MatchEventRecipe {
+                boolean matches();
+            }
+
+            interface BlockStateRecipe {
+                boolean matches();
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("Conversion.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertEquals(2, Regex("""for\s*\(\s*RecipeHolder<T>\s+recipeHolder\s*:\s*level\.getRecipeManager\(\)\.getAllRecipesFor\(recipeType\)\s*\)""").findAll(transformed).count(), transformed)
+        assertTrue(transformed.contains("import net.minecraft.world.item.crafting.RecipeHolder;"), transformed)
+        assertTrue(transformed.contains("R recipe = recipeHolder.value();"), transformed)
+        assertFalse(transformed.contains("RecipeHolder<R> recipeHolder"), transformed)
+        assertFalse(transformed.contains("for (R recipe : level.getRecipeManager().getAllRecipesFor(recipeType))"), transformed)
+    }
+
+    @Test
+    fun `migrates getAllRecipesFor recipe instanceof loops to typed holders`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("FreezingCache.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.level.Level;
+
+            public class FreezingCache {
+                public static void cacheRecipes(Level level) {
+                    for (Recipe<?> recipe : level.getRecipeManager().getAllRecipesFor(ExampleRecipeTypes.FREEZABLE.get())) {
+                        if (recipe instanceof FreezableRecipe freezableRecipe) {
+                            Cache.add(freezableRecipe.result());
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("FreezingCache.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("import net.minecraft.world.item.crafting.RecipeHolder;"), transformed)
+        assertTrue(transformed.contains("for (RecipeHolder<FreezableRecipe> freezableRecipeHolder : level.getRecipeManager().getAllRecipesFor(ExampleRecipeTypes.FREEZABLE.get())) {"), transformed)
+        assertTrue(transformed.contains("FreezableRecipe freezableRecipe = freezableRecipeHolder.value();"), transformed)
+        assertFalse(transformed.contains("recipe instanceof FreezableRecipe"), transformed)
+        assertFalse(transformed.contains("import net.minecraft.world.item.crafting.Recipe;"), transformed)
+    }
+
+    @Test
+    fun `migrates getAllRecipesFor id lookups to recipe holders`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("MachineRecipes.java").writeText("""
+            package com.example;
+
+            import java.util.Optional;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.level.Level;
+            import net.neoforged.neoforge.items.wrapper.RecipeWrapper;
+
+            public class MachineRecipes {
+                private ResourceLocation lastRecipeID;
+
+                private Optional<StoneMortarRecipe> findStone(Level level, RecipeWrapper wrapper) {
+                    Recipe<RecipeWrapper> recipe = level.getRecipeManager().getAllRecipesFor(ExampleRecipeTypes.STONE.get()).stream().filter(now -> now.id().equals(lastRecipeID)).findFirst().get();
+                    if (recipe instanceof StoneMortarRecipe) {
+                        if (recipe.matches(wrapper, level)) {
+                            return Optional.of((StoneMortarRecipe) recipe);
+                        }
+                    }
+                    return Optional.empty();
+                }
+
+                private Optional<CookingPotRecipe> findCooking(Level level, RecipeWrapper wrapper) {
+                    Recipe<RecipeWrapper> recipe = level.getRecipeManager().getAllRecipesFor(ExampleRecipeTypes.COOKING.get()).stream().filter(now -> now.id().equals(lastRecipeID)).findFirst().get();
+                    if (recipe instanceof CookingPotRecipe cookingRecipe) {
+                        if (cookingRecipe.matchesWithFluid(null, wrapper, level)) {
+                            return Optional.of(cookingRecipe);
+                        }
+                    }
+                    return Optional.empty();
+                }
+
+                private boolean findChopping(Level level, RecipeWrapper wrapper, net.minecraft.world.item.ItemStack toolStack) {
+                    Recipe<RecipeWrapper> recipe = level.getRecipeManager().getAllRecipesFor(ExampleRecipeTypes.CHOPPING.get()).stream().filter(now -> now.id().equals(lastRecipeID)).findFirst().get();
+                    if (recipe instanceof ChoppingRecipe && recipe.matches(wrapper, level) && ((ChoppingRecipe) recipe).getTool().test(toolStack)) {
+                        return true;
+                    }
+                    return false;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("MachineRecipes.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("import net.minecraft.world.item.crafting.RecipeHolder;"), transformed)
+        assertTrue(transformed.contains("RecipeHolder<?> recipe = level.getRecipeManager().getAllRecipesFor(ExampleRecipeTypes.STONE.get()).stream().filter(now -> now.id().equals(lastRecipeID)).findFirst().get();"), transformed)
+        assertTrue(transformed.contains("if (recipe.value() instanceof StoneMortarRecipe stoneMortarRecipe)"), transformed)
+        assertTrue(transformed.contains("if (stoneMortarRecipe.matches(wrapper, level))"), transformed)
+        assertTrue(transformed.contains("return Optional.of(stoneMortarRecipe);"), transformed)
+        assertTrue(transformed.contains("if (recipe.value() instanceof CookingPotRecipe cookingRecipe)"), transformed)
+        assertTrue(transformed.contains("if (recipe.value() instanceof ChoppingRecipe choppingRecipe && choppingRecipe.matches(wrapper, level) && (choppingRecipe).getTool().test(toolStack))"), transformed)
+        assertFalse(transformed.contains("Recipe<RecipeWrapper> recipe"), transformed)
+        assertFalse(transformed.contains("recipe.matches(wrapper, level)"), transformed)
+        assertFalse(transformed.contains("import net.minecraft.world.item.crafting.Recipe;"), transformed)
+    }
+
+    @Test
+    fun `migrates cacheable function recipe boundaries to optionals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("FunctionRecipeBoundaries.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockStateRecipeUtil;
+            import com.aetherteam.nitrogen.recipe.recipes.AbstractBlockStateRecipe;
+            import net.minecraft.commands.CacheableFunction;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            import javax.annotation.Nullable;
+
+            public interface FunctionRecipeBoundaries {
+                default boolean convert(Level level, BlockPos pos, BlockState newState, @Nullable CacheableFunction function) {
+                    level.setBlockAndUpdate(pos, newState);
+                    BlockStateRecipeUtil.executeFunction(level, pos, function);
+                    return true;
+                }
+
+                default int freeze(Level level, BlockPos pos, AbstractBlockStateRecipe recipe) {
+                    CacheableFunction function = recipe.getFunction();
+                    BlockStateRecipeUtil.executeFunction(level, pos, function);
+                    return 1;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("FunctionRecipeBoundaries.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("import java.util.Optional;"), transformed)
+        assertTrue(transformed.contains("Optional<CacheableFunction> function)"), transformed)
+        assertTrue(transformed.contains("Optional<CacheableFunction> function = recipe.getFunction();"), transformed)
+        assertFalse(transformed.contains("@Nullable CacheableFunction function"), transformed)
+        assertFalse(transformed.contains("CacheableFunction function = recipe.getFunction();"), transformed)
+    }
+
+    @Test
+    fun `cacheable function optional boundary migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("FunctionRecipeDocsOnly.java").writeText("""
+            package com.example;
+
+            import net.minecraft.commands.CacheableFunction;
+
+            public class FunctionRecipeDocsOnly {
+                private static final String DOC = "CacheableFunction function = recipe.getFunction(); BlockStateRecipeUtil.executeFunction(level, pos, function);";
+
+                /*
+                default boolean convert(Level level, BlockPos pos, BlockState newState, @Nullable CacheableFunction function) {
+                    BlockStateRecipeUtil.executeFunction(level, pos, function);
+                    return true;
+                }
+
+                default int freeze(AbstractBlockStateRecipe recipe) {
+                    CacheableFunction function = recipe.getFunction();
+                    return 1;
+                }
+                */
+
+                public void keep() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("FunctionRecipeDocsOnly.java").readText()
+
+        assertFalse(
+            result.changes.any { it.ruleId == "struct-vanilla-121-api" },
+            result.changes.toString() + "\n" + transformed
+        )
+        assertFalse(transformed.contains("import java.util.Optional;"), transformed)
+        assertTrue(transformed.contains("CacheableFunction function = recipe.getFunction();"), transformed)
+        assertTrue(transformed.contains("@Nullable CacheableFunction function"), transformed)
+        assertFalse(transformed.contains("Optional<CacheableFunction>"), transformed)
+    }
+
+    @Test
+    fun `migrates nitrogen block state recipe codec and constructor boundaries`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AbstractBiomeParameterRecipe.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import com.aetherteam.nitrogen.recipe.recipes.AbstractBlockStateRecipe;
+            import net.minecraft.commands.CacheableFunction;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.biome.Biome;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            import javax.annotation.Nullable;
+
+            public abstract class AbstractBiomeParameterRecipe extends AbstractBlockStateRecipe {
+                @Nullable
+                private final ResourceKey<Biome> biomeKey;
+                @Nullable
+                private final TagKey<Biome> biomeTag;
+
+                public AbstractBiomeParameterRecipe(RecipeType<?> type, ResourceLocation id, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, BlockStateIngredient ingredient, BlockPropertyPair result, @Nullable CacheableFunction function) {
+                    super(type, id, ingredient, result, function);
+                    this.biomeKey = biomeKey;
+                    this.biomeTag = biomeTag;
+                }
+
+                @Override
+                public boolean matches(Level level, BlockPos pos, BlockState state) {
+                    if (this.biomeKey != null) {
+                        return super.matches(level, pos, state) && level.getBiome(pos).is(this.biomeKey);
+                    } else if (this.biomeTag != null) {
+                        return super.matches(level, pos, state) && level.getBiome(pos).is(this.biomeTag);
+                    } else {
+                        return super.matches(level, pos, state);
+                    }
+                }
+
+                @Nullable
+                public ResourceKey<Biome> getBiomeKey() {
+                    return this.biomeKey;
+                }
+
+                @Nullable
+                public TagKey<Biome> getBiomeTag() {
+                    return this.biomeTag;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("IcestoneFreezableRecipe.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import com.aetherteam.nitrogen.recipe.recipes.AbstractBlockStateRecipe;
+            import net.minecraft.commands.CacheableFunction;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            import javax.annotation.Nullable;
+
+            public class IcestoneFreezableRecipe extends AbstractBlockStateRecipe {
+                public IcestoneFreezableRecipe(ResourceLocation id, BlockStateIngredient ingredient, BlockPropertyPair result, @Nullable CacheableFunction function) {
+                    super(ExampleRecipeTypes.ICESTONE_FREEZABLE.get(), id, ingredient, result, function);
+                }
+
+                public boolean matches(@Nullable Player player, Level level, BlockPos pos, @Nullable ItemStack stack, BlockState oldState, BlockState newState, RecipeType<?> recipeType) {
+                    return true;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("SwetBallRecipe.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import net.minecraft.commands.CacheableFunction;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.level.biome.Biome;
+
+            import javax.annotation.Nullable;
+
+            public class SwetBallRecipe extends AbstractBiomeParameterRecipe {
+                public SwetBallRecipe(ResourceLocation id, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, BlockStateIngredient ingredient, BlockPropertyPair result, @Nullable CacheableFunction function) {
+                    super(ExampleRecipeTypes.SWET_BALL_CONVERSION.get(), id, biomeKey, biomeTag, ingredient, result, function);
+                }
+
+                public SwetBallRecipe(ResourceLocation id, BlockStateIngredient ingredient, BlockPropertyPair result, @Nullable CacheableFunction function) {
+                    this(id, null, null, ingredient, result, function);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BiomeParameterRecipeSerializer.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import com.aetherteam.nitrogen.recipe.BlockStateRecipeUtil;
+            import com.aetherteam.nitrogen.recipe.serializer.BlockStateRecipeSerializer;
+            import com.google.gson.JsonObject;
+            import net.minecraft.commands.CacheableFunction;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.level.biome.Biome;
+            import org.apache.commons.lang3.tuple.Pair;
+
+            import javax.annotation.Nullable;
+
+            public class BiomeParameterRecipeSerializer<T extends AbstractBiomeParameterRecipe> extends BlockStateRecipeSerializer<T> {
+                private final BiomeParameterRecipeSerializer.CookieBaker<T> factory;
+
+                public BiomeParameterRecipeSerializer(BiomeParameterRecipeSerializer.CookieBaker<T> factory, BlockStateRecipeSerializer.CookieBaker<T> superFactory) {
+                    super(superFactory);
+                    this.factory = factory;
+                }
+
+                @Override
+                public T fromJson(ResourceLocation id, JsonObject json) {
+                    Pair<ResourceKey<Biome>, TagKey<Biome>> biomeRecipeData = BlockStateRecipeUtil.biomeRecipeDataFromJson(json);
+                    ResourceKey<Biome> biomeKey = biomeRecipeData.getLeft();
+                    TagKey<Biome> biomeTag = biomeRecipeData.getRight();
+                    T recipe = super.fromJson(id, json);
+                    return this.factory.create(id, biomeKey, biomeTag, recipe.getIngredient(), recipe.getResult(), recipe.getFunction());
+                }
+
+                @Nullable
+                @Override
+                public T fromNetwork(ResourceLocation id, FriendlyByteBuf buffer) {
+                    ResourceKey<Biome> biomeKey = BlockStateRecipeUtil.readBiomeKey(buffer);
+                    TagKey<Biome> biomeTag = BlockStateRecipeUtil.readBiomeTag(buffer);
+                    BlockStateIngredient ingredient = BlockStateIngredient.fromNetwork(buffer);
+                    BlockPropertyPair result = BlockStateRecipeUtil.readPair(buffer);
+                    CacheableFunction function = BlockStateRecipeUtil.readFunction(buffer);
+                    return this.factory.create(id, biomeKey, biomeTag, ingredient, result, function);
+                }
+
+                @Override
+                public void toNetwork(FriendlyByteBuf buffer, T recipe) {
+                    BlockStateRecipeUtil.writeBiomeKey(buffer, recipe.getBiomeKey());
+                    BlockStateRecipeUtil.writeBiomeTag(buffer, recipe.getBiomeTag());
+                    super.toNetwork(buffer, recipe);
+                }
+
+                public interface CookieBaker<T extends AbstractBiomeParameterRecipe> {
+                    T create(ResourceLocation id, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, BlockStateIngredient ingredient, BlockPropertyPair result, @Nullable CacheableFunction function);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val abstractRecipe = srcDir.resolve("AbstractBiomeParameterRecipe.java").readText()
+        val simpleRecipe = srcDir.resolve("IcestoneFreezableRecipe.java").readText()
+        val biomeRecipe = srcDir.resolve("SwetBallRecipe.java").readText()
+        val serializer = srcDir.resolve("BiomeParameterRecipeSerializer.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(abstractRecipe.contains("private final Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome;"), abstractRecipe)
+        assertTrue(abstractRecipe.contains("super(type, ingredient, result, function);"), abstractRecipe)
+        assertTrue(abstractRecipe.contains("public Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> getBiome()"), abstractRecipe)
+        assertTrue(simpleRecipe.contains("public IcestoneFreezableRecipe(BlockStateIngredient ingredient, BlockPropertyPair result, Optional<ResourceLocation> function)"), simpleRecipe)
+        assertTrue(simpleRecipe.contains("super(ExampleRecipeTypes.ICESTONE_FREEZABLE.get(), ingredient, result, function);"), simpleRecipe)
+        assertTrue(simpleRecipe.contains("import javax.annotation.Nullable;"), simpleRecipe)
+        assertTrue(biomeRecipe.contains("public SwetBallRecipe(Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome, BlockStateIngredient ingredient, BlockPropertyPair result, Optional<ResourceLocation> function)"), biomeRecipe)
+        assertTrue(biomeRecipe.contains("this(Optional.empty(), ingredient, result, function);"), biomeRecipe)
+        assertTrue(serializer.contains("private final MapCodec<T> codec;"), serializer)
+        assertTrue(serializer.contains("AbstractBlockStateRecipe.Factory<T> superFactory"), serializer)
+        assertTrue(serializer.contains("BlockStateRecipeUtil.KEY_CODEC.optionalFieldOf(\"biome\").forGetter(AbstractBiomeParameterRecipe::getBiome)"), serializer)
+        assertTrue(serializer.contains("Optional<ResourceLocation> function = buffer.readOptional(FriendlyByteBuf::readResourceLocation);"), serializer)
+        assertFalse(serializer.contains("CookieBaker"), serializer)
+        assertFalse(serializer.contains("fromJson(ResourceLocation id, JsonObject json)"), serializer)
+    }
+
+    @Test
+    fun `nitrogen block property pair runtime migration uses executable calls`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BlockPropertyPairRuntime.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import java.util.Map;
+            import java.util.function.Predicate;
+            import javax.annotation.Nullable;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.level.block.LiquidBlock;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeInput;
+            import net.minecraft.world.level.biome.Biome;
+            import net.minecraft.world.level.block.state.properties.Property;
+
+            public class BlockPropertyPairRuntime<T, P extends Predicate<T>> implements Recipe<RecipeInput> {
+                protected final ResourceLocation id;
+                @Nullable
+                private final ResourceKey<Biome> biomeKey;
+                @Nullable
+                private final TagKey<Biome> biomeTag;
+                protected final BlockStateIngredient bypassBlock;
+                private final BlockPropertyPair pair;
+
+                public BlockPropertyPairRuntime(ResourceLocation id, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, BlockStateIngredient bypassBlock, BlockPropertyPair pair) {
+                    this.id = id;
+                    this.biomeKey = biomeKey;
+                    this.biomeTag = biomeTag;
+                    this.bypassBlock = bypassBlock;
+                    this.pair = pair;
+                }
+
+                @Nullable
+                public ResourceKey<Biome> getBiomeKey() {
+                    return this.biomeKey;
+                }
+
+                @Nullable
+                public TagKey<Biome> getBiomeTag() {
+                    return this.biomeTag;
+                }
+
+                public BlockStateIngredient getBypassBlock() {
+                    return this.bypassBlock;
+                }
+
+                public Object fluidHolder(LiquidBlock liquid) {
+                    return liquid.getFluid();
+                }
+
+                public void visit() {
+                    for (Map.Entry<Property<?>, Comparable<?>> entry : pair.properties().entrySet()) {
+                        use(entry);
+                    }
+                }
+
+                private void use(Object value) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("BlockPropertyPairRuntime.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, result.changes.toString())
+        assertTrue(migrated.contains("return liquid.fluid.builtInRegistryHolder();"), migrated)
+        assertTrue(migrated.contains("if (pair.properties().isPresent())"), migrated)
+        assertTrue(migrated.contains("for (Map.Entry<Property<?>, Comparable<?>> entry : pair.properties().get().entrySet())"), migrated)
+        assertFalse(migrated.contains("return liquid.getFluid();"), migrated)
+        assertFalse(migrated.contains("pair.properties().entrySet()"), migrated)
+    }
+
+    @Test
+    fun `nitrogen block property pair runtime migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BlockPropertyPairRuntimeDocsOnly.java").writeText("""
+            package com.example;
+
+            public class BlockPropertyPairRuntimeDocsOnly {
+                private static final String DOC = "BlockPropertyPair pair; LiquidBlock liquid; liquid.getFluid(); for (Map.Entry<Property<?>, Comparable<?>> entry : pair.properties().entrySet()) { use(entry); }";
+
+                /*
+                import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+                import net.minecraft.world.level.block.LiquidBlock;
+
+                Object fluidHolder(LiquidBlock liquid) {
+                    return liquid.getFluid();
+                }
+
+                void visit(BlockPropertyPair pair) {
+                    for (Map.Entry<Property<?>, Comparable<?>> entry : pair.properties().entrySet()) {
+                        use(entry);
+                    }
+                }
+                */
+
+                public void keep() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("BlockPropertyPairRuntimeDocsOnly.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, result.changes.toString())
+        assertTrue(migrated.contains("liquid.getFluid();"), migrated)
+        assertTrue(migrated.contains("pair.properties().entrySet()"), migrated)
+        assertFalse(migrated.contains("liquid.fluid.builtInRegistryHolder()"), migrated)
+        assertFalse(migrated.contains("pair.properties().isPresent()"), migrated)
+    }
+
+    @Test
+    fun `migrates ingredient network codecs with receiver type evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("IngredientNetworkSurface.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.level.biome.Biome;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class IngredientNetworkSurface {
+                static class AbstractPlacementBanRecipe<T, S> {
+                    public BlockStateIngredient getBypassBlock() { return BlockStateIngredient.EMPTY; }
+                    public S getIngredient() { return null; }
+                }
+
+                static class ItemBanRecipe extends AbstractPlacementBanRecipe<ItemStack, Ingredient> {
+                    void read(FriendlyByteBuf buffer) {
+                        BlockStateIngredient bypassBlock = BlockStateIngredient.fromNetwork(buffer);
+                        Ingredient ingredient = Ingredient.fromNetwork(buffer);
+                    }
+
+                    void write(FriendlyByteBuf buffer, ItemBanRecipe recipe, UnknownNetworkValue unknown) {
+                        recipe.getBypassBlock().toNetwork(buffer);
+                        recipe.getIngredient().toNetwork(buffer);
+                        unknown.toNetwork(buffer);
+                    }
+                }
+
+                static class BlockBanRecipe extends AbstractPlacementBanRecipe<BlockState, BlockStateIngredient> {
+                    void read(FriendlyByteBuf buffer) {
+                        BlockStateIngredient ingredient = BlockStateIngredient.fromNetwork(buffer);
+                    }
+
+                    void write(FriendlyByteBuf buffer, BlockBanRecipe recipe, BlockStateIngredient localIngredient) {
+                        recipe.getIngredient().toNetwork(buffer);
+                        localIngredient.toNetwork(buffer);
+                    }
+                }
+
+                interface UnknownNetworkValue {
+                    void toNetwork(FriendlyByteBuf buffer);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("AbstractExampleCookingRecipe.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+
+            public abstract class AbstractExampleCookingRecipe extends AbstractCookingRecipe {
+            }
+        """.trimIndent())
+        srcDir.resolve("GenericCookingSerializer.java").writeText("""
+            package com.example;
+
+            import net.minecraft.network.RegistryFriendlyByteBuf;
+            import net.minecraft.world.item.crafting.Ingredient;
+
+            public class GenericCookingSerializer<T extends AbstractExampleCookingRecipe> {
+                void write(RegistryFriendlyByteBuf buffer, T recipe, NotARecipe notRecipe) {
+                    recipe.getIngredients().get(0).toNetwork(buffer);
+                    notRecipe.getIngredients().get(0).toNetwork(buffer);
+                }
+
+                interface NotARecipe {
+                    java.util.List<UnknownNetworkValue> getIngredients();
+                }
+
+                interface UnknownNetworkValue {
+                    void toNetwork(RegistryFriendlyByteBuf buffer);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("IngredientNetworkSurface.java").readText()
+        val genericSerializer = srcDir.resolve("GenericCookingSerializer.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("import net.minecraft.network.RegistryFriendlyByteBuf;"), transformed)
+        assertTrue(transformed.contains("BlockStateIngredient bypassBlock = BlockStateIngredient.CONTENTS_STREAM_CODEC.decode((RegistryFriendlyByteBuf) buffer);"), transformed)
+        assertTrue(transformed.contains("Ingredient ingredient = Ingredient.CONTENTS_STREAM_CODEC.decode((RegistryFriendlyByteBuf) buffer);"), transformed)
+        assertTrue(transformed.contains("BlockStateIngredient.CONTENTS_STREAM_CODEC.encode((RegistryFriendlyByteBuf) buffer, recipe.getBypassBlock());"), transformed)
+        assertTrue(transformed.contains("Ingredient.CONTENTS_STREAM_CODEC.encode((RegistryFriendlyByteBuf) buffer, recipe.getIngredient());"), transformed)
+        assertTrue(transformed.contains("BlockStateIngredient.CONTENTS_STREAM_CODEC.encode((RegistryFriendlyByteBuf) buffer, recipe.getIngredient());"), transformed)
+        assertTrue(transformed.contains("BlockStateIngredient.CONTENTS_STREAM_CODEC.encode((RegistryFriendlyByteBuf) buffer, localIngredient);"), transformed)
+        assertTrue(transformed.contains("unknown.toNetwork(buffer);"), transformed)
+        assertFalse(transformed.contains("Ingredient.fromNetwork(buffer)"), transformed)
+        assertFalse(transformed.contains("BlockStateIngredient.fromNetwork(buffer)"), transformed)
+        assertTrue(genericSerializer.contains("Ingredient.CONTENTS_STREAM_CODEC.encode(buffer, recipe.getIngredients().get(0));"), genericSerializer)
+        assertTrue(genericSerializer.contains("notRecipe.getIngredients().get(0).toNetwork(buffer);"), genericSerializer)
+    }

@@ -610,9 +610,7 @@ class MappingCompletenessTest {
     @Test
     fun `nitrogen fuel migrations use typed API shape evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
-        val structuralSource = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val structuralSource = StructuralRuleSources.text
         val resourceSource = projectRoot
             .resolve("src/main/kotlin/com/modporter/resources/ResourceMigrator.kt")
             .readText()
@@ -686,10 +684,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `nitrogen sync call migration does not borrow owner entity ids for receiver calls`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun rewriteNitrogenSyncCalls")
         assertTrue(start >= 0, "rewriteNitrogenSyncCalls is missing")
         val end = source.indexOf("private fun stripDimensionAccessor", start + 1).let {
@@ -728,10 +723,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `nitrogen sync receiver owner accessors use Java visible FQN resolution`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun javaNonStaticWildcardImports")
         assertTrue(start >= 0, "javaNonStaticWildcardImports is missing")
         val end = source.indexOf("private fun rewriteNitrogenSyncCalls", start + 1).let {
@@ -774,10 +766,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `nitrogen synchable detection requires resolved API owners`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun hasNitrogenAttachmentSyncPacketMethod")
         assertTrue(start >= 0, "hasNitrogenAttachmentSyncPacketMethod is missing")
         val end = source.indexOf("private fun extractJavaTopLevelSuperTypes", start + 1).let {
@@ -810,10 +799,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `nitrogen attachment suppliers require resolved neoforge attachment type`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun collectNitrogenAttachmentSuppliers")
         assertTrue(start >= 0, "collectNitrogenAttachmentSuppliers is missing")
         val end = source.indexOf("private fun ensureNitrogenSyncPacketAttachmentGetter", start + 1).let {
@@ -853,10 +839,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `backpack container API migration binds inventory wrapper to slot constructor`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateQuarkBackpackInventoryWrappers")
         assertTrue(start >= 0, "migrateQuarkBackpackInventoryWrappers is missing")
         val end = source.indexOf("private fun hasNitrogenAttachmentSyncPacketMethod", start + 1).let {
@@ -904,13 +887,31 @@ class MappingCompletenessTest {
             "getMethod" to Regex("""\.getMethod\s*\("""),
             "setAccessible" to Regex("""\bsetAccessible\s*\(""")
         )
-
+        val admittedLegacyPreimages = mapOf(
+            "src/main/kotlin/com/modporter/core/transforms/structural/CreateCommonMetalTagNamespaceMigration.kt" to ("OBSOLETE_TODO" to Regex("private\\s+const\\s+val\\s+OBSOLETE_TODO\\s*=\\s*\"TODO: change forge to c in 1\\.21\"")),
+            "src/main/kotlin/com/modporter/core/transforms/structural/CreateCopperDataMapMigration.kt" to ("LEGACY_INJECT_BODY" to Regex("private\\s+const\\s+val\\s+LEGACY_INJECT_BODY\\s*=\\s*\"\"\".*?\"\"\"", RegexOption.DOT_MATCHES_ALL))
+        )
         val offenders = Files.walk(projectRoot.resolve("src/main/kotlin")).use { stream ->
             stream
                 .filter { Files.isRegularFile(it) && it.extension == "kt" }
                 .flatMap { file ->
                     val relative = projectRoot.relativize(file).invariantSeparatorsPathString
-                    val text = file.readText()
+                    var text = file.readText()
+                    admittedLegacyPreimages[relative]?.let { (symbol, pattern) ->
+                        val matches = pattern.findAll(text).toList()
+                        assertEquals(1, matches.size, "$relative must carry one exact $symbol legacy preimage")
+                        assertEquals(2, Regex("""\b${Regex.escape(symbol)}\b""").findAll(text).count(), "$symbol must be consumed exactly once")
+                        val match = matches.single()
+                        val exactConsumer = when (symbol) {
+                            "OBSOLETE_TODO" -> text.contains(".filter { it.content.trim() == OBSOLETE_TODO }")
+                            "LEGACY_INJECT_BODY" -> Regex("""requireMethodBody\s*\(\s*methods\.getValue\("inject"\)\s*,\s*LEGACY_INJECT_BODY\s*\)""").containsMatchIn(text) &&
+                                text.contains("val expected = renderRegistries()") && text.contains("return expected") &&
+                                match.value.contains("getDeclaredField(\"delegate\")") && match.value.contains("setAccessible(true)")
+                            else -> false
+                        }
+                        assertTrue(exactConsumer, "$symbol must remain an input-only comparison contract")
+                        text = text.replaceRange(match.range, match.value.map { if (it == '\r' || it == '\n') it else ' ' }.joinToString(""))
+                    }
                     forbidden
                         .filter { (marker, pattern) ->
                             pattern.containsMatchIn(text) &&
@@ -1021,10 +1022,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `structural migrations do not synthesize placeholder names for unclear source structure`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val forbiddenMarkers = listOf(
             """ifBlank { "CUSTOM" }""",
             """ifBlank { "custom" }""",
@@ -1048,10 +1046,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `bucket pickup call site migration requires scoped receiver evidence before nullable player`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyBucketPickupCallSites")
         assertTrue(start >= 0, "migrateLegacyBucketPickupCallSites is missing")
         val end = source.indexOf("private fun migratedItemUseDurationCall", start + 1).let {
@@ -1087,10 +1082,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `bucket fluid helper migration uses executable source`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateBucketItemCanBlockContainFluidSource")
         assertTrue(start >= 0, "migrateBucketItemCanBlockContainFluidSource is missing")
         val end = source.indexOf("private fun migrateUnboundLevelRegistryAccessCalls", start + 1).let {
@@ -1126,10 +1118,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `bucket fluid access migration uses executable source`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateBucketItemFluidAccessSource")
         assertTrue(start >= 0, "migrateBucketItemFluidAccessSource is missing")
         val end = source.indexOf("private fun migrateItemStackHoverNameSource", start + 1).let {
@@ -1158,10 +1147,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `level summary nullable migration uses enclosing method structure`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun isNullableLevelSummaryMethod")
         assertTrue(start >= 0, "isNullableLevelSummaryMethod is missing")
         val end = source.indexOf("private fun migrateLegacyBindingCurseChecks", start + 1).let {
@@ -1189,10 +1175,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `cumulus panorama migration uses resolved mod id expression namespace`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun cumulusPanoramaExpression")
         assertTrue(start >= 0, "cumulusPanoramaExpression is missing")
         val end = source.indexOf("private fun resolveLiteralModIdExpression", start + 1).let {
@@ -1218,10 +1201,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `cumulus menu definition migration uses executable registry evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateCumulusMenuDefinitionSource")
         assertTrue(start >= 0, "migrateCumulusMenuDefinitionSource is missing")
         val end = source.indexOf("private fun migrateCumulusMenuConstructorArgs", start + 1).let {
@@ -1255,10 +1235,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `structural metadata mod id helper requires unique metadata evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun projectMetadataModId")
         assertTrue(start >= 0, "projectMetadataModId is missing")
         val end = source.indexOf("private fun removeUnusedCumulusBooleanSupplierFields", start + 1).let {
@@ -1279,10 +1256,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `structural mod access inference ignores comments and string literals`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun inferModAccess")
         assertTrue(start >= 0, "inferModAccess is missing")
         val end = source.indexOf("/**\n     * Transform packet classes", start + 1).let {
@@ -1798,28 +1772,66 @@ class MappingCompletenessTest {
 
     @Test
     fun `split tick phase cleanup uses executable phase evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
-        val start = source.indexOf("private fun removeLegacyTickPhaseChecks")
-        assertTrue(start >= 0, "removeLegacyTickPhaseChecks is missing")
-        val end = source.indexOf("private fun removeInvalidTickEventImports", start + 1).let {
-            if (it < 0) source.length else it
+        val source = StructuralRuleSources.file("StructuralRules03.kt")
+        fun functionBody(declaration: String): String {
+            val start = source.indexOf(declaration)
+            assertTrue(start >= 0, "$declaration is missing")
+            val end = Regex("""(?m)^(?:internal|private) fun StructuralRefactorPass\.""")
+                .find(source, start + declaration.length)
+                ?.range
+                ?.first
+                ?: source.length
+            return source.substring(start, end)
         }
-        val body = source.substring(start, end)
-        val forbidden = listOf(
-            "raw split event scan" to Regex("""\.findAll\(source\)"""),
-            "unbounded generic phase removal" to Regex("""event\\\.phase[^\n]+\.replace\(result""")
+
+        val entry = functionBody(
+            "internal fun StructuralRefactorPass.removeLegacyTickPhaseChecks"
         )
-            .filter { (_, marker) -> marker.containsMatchIn(body) }
+        val typedMethods = functionBody(
+            "private fun StructuralRefactorPass.removeSplitTickPhaseChecksInTypedMethods"
+        )
+        val phaseRewriter = functionBody(
+            "internal fun StructuralRefactorPass.removeSplitTickPhaseChecksForEventName"
+        )
+        val forbidden = listOf(
+            "raw split event scan" to Regex("""\.findAll\(source\)""").containsMatchIn(typedMethods),
+            "unbounded generic phase removal" to
+                Regex("""event\\\.phase[^\n]+\.replace\(result""").containsMatchIn(phaseRewriter),
+            "raw phase rewrite" to
+                Regex("""Regex\([\s\S]*?\.phase[\s\S]*?\)\s*\.replace\(source""")
+                    .containsMatchIn(phaseRewriter)
+        )
+            .filter { (_, found) -> found }
             .map { (label, _) -> "split tick phase cleanup contains $label" }
-        val executableReplacementCount = Regex("""replaceExecutableRegex\(""").findAll(body).count()
+        val executableReplacementCount =
+            Regex("""replaceExecutableRegex\(""").findAll(phaseRewriter).count()
         val required = buildList {
-            if (!body.contains("val executableCode = maskJavaCommentsAndLiterals(source)")) {
-                add("executable split event mask")
+            if (!entry.contains("val executableSource = maskJavaCommentsAndLiterals(source)")) {
+                add("executable legacy phase mask")
             }
-            if (!body.contains(".findAll(executableCode)")) add("executable split event scan")
+            if (!entry.contains("removeSplitTickPhaseChecksInTypedMethods(result, hasBoundLegacyPhase)")) {
+                add("typed method delegation")
+            }
+            if (!typedMethods.contains("val unit = parser.parse(source).result.orElse(null) ?: return source")) {
+                add("parsed Java source")
+            }
+            if (!typedMethods.contains("val typing = SourceValueTypes(this, source)")) {
+                add("source type proof")
+            }
+            if (!typedMethods.contains("unit.findAll(MethodDeclaration::class.java)")) {
+                add("AST method scan")
+            }
+            if (!typedMethods.contains("typing.isTypeName(parameter.typeAsString, \"${'$'}it.Post\")") ||
+                !typedMethods.contains("typing.isTypeName(parameter.typeAsString, \"${'$'}it.Pre\")")
+            ) {
+                add("exact split event owner proof")
+            }
+            if (!typedMethods.contains("body.findAll(FieldAccessExpr::class.java)")) {
+                add("AST phase access proof")
+            }
+            if (!typedMethods.contains("removeSplitTickPhaseChecksForEventName(")) {
+                add("scoped phase rewrite")
+            }
             if (executableReplacementCount < 7) add("executable phase replacements")
         }
 
@@ -2230,13 +2242,12 @@ class MappingCompletenessTest {
     fun `java comment and literal masks handle text blocks`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val maskImplementations = listOf(
-            "BuildSystemPass" to projectRoot.resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt"),
-            "ResourceMigrator" to projectRoot.resolve("src/main/kotlin/com/modporter/resources/ResourceMigrator.kt"),
-            "StructuralRefactorPass" to projectRoot.resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            "BuildSystemPass" to projectRoot.resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt").readText(),
+            "ResourceMigrator" to projectRoot.resolve("src/main/kotlin/com/modporter/resources/ResourceMigrator.kt").readText(),
+            "StructuralRefactorPass" to StructuralRuleSources.text
         )
 
-        val offenders = maskImplementations.mapNotNull { (label, path) ->
-            val source = path.readText()
+        val offenders = maskImplementations.mapNotNull { (label, source) ->
             val start = source.indexOf("private fun maskJavaCommentsAndLiterals")
             if (start < 0) return@mapNotNull "$label is missing maskJavaCommentsAndLiterals"
             val end = source.indexOf("\n    private fun", start + 1).let {
@@ -2264,10 +2275,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `structural unused import cleanup ignores comments and literals`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val simpleStart = source.indexOf("private fun removeUnusedSimpleImports")
         assertTrue(simpleStart >= 0, "removeUnusedSimpleImports is missing")
         val simpleEnd = source.indexOf("private fun removeUnusedImportsBySimpleNamePattern", simpleStart + 1)
@@ -2295,10 +2303,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `qualified Java invocation helper scans executable code only`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun rewriteJavaInvocation(")
         assertTrue(start >= 0, "rewriteJavaInvocation is missing")
         val end = source.indexOf("private fun removeJavaStatementsMatching", start + 1).let {
@@ -2322,10 +2327,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `Java call helper delegates to executable scanner`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun rewriteJavaCall(")
         assertTrue(start >= 0, "rewriteJavaCall is missing")
         val end = source.indexOf("private fun rewriteExecutableJavaCall", start + 1).let {
@@ -2350,10 +2352,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `offset Java call helper delegates to executable scanner`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun rewriteJavaCallWithOffset(")
         assertTrue(start >= 0, "rewriteJavaCallWithOffset is missing")
         val end = source.indexOf("private fun rewriteJavaInvocationArguments", start + 1).let {
@@ -2378,10 +2377,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `invocation argument helper delegates to executable scanner`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun rewriteJavaInvocationArguments(")
         assertTrue(start >= 0, "rewriteJavaInvocationArguments is missing")
         val end = source.indexOf("private fun rewriteExecutableJavaInvocationArguments", start + 1).let {
@@ -2406,10 +2402,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `offset invocation argument helper delegates to executable scanner`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun rewriteJavaInvocationArgumentsWithOffset(")
         assertTrue(start >= 0, "rewriteJavaInvocationArgumentsWithOffset is missing")
         val executableStart = source.indexOf("private fun rewriteExecutableJavaInvocationArgumentsWithOffset", start + 1)
@@ -2439,10 +2432,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `constructor helper delegates to executable scanner`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun rewriteJavaNew(")
         assertTrue(start >= 0, "rewriteJavaNew is missing")
         val end = source.indexOf("private fun rewriteExecutableJavaNew", start + 1).let {
@@ -2466,10 +2456,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `super constructor helper delegates to executable scanner`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun rewriteSuperConstructorCalls(")
         assertTrue(start >= 0, "rewriteSuperConstructorCalls is missing")
         val end = source.indexOf("private fun rewriteExecutableSuperConstructorCalls", start + 1).let {
@@ -2494,10 +2481,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `entity getLevel accessor migration uses executable structural evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateEntityLevelAccessorCalls")
         assertTrue(start >= 0, "migrateEntityLevelAccessorCalls is missing")
         val end = source.indexOf("private fun findMatchingBrace", start + 1).let {
@@ -2536,10 +2520,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `structural brace matching ignores Java comments and literals`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val braceStart = source.indexOf("private fun findMatchingBrace")
         assertTrue(braceStart >= 0, "findMatchingBrace is missing")
         val braceEnd = source.indexOf("private fun migrateEventBusSubscriberStaticMethodsSource", braceStart + 1).let {
@@ -2971,10 +2952,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `recipe book category finder migration uses executable call evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateRecipeBookCategoryFinderRecipeHolders")
         assertTrue(start >= 0, "migrateRecipeBookCategoryFinderRecipeHolders is missing")
         val end = source.indexOf("private fun migrateRecipeManagerCraftingInputSource", start + 1).let {
@@ -3005,10 +2983,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `furnace can burn accessor migration uses executable binding evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val migrateStart = source.indexOf("private fun migrateLegacyAbstractFurnaceCanBurnInvokerBoundary")
         assertTrue(migrateStart >= 0, "migrateLegacyAbstractFurnaceCanBurnInvokerBoundary is missing")
         val migrateEnd = source.indexOf("private fun nearestFurnaceCanBurnAccessorCast", migrateStart + 1).let {
@@ -3047,10 +3022,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `unbound level registry access migration uses executable token edits`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateUnboundLevelRegistryAccessCalls")
         assertTrue(start >= 0, "migrateUnboundLevelRegistryAccessCalls is missing")
         val end = source.indexOf("private fun migrateFoodComponentAccess", start + 1).let {
@@ -3143,10 +3115,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `entity level accessor migration does not use global simple type fallback`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateEntityLevelAccessorCalls")
         assertTrue(start >= 0, "migrateEntityLevelAccessorCalls is missing")
         val end = source.indexOf("\n    private fun ", start + 1).let {
@@ -3201,9 +3170,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `mmlib block loot constructor migration uses executable source evidence`() {
-        val source = Path.of("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .toAbsolutePath()
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateMmlibBlockLootConstructor")
         assertTrue(start >= 0, "migrateMmlibBlockLootConstructor is missing")
         val end = source.indexOf("private fun findMatchingParen", start + 1).let {
@@ -3243,10 +3210,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy doEnchant damage effect migration does not use nearby damage source fallback`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         assertTrue(
             !source.contains("inferDamageSourceForDoEnchantDamageEffects"),
             "Legacy doEnchantDamageEffects migration must not infer damage sources from nearby declarations"
@@ -3273,10 +3237,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy damage bonus migration does not use method wide client side fallback`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         assertTrue(
             !source.contains("inferServerLevelExpressionForMethod"),
             "Legacy getDamageBonus migration must not infer ServerLevel from whole-method client-side scans"
@@ -3305,10 +3266,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy item stack random hurt migration does not use whole file server level fallback`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         assertTrue(
             !source.contains("inferServerLevelExpression("),
             "Legacy ItemStack.hurt migration must not infer ServerLevel from whole-source declarations"
@@ -3335,10 +3293,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy damage bonus migration binds damage source to target hurt`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         assertTrue(
             !source.contains("firstHurtDamageSourceArgument"),
             "Legacy getDamageBonus migration must not use the first or only hurt call from the whole method"
@@ -3365,10 +3320,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy mob custom damage source attack migration uses executable doHurtTarget method range`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyMobCustomDamageSourceAttacks")
         assertTrue(start >= 0, "migrateLegacyMobCustomDamageSourceAttacks is missing")
         val end = source.indexOf("private fun migrateLegacyMobCustomDamageSourceUtilityAttacks", start + 1).let {
@@ -3404,10 +3356,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy passenger attachment migration uses executable method ranges`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyPassengerAttachmentOverrides")
         assertTrue(start >= 0, "migrateLegacyPassengerAttachmentOverrides is missing")
         val end = source.indexOf("private fun migrateLegacyEntityOverrideSignatures", start + 1).let {
@@ -3444,10 +3393,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy custom portal block migration uses executable method ranges`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyCustomPortalBlockProtocol")
         assertTrue(start >= 0, "migrateLegacyCustomPortalBlockProtocol is missing")
         val end = source.indexOf("private fun migrateLegacyConcretePowderConcreteAccessor", start + 1).let {
@@ -3489,10 +3435,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy projectile weapon migration uses executable finishUsingItem method range`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyProjectileWeaponFinishUsingItemSource")
         assertTrue(start >= 0, "migrateLegacyProjectileWeaponFinishUsingItemSource is missing")
         val parserStart = source.indexOf("private fun parseLegacyProjectileWeaponShape", start + 1)
@@ -3841,10 +3784,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `empty event bus registration removal resolves mod bus event owners`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun removeEmptyEventBusRegistration")
         assertTrue(start >= 0, "removeEmptyEventBusRegistration is missing")
         val end = source.indexOf("private fun migrateFMLJavaModLoadingContext", start + 1).let {
@@ -3879,10 +3819,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `FMLJavaModLoadingContext migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateFMLJavaModLoadingContext")
         assertTrue(start >= 0, "migrateFMLJavaModLoadingContext is missing")
         val end = source.indexOf("private data class FluidBucketCapabilityMigration", start + 1).let {
@@ -3925,10 +3862,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `structural import insertion uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun addImportIfMissing")
         assertTrue(start >= 0, "addImportIfMissing is missing")
         val end = source.indexOf("private fun removeImportIfPresent", start + 1).let {
@@ -3955,10 +3889,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `structural import removal uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val removeIfPresentStart = source.indexOf("private fun removeImportIfPresent")
         assertTrue(removeIfPresentStart >= 0, "removeImportIfPresent is missing")
         val removeIfPresentEnd = source.indexOf("private fun annotationStartBefore", removeIfPresentStart + 1).let {
@@ -3993,10 +3924,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `DistExecutor import cleanup uses executable import and comment evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun removeDistExecutorImports")
         assertTrue(start >= 0, "removeDistExecutorImports is missing")
         val end = source.indexOf("private fun removeStandaloneLineCommentsOutsideJavaLiterals", start + 1).let {
@@ -4036,10 +3964,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy static FML mod event bus migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyStaticFmlModEventBusAccess")
         assertTrue(start >= 0, "migrateLegacyStaticFmlModEventBusAccess is missing")
         val end = source.indexOf("private fun migrateLegacyEntityStepHeightOverrides", start + 1).let {
@@ -4058,11 +3983,15 @@ class MappingCompletenessTest {
         assertTrue(
             body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
                 body.contains("staticGetterPattern.containsMatchIn(executableCode)") &&
-                body.contains(".find(executableCode)") &&
-                body.contains("source.substring(it).trim()") &&
+                body.contains(".parse(source).result.orElse(null) ?: return source") &&
+                body.contains("parsed.findAll(AnnotationExpr::class.java)") &&
+                body.contains("annotationOwner(annotation)") &&
+                body.contains("normalMember(annotation, \"modid\")?.toString()") &&
+                body.contains("annotation.memberValue.toString()") &&
+                body.contains("subscriberIds.singleOrNull() ?: modIds.singleOrNull() ?: return source") &&
                 body.contains("replaceExecutableRegex(source, staticGetterPattern)") &&
                 body.contains("removeExecutableImport(result, \"net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext\")"),
-            "Legacy static FML mod event-bus migration must use executable calls and source-ranged annotation arguments"
+            "Legacy static FML mod event-bus migration must use executable calls and parsed annotation arguments"
         )
         assertTrue(
             forbidden.isEmpty(),
@@ -4072,10 +4001,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `split level tick side migration uses executable event evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateSplitLevelTickSideChecks")
         assertTrue(start >= 0, "migrateSplitLevelTickSideChecks is missing")
         val end = source.indexOf("private fun removeLegacyTickPhaseChecks", start + 1).let {
@@ -4110,6 +4036,40 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `player tick event player argument migration uses executable method evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migratePlayerTickEventPlayerArguments")
+        assertTrue(start >= 0, "migratePlayerTickEventPlayerArguments is missing")
+        val end = source.indexOf("private fun migrateSplitLevelTickSideChecks", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw player tick prefilter" to body.contains("""source.contains("PlayerTickEvent.Post")"""),
+            "raw tick(player) prefilter" to body.contains("""source.contains(".tick(player)")"""),
+            "raw event scan" to (
+                body.contains(".find(result)") || body.contains(".find(source)")
+                ),
+            "raw tick replacement" to body.contains(".replace(result")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("javaMethodRanges(executableCode)") &&
+                body.contains("eventParameterPattern.find(methodText)") &&
+                body.contains("tickPlayerPattern.findAll(executableCode, method.range.first)") &&
+                body.contains("applyStringEdits(source, edits)"),
+            "PlayerTickEvent player argument migration must use executable method-scoped event evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "PlayerTickEvent player argument migration must not use comments, strings, or whole-file event fallbacks: $offenders"
+        )
+    }
+
+    @Test
     fun `player tick event migration does not infer bare player argument ownership`() {
         val source = Path.of("")
             .toAbsolutePath()
@@ -4123,10 +4083,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `player harvest check migration uses executable block state evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val eventHooksStart = source.indexOf("private fun migrateLegacyEventHooks121")
         assertTrue(eventHooksStart >= 0, "migrateLegacyEventHooks121 is missing")
         val eventHooksEnd = source.indexOf("private data class HarvestCheckBlockStateAccess", eventHooksStart + 1).let {
@@ -4179,10 +4136,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `finalize spawn equipment random migration uses method scoped accessor evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val migrationStart = source.indexOf("""if (result.contains("@Nullable CompoundTag")""")
         assertTrue(migrationStart >= 0, "legacy finalizeSpawn migration block is missing")
         val migrationEnd = source.indexOf("result = migrateLegacyFinalizeSpawnMixinDescriptors", migrationStart + 1).let {
@@ -4228,10 +4182,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy pack metadata accessors use executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val migrationStart = source.indexOf("private fun migrateLegacyPackResourceApis")
         assertTrue(migrationStart >= 0, "migrateLegacyPackResourceApis is missing")
         val accessorStart = source.indexOf("private fun migratePackMetadataSectionAccessors")
@@ -4268,10 +4219,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `block entity serialization holder lookup migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateBlockEntitySerializationSource")
         assertTrue(start >= 0, "migrateBlockEntitySerializationSource is missing")
         val end = source.indexOf("private fun collectHolderLookupCompoundTagMethods", start + 1).let {
@@ -4303,10 +4251,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy packet payload context migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyPayloadHandlerContext")
         assertTrue(start >= 0, "migrateLegacyPayloadHandlerContext is missing")
         val end = source.indexOf("private fun migrateKnownNestedSimpleChannelNetworking", start + 1).let {
@@ -4341,10 +4286,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `command source stack level migration uses executable scoped evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateCommandSourceStackLevelAccess")
         assertTrue(start >= 0, "migrateCommandSourceStackLevelAccess is missing")
         val end = source.indexOf("private fun migrateLegacyStaticFmlModEventBusAccess", start + 1).let {
@@ -4382,10 +4324,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy entity step height migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyEntityStepHeightOverrides")
         assertTrue(start >= 0, "migrateLegacyEntityStepHeightOverrides is missing")
         val end = source.indexOf("private fun migrateLegacyEntityTypeAabbCalls", start + 1).let {
@@ -4414,10 +4353,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `saddleable equipSaddle signature migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateSaddleableEquipSaddleSignature")
         assertTrue(start >= 0, "migrateSaddleableEquipSaddleSignature is missing")
         val end = source.indexOf("private fun migrateMthTrigonometryFloatArguments", start + 1).let {
@@ -4447,18 +4383,96 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `potion component migration uses executable source evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("""val potionStacksMigrated = PotionUtilsStackCalls.migrate(result)""")
+        assertTrue(start >= 0, "potion component migration block is missing")
+        val end = source.indexOf("result = migrateUseOnContextDataComponentHasCalls(result)", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw PotionUtils prefilter" to """result.contains("PotionUtils.")""",
+            "raw PotionUtils replacement" to Regex("""Regex\([\s\S]*?PotionUtils[\s\S]*?\)\s*\.\s*replace\(result"""),
+            "raw Potions.EMPTY replacement" to "result.replace(\"Potions.EMPTY\"",
+            "raw Potion.byName replacement" to Regex("""Regex\([\s\S]*?Potion\.byName[\s\S]*?\)\s*\.\s*replace\(result"""),
+            "pipeline blanket DataComponents import flag" to "needsDataComponents = true"
+        )
+            .filter { (_, marker) ->
+                when (marker) {
+                    is String -> body.contains(marker)
+                    is Regex -> marker.containsMatchIn(body)
+                    else -> false
+                }
+            }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("maskJavaCommentsAndLiterals(result)") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("migrateLegacyPotionEmptyStringChecks(result)") &&
+                body.contains("potionStacksMigrated != result") &&
+                body.contains("PotionUtilsStackCalls.migrate(result) {") &&
+                body.contains(
+                    """if (maskJavaCommentsAndLiterals(result).contains("PotionContents.EMPTY"))"""
+                ) &&
+                body.contains("needsPotionContents = true") &&
+                body.contains(
+                    "\"${'$'}{generatedCompatPackage()}.LegacyPotionUtils.EMPTY\""
+                ),
+            "Potion component migration must inspect executable Java and supply the exact generated empty-potion owner"
+        )
+        val stackCalls = StructuralRuleSources.file("PotionUtilsStackCalls.kt")
+        assertTrue(
+            stackCalls.contains("val executable = JavaSourceText.maskCommentsAndLiterals(source)") &&
+                stackCalls.contains("val exact = ExactJavaSemantics(cu)") &&
+                stackCalls.contains("exact.targetTypeReferenceOrNull(") &&
+                stackCalls.contains("exact.exactStaticScope(") &&
+                stackCalls.contains("exact.exactTypeReference(") &&
+                stackCalls.contains("exact.isProvablyType(") &&
+                stackCalls.contains("var needsDataComponents = false") &&
+                stackCalls.contains("var needsPotionContents = false") &&
+                stackCalls.contains(
+                    "needsDataComponents || requiresDataComponents && dataComponentsRef == \"DataComponents\""
+                ) &&
+                stackCalls.contains(
+                    "needsPotionContents || requiresPotionContents && potionContentsRef == \"PotionContents\""
+                ) &&
+                stackCalls.contains("if (needsDataComponents)") &&
+                stackCalls.contains("addImportIfMissing(result, dataComponentsFqn)") &&
+                stackCalls.contains("if (needsPotionContents)") &&
+                stackCalls.contains("addImportIfMissing(result, potionContentsFqn)"),
+            "PotionUtils stack calls must own exact type proofs and conditionally add only collision-safe imports"
+        )
+        assertTrue(
+            source.contains("private fun migrateLegacyPotionEmptyStringChecks(source: String): String") &&
+                source.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                source.contains("sourcePattern.findAll(source)") &&
+                source.contains("executablePattern.find(executableCode, match.range.first)") &&
+                source.contains("return applyStringEdits(source, edits)"),
+            "Potion string-key migration must verify source matches against executable Java ranges"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Potion component migration must not rewrite comments or string literals with raw replacements: $offenders"
+        )
+    }
+
+    @Test
     fun `potion component migration requires exact ast owners`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val pipelineSource = StructuralRuleSources.text
+        val source = StructuralRuleSources.file("PotionUtilsStackCalls.kt")
         val exactSemantics = Path.of("")
             .toAbsolutePath()
             .resolve("src/main/kotlin/com/modporter/core/transforms/structural/ExactJavaSemantics.kt")
             .readText()
-        val start = source.indexOf("private fun migrateLegacyPotionUtilsCalls(source: String): String")
+        val start = source.indexOf("private fun migrateLegacyPotionUtilsCalls(")
         assertTrue(start >= 0, "PotionUtils AST migration is missing")
-        val body = source.substring(start)
+        val end = source.indexOf(
+            "private fun migrateRemovedEmptyPotionRegistryGuards(source: String): String",
+            start + 1
+        ).let { if (it < 0) source.length else it }
+        val body = source.substring(start, end)
         val offenders = listOf(
             "PotionUtils regex replacement" to Regex("""Regex\([\s\S]*?PotionUtils"""),
             "executable regex replacement" to "replaceExecutableRegex(",
@@ -4475,7 +4489,10 @@ class MappingCompletenessTest {
             .map { (label, _) -> label }
 
         assertTrue(
-            source.contains("result = migrateLegacyPotionUtilsCalls(result)") &&
+            source.contains("migrateRemovedEmptyPotionRegistryGuards(") &&
+                source.contains(
+                    "migrateLegacyPotionUtilsCalls(source, emptyPotionExpression)"
+                ) &&
                 body.contains("val parsed = parser.parse(source)") &&
                 body.contains("LexicalPreservingPrinter.setup(cu)") &&
                 body.contains("cu.findAll(MethodCallExpr::class.java)") &&
@@ -4499,11 +4516,13 @@ class MappingCompletenessTest {
             "Potion migration must fail closed and use shared exact lexical binding and owner proofs"
         )
         assertTrue(
-            source.contains("private fun migrateLegacyPotionEmptyStringChecks(source: String): String") &&
-                source.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
-                source.contains("sourcePattern.findAll(source)") &&
-                source.contains("executablePattern.find(executableCode, match.range.first)") &&
-                source.contains("return applyStringEdits(source, edits)"),
+            pipelineSource.contains(
+                "private fun migrateLegacyPotionEmptyStringChecks(source: String): String"
+            ) &&
+                pipelineSource.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                pipelineSource.contains("sourcePattern.findAll(source)") &&
+                pipelineSource.contains("executablePattern.find(executableCode, match.range.first)") &&
+                pipelineSource.contains("return applyStringEdits(source, edits)"),
             "Potion string-key migration must verify source matches against executable Java ranges"
         )
         assertTrue(
@@ -4520,10 +4539,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `use on context data component has migration uses method local executable evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateUseOnContextDataComponentHasCalls")
         assertTrue(start >= 0, "migrateUseOnContextDataComponentHasCalls is missing")
         val end = source.indexOf("private fun migrateThisStackUseDurationCalls", start + 1).let {
@@ -4556,10 +4572,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `this stack use duration migration uses method local living entity evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateThisStackUseDurationCalls")
         assertTrue(start >= 0, "migrateThisStackUseDurationCalls is missing")
         val end = source.indexOf("private fun migrateLegacyAddLayersSkinNameLoopsSource", start + 1).let {
@@ -4607,10 +4620,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `equipment slot receiver migration uses method scoped owner evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val mainStart = source.indexOf("private fun migrateLegacyItemExtensionAndProjectileApis")
         assertTrue(mainStart >= 0, "migrateLegacyItemExtensionAndProjectileApis is missing")
         val mainEnd = source.indexOf("private fun migrateLegacyEquipmentSlotForItemReceivers", mainStart + 1).let {
@@ -4657,10 +4667,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy restore migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         assertTrue(
             source.contains("""replaceExecutableRegex(result, Regex(""" + "\"\"\"" + """\.restore\("""),
             "legacy restore migration must use executable Java rewriting"
@@ -4673,10 +4680,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `pickup block player parameter migrations use method local executable evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val notNullStart = source.indexOf("private fun migrateNotNullPickupBlockOverridePlayerParameterSource")
         assertTrue(notNullStart >= 0, "migrateNotNullPickupBlockOverridePlayerParameterSource is missing")
         val notNullEnd = source.indexOf("private fun collectSuperPickupBlockEdits", notNullStart + 1).let {
@@ -4722,10 +4726,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `step height addition migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val stepHeightIndex = source.indexOf("STEP_HEIGHT_ADDITION")
         assertTrue(stepHeightIndex >= 0, "STEP_HEIGHT_ADDITION migration is missing")
         val body = source.substring((stepHeightIndex - 600).coerceAtLeast(0), (stepHeightIndex + 1200).coerceAtMost(source.length))
@@ -4751,10 +4752,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `vanilla 121 small API rewrites use executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val hoverIndex = source.indexOf("hasCustomHoverName")
         assertTrue(hoverIndex >= 0, "small API rewrite block is missing")
         val body = source.substring((hoverIndex - 400).coerceAtLeast(0), (hoverIndex + 2200).coerceAtMost(source.length))
@@ -4785,10 +4783,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `common vanilla 121 API rewrites use executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateVanilla121ApiSource")
         assertTrue(start >= 0, "migrateVanilla121ApiSource is missing")
         val end = source.indexOf("result = migrateEntityDimensionsRecordAccessors", start + 1)
@@ -4828,10 +4823,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `entity dimensions record accessor migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateEntityDimensionsRecordAccessors")
         assertTrue(start >= 0, "migrateEntityDimensionsRecordAccessors is missing")
         val end = source.indexOf("private fun migrateAdvancementRequirementsStrategySource", start + 1)
@@ -4858,10 +4850,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `brewing recipe migration derives event recipes from executable source calls`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateBrewingRecipeRegistrationSource")
         assertTrue(start >= 0, "migrateBrewingRecipeRegistrationSource is missing")
         val end = source.indexOf("private fun migrateVanilla121ApiSource", start + 1)
@@ -4898,10 +4887,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `structural method body replacement helper uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun replaceMethodBody")
         assertTrue(start >= 0, "replaceMethodBody is missing")
         val end = source.indexOf("private fun replaceExecutableMethodBody", start + 1).let {
@@ -4928,10 +4914,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `structural declared method removal helper uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun removeDeclaredMethod")
         assertTrue(start >= 0, "removeDeclaredMethod is missing")
         val end = source.indexOf("private fun replaceNestedClass", start + 1).let {
@@ -4961,10 +4944,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `structural nested class replacement helper uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun replaceNestedClass")
         assertTrue(start >= 0, "replaceNestedClass is missing")
         val end = source.indexOf("private fun insertBeforeLastClassBrace", start + 1).let {
@@ -4994,10 +4974,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `structural class end insertion helper uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun insertBeforeLastClassBrace")
         assertTrue(start >= 0, "insertBeforeLastClassBrace is missing")
         val end = source.indexOf("private fun removeImport", start + 1).let {
@@ -5023,10 +5000,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `deferred holder register base generic migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateDeferredHolderRegisterBaseGenerics")
         assertTrue(start >= 0, "migrateDeferredHolderRegisterBaseGenerics is missing")
         val end = source.indexOf("private fun replaceMethodBody", start + 1).let {
@@ -5066,10 +5040,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `deferred holder generic migration rewrites executable source only`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateDeferredHolderGenericsSource")
         assertTrue(start >= 0, "migrateDeferredHolderGenericsSource is missing")
         val end = source.indexOf("private fun migrateDeferredHolderRegisterBaseGenerics", start + 1).let {
@@ -5104,10 +5075,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy registry utility migrations use executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val lazyStart = source.indexOf("private fun migrateLegacyLazyRegistryCodecs")
         assertTrue(lazyStart >= 0, "migrateLegacyLazyRegistryCodecs is missing")
         val delegateStart = source.indexOf("private fun migrateLegacyDeferredHolderDelegateAccessors", lazyStart + 1)
@@ -5153,10 +5121,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy holder accessor migrations use executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val delegateStart = source.indexOf("private fun migrateLegacyDeferredHolderDelegateAccessors")
         assertTrue(delegateStart >= 0, "migrateLegacyDeferredHolderDelegateAccessors is missing")
         val holderStart = source.indexOf("private fun migrateLegacyHolderAccessors")
@@ -5196,10 +5161,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `holder value accessor migration uses executable typed variables`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateHolderValueAccessorsSource")
         assertTrue(start >= 0, "migrateHolderValueAccessorsSource is missing")
         val end = source.indexOf("private fun migrateScreenBackgroundRenderedEventSource", start + 1).let {
@@ -5235,10 +5197,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `screen background rendered migration uses executable method evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateScreenBackgroundRenderedEventSource")
         assertTrue(start >= 0, "migrateScreenBackgroundRenderedEventSource is missing")
         val end = source.indexOf("private fun migrateLegacyHeartTypeSheetCoordinatesSource", start + 1).let {
@@ -5274,10 +5233,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy HeartType sheet coordinate migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyHeartTypeSheetCoordinatesSource")
         assertTrue(start >= 0, "migrateLegacyHeartTypeSheetCoordinatesSource is missing")
         val end = source.indexOf("private fun migrateLegacyProjectilePortalBranchSource", start + 1).let {
@@ -5321,10 +5277,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy projectile portal branch removal uses executable branch evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyProjectilePortalBranchSource")
         assertTrue(start >= 0, "migrateLegacyProjectilePortalBranchSource is missing")
         val end = source.indexOf("private fun migrateColoredCutoutModelCopyLayerRenderSource", start + 1).let {
@@ -5363,10 +5316,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `colored cutout layer packed color migration uses executable invocation evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateColoredCutoutModelCopyLayerRenderSource")
         assertTrue(start >= 0, "migrateColoredCutoutModelCopyLayerRenderSource is missing")
         val end = source.indexOf("private fun migrateLegacyShearableSignaturesSource", start + 1).let {
@@ -5398,10 +5348,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy add layer skin migrations use executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("val skinModelCallMigrated = migrateLegacyPlayerSkinModelCallsSource")
         assertTrue(start >= 0, "legacy add layer skin migration call site is missing")
         val end = source.indexOf("private fun migrateJava21StrictWarningSource", start + 1).let {
@@ -5440,10 +5387,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `Java 21 redundant cast migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateRedundantJava21Casts")
         assertTrue(start >= 0, "migrateRedundantJava21Casts is missing")
         val end = source.indexOf("private fun migrateBlockDefaultStateThisEscapeWarning", start + 1).let {
@@ -5460,7 +5404,8 @@ class MappingCompletenessTest {
 
         assertTrue(
             body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
-                body.contains("findAll(executableCode)") &&
+                body.contains("val methodText = executableCode.substring(method.range)") &&
+                body.contains("findAll(methodText)") &&
                 body.contains("maskJavaCommentsAndLiterals(result)") &&
                 body.contains("replaceExecutableRegex(result, Regex"),
             "Java 21 redundant cast migration must inspect and rewrite executable Java only"
@@ -5473,10 +5418,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `Mth trigonometry float argument migration uses executable method source`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateMthTrigonometryFloatArguments")
         assertTrue(start >= 0, "migrateMthTrigonometryFloatArguments is missing")
         val end = source.indexOf("private fun migrateMapDecorationRecordSource", start + 1).let {
@@ -5516,45 +5458,48 @@ class MappingCompletenessTest {
 
     @Test
     fun `map decoration migrations use executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
+        val ownedModule = StructuralRuleSources.file("LegacyMapDecorationSubclasses.kt")
         val collectorStart = source.indexOf("private fun collectFinalMapDecorationSubclassClasses")
         assertTrue(collectorStart >= 0, "collectFinalMapDecorationSubclassClasses is missing")
         val collectorEnd = source.indexOf("private fun collectLootTableProviderClasses", collectorStart + 1).let {
             if (it < 0) source.length else it
         }
         val collectorBody = source.substring(collectorStart, collectorEnd)
-        val recordStart = source.indexOf("private fun migrateMapDecorationRecordSource")
-        assertTrue(recordStart >= 0, "migrateMapDecorationRecordSource is missing")
-        val recordEnd = source.indexOf("private fun migrateLegacyModelRenderPackedColorBodies", recordStart + 1).let {
+        val recordEntryStart = source.indexOf("private fun migrateMapDecorationRecordSource")
+        assertTrue(recordEntryStart >= 0, "migrateMapDecorationRecordSource is missing")
+        val recordEntryEnd = source.indexOf("private fun migrateLegacyModelRenderPackedColorBodies", recordEntryStart + 1).let {
             if (it < 0) source.length else it
         }
-        val recordBody = source.substring(recordStart, recordEnd)
-        val subclassStart = source.indexOf("private fun migrateFinalMapDecorationSubclassSource")
-        assertTrue(subclassStart >= 0, "migrateFinalMapDecorationSubclassSource is missing")
-        val subclassEnd = source.indexOf("private fun rewriteMapDecorationSubclassBody", subclassStart + 1).let {
+        val recordEntryBody = source.substring(recordEntryStart, recordEntryEnd)
+        val subclassEntryStart = source.indexOf("private fun migrateFinalMapDecorationSubclassSource")
+        assertTrue(subclassEntryStart >= 0, "migrateFinalMapDecorationSubclassSource is missing")
+        val subclassEntryEnd = source.indexOf("private fun migrateFinalMapDecorationSubclassUsageSource", subclassEntryStart + 1).let {
             if (it < 0) source.length else it
         }
-        val subclassBody = source.substring(subclassStart, subclassEnd)
+        val subclassEntryBody = source.substring(subclassEntryStart, subclassEntryEnd)
+        val usageStart = source.indexOf("private fun migrateFinalMapDecorationSubclassUsageSource")
+        assertTrue(usageStart >= 0, "migrateFinalMapDecorationSubclassUsageSource is missing")
+        val usageEnd = source.indexOf("private fun rewriteMapDecorationSubclassBody", usageStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val usageBody = source.substring(usageStart, usageEnd)
 
         val offenders = listOf(
             "collector raw extends prefilter" to (collectorBody.contains("""source.contains("extends MapDecoration")""")),
             "collector raw subclass scan" to collectorBody.contains(".findAll(source)"),
-            "record raw MapDecoration prefilter" to recordBody.contains("""source.contains("MapDecoration")"""),
-            "record raw type replacement" to recordBody.contains("""result.replace("MapDecoration.Type.""""),
-            "record raw getter replacement" to recordBody.contains(""".replace("${'$'}variable.getX()""""),
-            "record raw declaration scan" to recordBody.contains(".findAll(result)"),
-            "record raw constructor prefilter" to recordBody.contains("""result.contains("new MapDecoration(")"""),
-            "record raw constructor replacement" to recordBody.contains(""").replace(result) { match ->"""),
-            "subclass raw extends prefilter" to subclassBody.contains("""source.contains("extends MapDecoration")"""),
-            "subclass raw class scan" to subclassBody.contains("pattern.find(result, cursor)"),
-            "subclass raw brace matching" to subclassBody.contains("findMatchingBrace(result, openBrace)"),
-            "subclass raw cleanup replacement" to subclassBody.contains("""result.replace("super.equals(o) && o instanceof""""),
-            "subclass usage raw decorations prefilter" to subclassBody.contains("""source.contains(".decorations.put(")"""),
-            "subclass usage raw variable scan" to subclassBody.contains(".findAll(result)"),
-            "subclass usage raw put replacement" to subclassBody.contains(""".replace(result, "${'$'}1${'$'}variable.asMapDecoration()${'$'}2")""")
+            "owned record raw MapDecoration prefilter" to ownedModule.contains("""source.contains("MapDecoration")"""),
+            "owned record file-wide declaration names" to ownedModule.contains("decorationVariables"),
+            "owned record raw source scan" to ownedModule.contains(".findAll(source)"),
+            "owned record raw constructor helper" to ownedModule.contains("rewriteExecutableJavaNew"),
+            "owned Create-specific package marker" to ownedModule.contains("com.simibubi.create"),
+            "owned StationMarker-specific marker" to ownedModule.contains("StationMarker"),
+            "owned subclass raw class scan" to ownedModule.contains("declaration.find(result, cursor)"),
+            "owned subclass raw brace matching" to ownedModule.contains("findMatchingBrace(result, openBrace)"),
+            "owned renderer masked literal target scan" to ownedModule.contains("executable.contains(CREATE_LEGACY_RENDER_TARGET)"),
+            "subclass usage raw decorations prefilter" to usageBody.contains("""source.contains(".decorations.put(")"""),
+            "subclass usage raw variable scan" to usageBody.contains(".findAll(result)"),
+            "subclass usage raw put replacement" to usageBody.contains(""".replace(result, "${'$'}1${'$'}variable.asMapDecoration()${'$'}2")""")
         )
             .filter { (_, found) -> found }
             .map { (label, _) -> label }
@@ -5566,35 +5511,47 @@ class MappingCompletenessTest {
             "MapDecoration subclass collection must use executable Java declarations"
         )
         assertTrue(
-            recordBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
-                recordBody.contains("""executableCode.contains("MapDecoration")""") &&
-                recordBody.contains("replaceExecutableRegex(result, Regex") &&
-                recordBody.contains(".findAll(maskJavaCommentsAndLiterals(result))") &&
-                recordBody.contains("rewriteExecutableJavaNew(result, \"MapDecoration\")") &&
-                recordBody.contains("addExecutableImportIfMissing(result, \"net.minecraft.world.level.saveddata.maps.MapDecorationTypes\")"),
-            "MapDecoration record migration must scan and rewrite executable Java only"
+            recordEntryBody.contains("return migrateLegacyMapDecorationRecordContracts(source)") &&
+                subclassEntryBody.contains("val composition = migrateLegacyMapDecorationCompositionSource(source)") &&
+                subclassEntryBody.contains("return composition"),
+            "MapDecoration entry rules must delegate to the owned final-record module"
         )
         assertTrue(
-            subclassBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
-                subclassBody.contains("""executableCode.contains("extends MapDecoration")""") &&
-                subclassBody.contains("pattern.find(executableResult, cursor)") &&
-                subclassBody.contains("findMatchingBrace(executableResult, openBrace)") &&
-                subclassBody.contains("replaceExecutableRegex(result, Regex") &&
-                subclassBody.contains(".findAll(executableCode)"),
-            "MapDecoration final subclass and usage migrations must use executable Java evidence"
+            ownedModule.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                ownedModule.contains("val parser = JavaParser(") &&
+                ownedModule.contains("val typing = SourceValueTypes(this, source)") &&
+                ownedModule.contains("unit.findAll(MethodCallExpr::class.java)") &&
+                ownedModule.contains("typing.typeOf(receiver.toString(), receiverOffset) != MAP_DECORATION") &&
+                ownedModule.contains("typing.isTypeName(\"MapDecoration\", MAP_DECORATION)") &&
+                ownedModule.contains("unit.findAll(ObjectCreationExpr::class.java)") &&
+                ownedModule.contains("applyStringEdits(source, edits.distinctBy { it.first })"),
+            "MapDecoration record migration must use AST offsets and canonical source types"
+        )
+        assertTrue(
+            ownedModule.contains("declaration.find(executable, cursor)") &&
+                ownedModule.contains("findMatchingBrace(executable, openBrace)") &&
+                ownedModule.contains("hasProjectParent(createdType, MAP_DECORATION)") &&
+                ownedModule.contains("val groupStrings = annotationStrings(method, \"Group\")") &&
+                ownedModule.contains("val injectStrings = annotationStrings(method, \"Inject\")") &&
+                ownedModule.contains("legacyMethod(CREATE_LEGACY_RENDER_TARGET)") &&
+                ownedModule.contains("legacyMethod(CREATE_OPTIFINE_RENDER_TARGET)"),
+            "MapDecoration composition must use executable structure, project-parent creation proof, and annotation AST values"
+        )
+        assertTrue(
+            usageBody.contains("var executableCode = maskJavaCommentsAndLiterals(source)") &&
+                usageBody.contains(".findAll(executableCode)") &&
+                usageBody.contains("replaceExecutableRegex("),
+            "MapDecoration usage migration must use executable declarations and edits"
         )
         assertTrue(
             offenders.isEmpty(),
-            "MapDecoration migrations must not infer from comments or rewrite strings: $offenders"
+            "MapDecoration migrations must not infer from comments, raw source, or guessed type names: $offenders"
         )
     }
 
     @Test
     fun `legacy entity type AABB migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyEntityTypeAabbCalls")
         assertTrue(start >= 0, "migrateLegacyEntityTypeAabbCalls is missing")
         val end = source.indexOf("private fun findExpressionReceiverStart", start + 1).let {
@@ -5630,10 +5587,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy block valid spawn migration uses executable method and constructor evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyBlockValidSpawnOverrides")
         assertTrue(start >= 0, "migrateLegacyBlockValidSpawnOverrides is missing")
         val end = source.indexOf("private fun migrateLegacyBlockAndEntityCapabilityAccessors", start + 1).let {
@@ -5653,17 +5607,25 @@ class MappingCompletenessTest {
 
         assertTrue(
             body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
-                body.contains("LexicalPreservingPrinter.setup(cu)") &&
-                body.contains("cu.findAll(ClassOrInterfaceDeclaration::class.java)") &&
+                body.contains("val parsed = parser.parse(source)") &&
+                body.contains("val compilationUnit = parsed.result.orElseThrow") &&
+                body.contains("Cannot parse legacy Block isValidSpawn override") &&
+                body.contains("LexicalPreservingPrinter.setup(compilationUnit)") &&
+                body.contains("compilationUnit.findAll(ClassOrInterfaceDeclaration::class.java)") &&
                 body.contains("method.parameters.size in 4..5") &&
                 body.contains("exactSpawnType(method.parameters[3].typeAsString)") &&
-                body.contains("returnExpression.findAll(NameExpr::class.java)") &&
+                Regex("""returnExpression\s*\.findAll\(NameExpr::class\.java\)""")
+                    .containsMatchIn(body) &&
                 body.contains("owner.constructors.forEach") &&
                 body.contains("ExplicitConstructorInvocationStmt") &&
-                body.contains("MethodCallExpr(properties.clone(), \"isValidSpawn\")") &&
+                body.contains("MethodCallExpr(") &&
+                body.contains("properties.clone()") &&
+                body.contains("\"isValidSpawn\"") &&
                 body.contains("method.remove()") &&
-                body.contains("maskJavaCommentsAndLiterals(withoutEntityType)") &&
-                body.contains("maskJavaCommentsAndLiterals(withoutSpawnPlacements)"),
+                Regex("""maskJavaCommentsAndLiterals\(\s*withoutEntityType\s*\)""")
+                    .containsMatchIn(body) &&
+                Regex("""maskJavaCommentsAndLiterals\(\s*withoutSpawnPlacements\s*\)""")
+                    .containsMatchIn(body),
             "Legacy isValidSpawn migration must prove API types, predicate scope, and every direct constructor path"
         )
         assertTrue(
@@ -5674,10 +5636,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy block and entity capability accessor migration uses executable typed receivers`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyBlockAndEntityCapabilityAccessors")
         assertTrue(start >= 0, "migrateLegacyBlockAndEntityCapabilityAccessors is missing")
         val end = source.indexOf("private fun consumerToItemHandlerStatement", start + 1).let {
@@ -5721,10 +5680,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `production mod event bus listener migrations do not infer owners from java file names`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         fun functionBody(name: String): String {
             val start = source.indexOf("private fun $name")
             assertTrue(start >= 0, "$name is missing")
@@ -5748,7 +5704,7 @@ class MappingCompletenessTest {
             collectRefs.contains("val typeBlocks = javaTypeBlocks(text, executableCode)") &&
                 collectRefs.contains("javaTypeBlockContainingOffset(match.range.first, typeBlocks)") &&
                 staticSubscribers.contains("val typeBlocks = javaTypeBlocks(text, executableCode)") &&
-                staticSubscribers.contains("javaTypeBlockForModAnnotation(annotation.range.last, typeBlocks)") &&
+                staticSubscribers.contains("javaTypeBlockForModAnnotation(annotationRange.last, typeBlocks)") &&
                 staticSubscribers.contains("javaTypeBlockContainingOffset(match.range.first, typeBlocks) == owner") &&
                 staticSubscribers.contains("val ownerPath = javaTypeNestingPath(owner, typeBlocks)") &&
                 staticSubscribers.contains("javaAccessibleTypeReferenceExpression("),
@@ -5762,10 +5718,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `mod bus event extraction and registration resolve event parameter owners`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         fun functionBody(name: String): String {
             val start = source.indexOf("private fun $name")
             assertTrue(start >= 0, "$name is missing")
@@ -5809,10 +5762,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `block codec registry holder migration binds holder owners to declared type blocks`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun findBlockRegistryHolderExpression")
         assertTrue(start >= 0, "findBlockRegistryHolderExpression is missing")
         val end = source.indexOf("\n    private fun ", start + 1).let {
@@ -5934,10 +5884,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy pack resource compat package detection does not synthesize placeholder package segments`() {
-        val structuralPass = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val structuralPass = StructuralRuleSources.text
         val start = structuralPass.indexOf("private fun detectRequiredGeneratedCompatPackage")
         assertTrue(start >= 0, "detectRequiredGeneratedCompatPackage is missing")
         val end = structuralPass.indexOf("\n    private fun migrateLegacyPackResourceApis", start)
@@ -5969,10 +5916,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `custom entity capability LazyOptional bridge uses required source mod ids`() {
-        val structuralPass = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val structuralPass = StructuralRuleSources.text
         val start = structuralPass.indexOf("private fun migrateCustomEntityCapabilities")
         assertTrue(start >= 0, "migrateCustomEntityCapabilities is missing")
         val end = structuralPass.indexOf("\n    private fun findCapabilityImplementations", start)
@@ -6003,10 +5947,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `custom entity attachment register namespace is not selected by capability order`() {
-        val structuralPass = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val structuralPass = StructuralRuleSources.text
         val helperStart = structuralPass.indexOf("private fun attachmentRegisterModIdExpression")
         assertTrue(helperStart >= 0, "attachmentRegisterModIdExpression is missing")
         val helperEnd = structuralPass.indexOf("\n    private fun migrateCustomEntityCapabilities", helperStart)
@@ -6043,10 +5984,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `common LazyOptional import bridge uses required source mod ids`() {
-        val structuralPass = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val structuralPass = StructuralRuleSources.text
         val start = structuralPass.indexOf("private fun migrateCommonNeoForge121Apis")
         assertTrue(start >= 0, "migrateCommonNeoForge121Apis is missing")
         val end = structuralPass.indexOf("\n    private data class", start).let {
@@ -6093,10 +6031,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `attachment LazyOptional getData return migration uses executable method evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyAttachmentGetDataLazyOptionalReturns")
         assertTrue(start >= 0, "migrateLegacyAttachmentGetDataLazyOptionalReturns is missing")
         val end = source.indexOf("private fun migrateAttachmentGetDataIfPresentSource", start + 1).let {
@@ -6126,10 +6061,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `attachment getData ifPresent migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateAttachmentGetDataIfPresentSource")
         assertTrue(start >= 0, "migrateAttachmentGetDataIfPresentSource is missing")
         val end = source.indexOf("private fun migrateLegacyEntityCapabilityOptionalChains", start + 1).let {
@@ -6162,10 +6094,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `entity capability optional chain migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyEntityCapabilityOptionalChains")
         assertTrue(start >= 0, "migrateLegacyEntityCapabilityOptionalChains is missing")
         val end = source.indexOf("private fun migratePlayerCloneCapabilityLifecycleSource", start + 1).let {
@@ -6197,10 +6126,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `player clone capability lifecycle migration uses executable method evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migratePlayerCloneCapabilityLifecycleSource")
         assertTrue(start >= 0, "migratePlayerCloneCapabilityLifecycleSource is missing")
         val end = source.indexOf("private fun migrateLegacyAuthlibProfileFetchSource", start + 1).let {
@@ -6235,10 +6161,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy reviveCaps migration uses executable method range`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyCapabilityReviveCapsSource")
         assertTrue(start >= 0, "migrateLegacyCapabilityReviveCapsSource is missing")
         val end = source.indexOf("private fun cleanupLegacyCapabilityOverrideImports", start + 1).let {
@@ -6268,10 +6191,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy capability cache cleanup uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun removeLegacyCapabilityCacheOnlyMethods")
         assertTrue(start >= 0, "removeLegacyCapabilityCacheOnlyMethods is missing")
         val end = source.indexOf("private data class LegacyCapabilityFacadeSpec", start + 1).let {
@@ -6312,10 +6232,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `JEI recipe category background migration uses executable method ranges`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateJeiRecipeCategoryBackgroundApi")
         assertTrue(start >= 0, "migrateJeiRecipeCategoryBackgroundApi is missing")
         val end = source.indexOf("private fun migrateRequiredRemovalWarningAnnotations", start + 1).let {
@@ -6356,10 +6273,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy skull owner verify migration uses executable method range`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacySkullOwnerVerifyComponentsSource")
         assertTrue(start >= 0, "migrateLegacySkullOwnerVerifyComponentsSource is missing")
         val end = source.indexOf("private fun migrateLegacyItemStackTagWrites", start + 1).let {
@@ -6393,10 +6307,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy shearable signature migration uses executable method ranges`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyShearableSignaturesSource")
         assertTrue(start >= 0, "migrateLegacyShearableSignaturesSource is missing")
         val end = source.indexOf("private fun migrateLegacyIgnoreExplosionSignatureSource", start + 1).let {
@@ -6431,10 +6342,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy ignore explosion signature migration uses executable source`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyIgnoreExplosionSignatureSource")
         assertTrue(start >= 0, "migrateLegacyIgnoreExplosionSignatureSource is missing")
         val end = source.indexOf("private fun migrateDimensionSpecialEffectsCloudSignatureSource", start + 1).let {
@@ -6464,10 +6372,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `dimension cloud render signature migration uses executable method ranges`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateDimensionSpecialEffectsCloudSignatureSource")
         assertTrue(start >= 0, "migrateDimensionSpecialEffectsCloudSignatureSource is missing")
         val end = source.indexOf("private fun migrateCustomDataComponentsSource", start + 1).let {
@@ -6505,10 +6410,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `custom data component child tag migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateCustomDataComponentsSource")
         assertTrue(start >= 0, "migrateCustomDataComponentsSource is missing")
         val end = source.indexOf("private fun migrateBrewingRecipeRegistrationSource", start + 1).let {
@@ -6532,12 +6434,11 @@ class MappingCompletenessTest {
 
         assertTrue(
             body.contains("var executableCode = maskJavaCommentsAndLiterals(result)") &&
-                body.contains("""executableCode.contains("stack.getTagElement(")""") &&
-                body.contains("""executableCode.contains("stack.removeTagKey(")""") &&
+                body.contains("""Regex(""" + "\"\"\"" + """${'$'}receiverPattern\.(?:getTagElement|removeTagKey)\(""" + "\"\"\"" + """).containsMatchIn(executableCode)""") &&
                 body.contains("""executableCode.contains("DataComponents.CUSTOM_DATA")""") &&
                 body.contains("replaceExecutableRegex(result, Regex(Regex.escape(legacyCustomFluidTagCopy)))") &&
-                body.contains("""\bstack\.getTagElement\s*\(""") &&
-                body.contains("""\bstack\.removeTagKey\s*\(""") &&
+                body.contains("""replaceExecutableRegex(result, Regex(""" + "\"\"\"" + """${'$'}receiverPattern\.getTagElement\s*\(""") &&
+                body.contains("""replaceExecutableRegex(result, Regex(""" + "\"\"\"" + """${'$'}receiverPattern\.removeTagKey\s*\(""") &&
                 body.contains("replaceExecutableMethodBody(result, \"setFluidId") &&
                 body.contains("""addExecutableImportIfMissing(result, "net.minecraft.core.component.DataComponents")""") &&
                 body.contains("""executableCode.contains("FluidStack")""") &&
@@ -6558,10 +6459,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `painting variant accessor migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyPaintingVariantAccessors")
         assertTrue(start >= 0, "migrateLegacyPaintingVariantAccessors is missing")
         val end = source.indexOf("private fun migrateLegacyPaintingVariantRegistrySource", start + 1).let {
@@ -6593,10 +6491,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `text color literal migration uses executable call evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateTextColorParseColorLiteralSource")
         assertTrue(start >= 0, "migrateTextColorParseColorLiteralSource is missing")
         val end = source.indexOf("private fun migrateGameProfileDisplayNameComponents", start + 1).let {
@@ -6627,10 +6522,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `game profile display name migration uses executable call evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateGameProfileDisplayNameComponents")
         assertTrue(start >= 0, "migrateGameProfileDisplayNameComponents is missing")
         val end = source.indexOf("private fun migrateRegistryAccessEmptyFallbacks", start + 1).let {
@@ -6661,10 +6553,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `registry access empty fallback migration uses executable token evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateRegistryAccessEmptyFallbacks")
         assertTrue(start >= 0, "migrateRegistryAccessEmptyFallbacks is missing")
         val end = source.indexOf("private fun isRegistryAccessEmptyExpression", start + 1).let {
@@ -6683,10 +6572,11 @@ class MappingCompletenessTest {
 
         assertTrue(
             body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
-                body.contains("executableCode.contains(qualifiedEmpty)") &&
-                body.contains("executableCode.indexOf(qualifiedEmpty, cursor)") &&
+                body.contains("emptyPattern.containsMatchIn(executableCode)") &&
+                body.contains("emptyPattern.findAll(executableCode).forEach { match ->") &&
+                body.contains("val index = match.range.first") &&
                 body.contains("registryAccessExpressionAt(source, index") &&
-                body.contains("edits += index until index + qualifiedEmpty.length to replacement") &&
+                body.contains("edits += match.range to replacement") &&
                 body.contains("Cannot resolve exact HolderLookup.Provider for executable") &&
                 body.contains("return applyStringEdits(source, edits)"),
             "RegistryAccess.EMPTY fallback migration must replace exact executable ranges or fail closed"
@@ -6718,10 +6608,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `game event listener migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyGameEventListenerSource")
         assertTrue(start >= 0, "migrateLegacyGameEventListenerSource is missing")
         val end = source.indexOf("private fun normaliseGameEventHolderComparison", start + 1).let {
@@ -6753,10 +6640,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `json reload deserializer migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateRemovedJsonReloadDeserializersSource")
         assertTrue(start >= 0, "migrateRemovedJsonReloadDeserializersSource is missing")
         val end = source.indexOf("private fun migrateModLoadingContextRegisterConfigSource", start + 1).let {
@@ -6787,10 +6671,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `mod loading context config migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateModLoadingContextRegisterConfigSource")
         assertTrue(start >= 0, "migrateModLoadingContextRegisterConfigSource is missing")
         val end = source.indexOf("private fun migrateMobEffectHolderCallsSource", start + 1).let {
@@ -6826,10 +6707,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `INBTSerializable holder lookup migration uses executable type body evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateINBTSerializableHolderLookupSource")
         assertTrue(start >= 0, "migrateINBTSerializableHolderLookupSource is missing")
         val end = source.indexOf("private fun migrateTooltipContextImportsSource", start + 1).let {
@@ -6870,10 +6748,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `tooltip context import migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateTooltipContextImportsSource")
         assertTrue(start >= 0, "migrateTooltipContextImportsSource is missing")
         val end = source.indexOf("private fun migrateRemovedJsonReloadDeserializersSource", start + 1).let {
@@ -6915,10 +6790,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `mob effect holder migration scopes executable method evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateMobEffectHolderCallsSource")
         assertTrue(start >= 0, "migrateMobEffectHolderCallsSource is missing")
         val end = source.indexOf("private fun migrateHolderValueAccessorsSource", start + 1).let {
@@ -6958,10 +6830,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy game event constructor migration uses executable call and constructor evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyGameEventConstructors")
         assertTrue(start >= 0, "migrateLegacyGameEventConstructors is missing")
         val end = source.indexOf("private fun migrateLegacyBannerPatternConstructors", start + 1).let {
@@ -7010,10 +6879,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `deferred holder game event arguments use executable call evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateDeferredHolderGameEventArguments")
         assertTrue(start >= 0, "migrateDeferredHolderGameEventArguments is missing")
         val end = source.indexOf("private fun migrateLegacyCommonHooksToolChecks", start + 1).let {
@@ -7044,16 +6910,20 @@ class MappingCompletenessTest {
 
     @Test
     fun `tooltip part hiding migration uses executable call evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyTooltipPartHiding")
         assertTrue(start >= 0, "migrateLegacyTooltipPartHiding is missing")
         val end = source.indexOf("private fun parseJavaConstructorParameters", start + 1).let {
             if (it < 0) source.length else it
         }
         val body = source.substring(start, end)
+        val createSurfaces = StructuralRuleSources.file("CreateEffectComponentSurfaces.kt")
+        val modifierStart = createSurfaces.indexOf("private fun planTooltipModifiers")
+        assertTrue(modifierStart >= 0, "Create tooltip modifier migration is missing")
+        val modifierEnd = createSurfaces.indexOf("private fun planLegacyTextAudit", modifierStart + 1).let {
+            if (it < 0) createSurfaces.length else it
+        }
+        val modifierBody = createSurfaces.substring(modifierStart, modifierEnd)
         val offenders = listOf(
             "raw hideTooltipPart prefilter" to """source.contains(".hideTooltipPart(")""",
             "raw tooltip part prefilter" to """source.contains("ItemStack.TooltipPart.ADDITIONAL")""",
@@ -7067,8 +6937,17 @@ class MappingCompletenessTest {
                 body.contains("""executableCode.contains(".hideTooltipPart(")""") &&
                 body.contains("""rewriteExecutableJavaCall(source, "hideTooltipPart")""") &&
                 body.contains("DataComponents.HIDE_ADDITIONAL_TOOLTIP") &&
-                body.contains("ItemStack.TooltipPart.MODIFIERS") &&
-                body.contains("ItemAttributeModifiers.EMPTY).withTooltip(false)"),
+                modifierBody.contains("LexicalPreservingPrinter.setup(parsed.unit)") &&
+                modifierBody.contains("parsed.unit.findAll(MethodCallExpr::class.java)") &&
+                modifierBody.contains("""call.nameAsString != "hideTooltipPart"""") &&
+                modifierBody.contains("parsed.typing.typeOf(") &&
+                modifierBody.contains("!= ITEM_STACK") &&
+                modifierBody.contains("""flag.nameAsString != "MODIFIERS"""") &&
+                modifierBody.contains(
+                    "!parsed.typing.isTypeName(flag.scope.toString(), TOOLTIP_PART)"
+                ) &&
+                modifierBody.contains("ItemAttributeModifiers.EMPTY).withTooltip(false)") &&
+                modifierBody.contains("check(changed)"),
             "Tooltip part hiding migration must use executable call evidence and preserve real replacement semantics"
         )
         assertTrue(
@@ -7079,10 +6958,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `aabb vec3 encapsulating migration uses executable call evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateAabbVec3EncapsulatingFullBlocks")
         assertTrue(start >= 0, "migrateAabbVec3EncapsulatingFullBlocks is missing")
         val end = source.indexOf("private fun javaDeclaredSimpleTypeSets", start + 1).let {
@@ -7112,10 +6988,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `client level entity insertion migration uses executable call evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateClientLevelEntityInsertionCalls")
         assertTrue(start >= 0, "migrateClientLevelEntityInsertionCalls is missing")
         val end = source.indexOf("private fun migrateLegacyResourceLocationValidationSource", start + 1).let {
@@ -7145,10 +7018,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy finalize spawn call migration uses executable call evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun rewriteLegacyFinalizeSpawnCalls")
         assertTrue(start >= 0, "rewriteLegacyFinalizeSpawnCalls is missing")
         val end = source.indexOf("private fun migrateLegacyFinalizeSpawnMixinDescriptors", start + 1).let {
@@ -7182,10 +7052,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `randomizable container loot table migration uses executable call evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateRandomizableContainerLootTableCalls")
         assertTrue(start >= 0, "migrateRandomizableContainerLootTableCalls is missing")
         val end = source.indexOf("private fun migrateContainerEntityLootTableResourceKeys", start + 1).let {
@@ -7217,10 +7084,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `armor foil buffer migration uses executable call evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateArmorFoilBufferCalls")
         assertTrue(start >= 0, "migrateArmorFoilBufferCalls is missing")
         val end = source.indexOf("private fun migrateArmorTrimComponentRendering", start + 1).let {
@@ -7251,10 +7115,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `state switching button texture migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun containsLegacyStateSwitchingButtonInitCall")
         assertTrue(start >= 0, "containsLegacyStateSwitchingButtonInitCall is missing")
         val end = source.indexOf("private fun legacyStateSwitchingButtonAssignmentTarget", start + 1).let {
@@ -7294,10 +7155,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `inventory screen entity preview migration uses executable call evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateInventoryScreenEntityPreviewCalls")
         assertTrue(start >= 0, "migrateInventoryScreenEntityPreviewCalls is missing")
         val end = source.indexOf("private fun migrateLegacyTesselatorSource", start + 1).let {
@@ -7330,10 +7188,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `implicit buffer buildOrThrow migration uses enclosing method evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyClientRenderingSource")
         assertTrue(start >= 0, "migrateLegacyClientRenderingSource is missing")
         val end = source.indexOf("private fun migrateLegacyTesselatorSource", start + 1)
@@ -7363,10 +7218,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy tesselator end migration requires active buffer evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateTesselatorVariableEndCalls")
         assertTrue(start >= 0, "migrateTesselatorVariableEndCalls is missing")
         val end = source.indexOf("private fun migrateTesselatorEndHelperMethods", start + 1)
@@ -7396,10 +7248,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `data result getOrThrow migration uses executable call evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyDataResultGetOrThrowCalls")
         assertTrue(start >= 0, "migrateLegacyDataResultGetOrThrowCalls is missing")
         val end = source.indexOf("private fun migrateKnownVanillaCodecCodecCalls", start + 1).let {
@@ -7429,10 +7278,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `known vanilla codec codec migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateKnownVanillaCodecCodecCalls")
         assertTrue(start >= 0, "migrateKnownVanillaCodecCodecCalls is missing")
         val end = source.indexOf("private fun migrateMapCodecFeatureConstructorArguments", start + 1).let {
@@ -7461,10 +7307,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `record codec builder witness migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateRecordCodecBuilderWitnessSource")
         assertTrue(start >= 0, "migrateRecordCodecBuilderWitnessSource is missing")
         val end = source.indexOf("private fun migrateLegacyTickEventSource", start + 1)
@@ -7494,10 +7337,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `registry object reflection migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyRegistryObjectReflection")
         assertTrue(start >= 0, "migrateLegacyRegistryObjectReflection is missing")
         val end = source.indexOf("private fun payloadPathName", start + 1)
@@ -7528,10 +7368,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy event bus post migration uses executable call and cancellation evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
 
         fun bodyBetween(startMarker: String, endMarker: String): String {
             val start = source.indexOf(startMarker)
@@ -7616,10 +7453,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy FollowOwnerGoal constructor migration uses executable constructor evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyFollowOwnerGoalConstructors")
         assertTrue(start >= 0, "migrateLegacyFollowOwnerGoalConstructors is missing")
         val end = source.indexOf("private fun migrateLegacyDyeColorFloatArrays", start + 1).let {
@@ -7649,10 +7483,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy vanilla block constructor migration uses executable constructor evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyVanillaBlockConstructors121")
         assertTrue(start >= 0, "migrateLegacyVanillaBlockConstructors121 is missing")
         val end = source.indexOf("private fun looksLikeBlockPropertiesExpression", start + 1).let {
@@ -7699,10 +7530,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy model event constructor migration uses executable constructor evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyModelEventSource")
         assertTrue(start >= 0, "migrateLegacyModelEventSource is missing")
         val end = source.indexOf("private fun migrateRegisterAdditionalModelResourceLocations", start + 1).let {
@@ -7734,10 +7562,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy vanilla advancement criterion constructors use executable constructor evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyAdvancementDatagenSource")
         assertTrue(start >= 0, "migrateLegacyAdvancementDatagenSource is missing")
         val end = source.indexOf("private fun legacyCriteriaTriggerExpression", start + 1).let {
@@ -7770,10 +7595,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `criterion instance factory hints use executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun collectCriterionInstanceFactoryHints")
         assertTrue(start >= 0, "collectCriterionInstanceFactoryHints is missing")
         val end = source.indexOf("private fun collectDeferredRegisterOwners", start + 1)
@@ -7808,10 +7630,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy advancement datagen empty criterion factories use executable rewrites`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyAdvancementDatagenSource")
         assertTrue(start >= 0, "migrateLegacyAdvancementDatagenSource is missing")
         val end = source.indexOf("private fun legacyCriteriaTriggerExpression", start + 1).let {
@@ -7840,10 +7659,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy advancement datagen holder id migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyAdvancementDatagenSource")
         assertTrue(start >= 0, "migrateLegacyAdvancementDatagenSource is missing")
         val end = source.indexOf("private fun legacyCriteriaTriggerExpression", start + 1).let {
@@ -7876,10 +7692,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy advancement datagen location predicates use executable provider evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyAdvancementDatagenSource")
         assertTrue(start >= 0, "migrateLegacyAdvancementDatagenSource is missing")
         val end = source.indexOf("private fun legacyCriteriaTriggerExpression", start + 1).let {
@@ -7915,10 +7728,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy advancement datagen import decisions use executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyAdvancementDatagenSource")
         assertTrue(start >= 0, "migrateLegacyAdvancementDatagenSource is missing")
         val end = source.indexOf("private fun legacyCriteriaTriggerExpression", start + 1).let {
@@ -7965,10 +7775,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy neoforge model api constructors use executable constructor evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyNeoForgeModelApiSource")
         assertTrue(start >= 0, "migrateLegacyNeoForgeModelApiSource is missing")
         val end = source.indexOf("private fun migrateAttributeModifierResourceLocationIds", start + 1).let {
@@ -8002,10 +7809,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `attribute modifier constructor id migration uses executable constructor evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateAttributeModifierResourceLocationIds")
         assertTrue(start >= 0, "migrateAttributeModifierResourceLocationIds is missing")
         val end = source.indexOf("private fun modifierConstantPathName", start + 1).let {
@@ -8046,10 +7850,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy advancement rewards constructor migration uses executable constructor evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyLootAndRegistryAccess")
         assertTrue(start >= 0, "migrateLegacyLootAndRegistryAccess is missing")
         val end = source.indexOf("private fun migrateLegacyLootTableResourceLocationRegistry", start + 1).let {
@@ -8079,10 +7880,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy advancement fallback packet migration uses executable token ranges`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyAdvancementHolderApis")
         assertTrue(start >= 0, "migrateLegacyAdvancementHolderApis is missing")
         val end = source.indexOf("private fun migrateLegacyAdvancementParentLoop", start + 1)
@@ -8111,10 +7909,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy advancement holder API migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyAdvancementHolderApis")
         assertTrue(start >= 0, "migrateLegacyAdvancementHolderApis is missing")
         val end = source.indexOf("private fun migrateLegacyAdvancementParentLoop", start + 1)
@@ -8155,10 +7950,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy creative enchantment instance migration uses executable constructor and loop evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyCreativeTabEnchantmentInstances")
         assertTrue(start >= 0, "migrateLegacyCreativeTabEnchantmentInstances is missing")
         val end = source.indexOf("private fun migrateLegacyHolderAccessors", start + 1).let {
@@ -8195,10 +7987,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy enchantment constant rename migration uses executable references`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyEnchantmentConstantNames")
         assertTrue(start >= 0, "migrateLegacyEnchantmentConstantNames is missing")
         val end = source.indexOf("private fun migrateLegacyEnchantmentLevelHelperCall", start + 1).let {
@@ -8225,10 +8014,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy item constructor migration uses executable constructor and superclass evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyItemConstructorsAndProperties")
         assertTrue(start >= 0, "migrateLegacyItemConstructorsAndProperties is missing")
         val end = source.indexOf("private fun migrateLegacyTierLevelSource", start + 1).let {
@@ -8250,7 +8036,7 @@ class MappingCompletenessTest {
         assertTrue(
             body.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
                 body.contains("""executableSource.contains("new SwordItem(")""") &&
-                body.contains("replaceExecutableJavaRegex(source, Regex(\"\"\"\\.meat\\(\\)\"\"\"))") &&
+                body.contains("replaceExecutableJavaRegex(result, Regex(\"\"\"\\.meat\\(\\)\"\"\"))") &&
                 body.contains("replaceExecutableJavaRegex(result, Regex(\"\"\"\\bnew\\s+BowlFoodItem") &&
                 body.contains("""rewriteExecutableJavaNew(result, "SwordItem")""") &&
                 body.contains("containsMatchIn(maskJavaCommentsAndLiterals(result))") &&
@@ -8269,10 +8055,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy sound event supplier constructor migration uses executable declarations and calls`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val collectStart = source.indexOf("private fun collectSoundEventSupplierConstructors")
         assertTrue(collectStart >= 0, "collectSoundEventSupplierConstructors is missing")
         val collectEnd = source.indexOf("private fun isLegacySoundEventSupplierParameter", collectStart + 1).let {
@@ -8320,10 +8103,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `drop experience constructor migration uses executable constructor and call evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val subclassStart = source.indexOf("private fun migrateDropExperienceSubclassConstructorSource")
         assertTrue(subclassStart >= 0, "migrateDropExperienceSubclassConstructorSource is missing")
         val subclassEnd = source.indexOf("private fun migrateDropExperienceConstructorCallSitesSource", subclassStart + 1).let {
@@ -8365,10 +8145,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `stair and flower constructor migrations use executable constructor and call evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         fun body(startMarker: String, endMarker: String): String {
             val start = source.indexOf(startMarker)
             assertTrue(start >= 0, "$startMarker is missing")
@@ -8431,10 +8208,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `map codec serialization migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateMapCodecSerializationCalls")
         assertTrue(start >= 0, "migrateMapCodecSerializationCalls is missing")
         val end = source.indexOf("private fun migrateLegacyDataResultGetOrThrowCalls", start + 1).let {
@@ -8463,10 +8237,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `creative tab entries and bytebuf map migrations use executable call evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
 
         fun bodyBetween(startMarker: String, endMarker: String): String {
             val start = source.indexOf(startMarker)
@@ -8524,10 +8295,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `item stack hover name migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateItemStackHoverNameSource")
         assertTrue(start >= 0, "migrateItemStackHoverNameSource is missing")
         val end = source.indexOf("private fun migrateFriendlyByteBufAmbiguousMethodReferencesSource", start + 1).let {
@@ -8562,10 +8330,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `texture atlas sprite coordinate migration uses executable call evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateTextureAtlasSpriteFloatCoordinateCalls")
         assertTrue(start >= 0, "migrateTextureAtlasSpriteFloatCoordinateCalls is missing")
         val end = source.indexOf("private fun migratePartialTickAccessors", start + 1).let {
@@ -8598,10 +8363,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy gui survival elements migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyGuiSurvivalElementsSource")
         assertTrue(start >= 0, "migrateLegacyGuiSurvivalElementsSource is missing")
         val end = source.indexOf("private fun migrateLegacyJumpFromGroundVisibility", start + 1).let {
@@ -8631,10 +8393,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy model render packed color migration uses executable source evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyModelRenderPackedColorBodies")
         assertTrue(start >= 0, "migrateLegacyModelRenderPackedColorBodies is missing")
         val end = source.indexOf("private fun isLegacyModelPartColorRenderArgs", start + 1).let {
@@ -8963,10 +8722,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `curative item effect migration uses executable call evidence`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyCurativeItemEffectsSource")
         assertTrue(start >= 0, "migrateLegacyCurativeItemEffectsSource is missing")
         val end = source.indexOf("private fun legacyCurativeItemEffectCure", start + 1).let {
@@ -9472,10 +9228,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `nitrogen recipe builder migration does not bind serializer by global uniqueness`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateNitrogenRecipeBuilders")
         assertTrue(start >= 0, "migrateNitrogenRecipeBuilders is missing")
         val end = source.indexOf("private fun collectNitrogenRecipeSerializers", start + 1).let {
@@ -9497,10 +9250,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `serializer backed cooking builder migration uses serializer holder evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateGenericCookingRecipeOutputBuilderSource")
         assertTrue(start >= 0, "migrateGenericCookingRecipeOutputBuilderSource is missing")
         val end = source.indexOf("private data class RecipeFactoryArgument", start + 1).let {
@@ -9533,10 +9283,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `recipe serializer factory generic call migration uses executable call evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateRecipeSerializerFactoryCallSites")
         assertTrue(start >= 0, "migrateRecipeSerializerFactoryCallSites is missing")
         val end = source.indexOf("private fun migrateGenericCookingRecipeOutputBuilderSource", start + 1).let {
@@ -9815,7 +9562,9 @@ class MappingCompletenessTest {
         val itemTarget = functionBody("deriveLegacyEnchantmentItemTarget")
         val constructorArgs = functionBody("extractLegacyConstructorSuperArgs")
         val intReturn = functionBody("parseLegacyIntReturnMethod")
-        val costReturn = functionBody("parseLegacyCostMethod")
+        val costResolver = functionBody("resolveLegacyEnchantmentCost")
+        val costMethods = functionBody("legacyEnchantmentCostMethods")
+        val costExpression = functionBody("parseLegacyCostMethodBody")
         val booleanReturn = functionBody("legacyBooleanReturn")
         val classChainAny = functionBody("legacyClassChainAny")
         val classChainFirst = functionBody("legacyClassChainFirstBoolean")
@@ -9825,7 +9574,6 @@ class MappingCompletenessTest {
             "raw constructor brace match" to (constructorArgs to Regex("""findMatchingBrace\(source""")),
             "raw constructor delimiter match" to (constructorArgs to Regex("""findMatchingDelimiter\(body""")),
             "raw integer return scan" to (intReturn to Regex("""\.find\(body\)""")),
-            "raw cost return scan" to (costReturn to Regex("""\.find\(body\)""")),
             "raw boolean return scan" to (booleanReturn to Regex("""\.find\(body\)""")),
             "raw class-chain extends scan" to (classChainAny to Regex("""\.find\(source\)""")),
             "raw first-boolean class-chain extends scan" to (classChainFirst to Regex("""\.find\(source\)"""))
@@ -9844,8 +9592,20 @@ class MappingCompletenessTest {
                 constructorArgs.contains("findMatchingDelimiter(executableBody, openParen, '(', ')')") &&
                 intReturn.contains("val executableBody = maskJavaCommentsAndLiterals(body)") &&
                 intReturn.contains(".find(executableBody)") &&
-                costReturn.contains("val executableBody = maskJavaCommentsAndLiterals(body)") &&
-                costReturn.contains(".find(executableBody)") &&
+                costResolver.contains("legacyEnchantmentOwnerBody(source, currentClassName, registration, errors)") &&
+                costResolver.contains("if (methods.size > 1)") &&
+                costResolver.contains("val method = methods.single()") &&
+                costResolver.contains("parseLegacyCostMethodBody(it, method.parameterName, methodName, minCost)") &&
+                costMethods.contains("val parsed = localJavaParser().parse(source)") &&
+                costMethods.contains("val packageName = unit.packageDeclaration.map { it.nameAsString }.orElse(\"\")") &&
+                costMethods.contains("val qualifiedName = if (packageName.isBlank())") &&
+                costMethods.contains("qualifiedName == className") &&
+                costMethods.contains("if (owners.size != 1)") &&
+                costMethods.contains("method.parameters.size == 1") &&
+                costMethods.contains("PrimitiveType.Primitive.INT") &&
+                costMethods.contains("method.body.orElse(null)") &&
+                costMethods.contains("?.singleOrNull() as? ReturnStmt") &&
+                costExpression.contains(".matchEntire(normalizedExpression)") &&
                 booleanReturn.contains("val executableBody = maskJavaCommentsAndLiterals(body)") &&
                 booleanReturn.contains(".find(executableBody)") &&
                 classChainAny.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
@@ -9930,10 +9690,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `loot table registry migrations do not use class name suffix inference`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyLootTableResourceLocationRegistry")
         assertTrue(start >= 0, "migrateLegacyLootTableResourceLocationRegistry is missing")
         val end = source.indexOf("\n    private fun ", start + 1).let { if (it < 0) source.length else it }
@@ -10004,10 +9761,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `registry backed item stack predicate migrations do not infer owners from java file names`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun collectLegacyItemStackPredicateOverrideMethods")
         assertTrue(start >= 0, "collectLegacyItemStackPredicateOverrideMethods is missing")
         val end = source.indexOf("private fun migrateLegacyRegistryBackedItemStackPredicateOverrides", start + 1).let {
@@ -10036,10 +9790,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `registry backed item stack predicate registry access requires unique player backed source type`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyRegistryBackedItemStackPredicateOverrides")
         assertTrue(start >= 0, "migrateLegacyRegistryBackedItemStackPredicateOverrides is missing")
         val end = source.indexOf("private fun migrateLegacyItemStackPredicateOverrideCallSites", start + 1).let {
@@ -10073,10 +9824,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy banner component migrations do not infer owners from java file names`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun collectLegacyBannerPatternLayerFactories")
         assertTrue(start >= 0, "collectLegacyBannerPatternLayerFactories is missing")
         val end = source.indexOf("private fun migrateLegacyBannerPatternLayerSource", start + 1).let {
@@ -10112,10 +9860,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy banner pattern constructors require deferred register namespace evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyBannerPatternConstructors")
         assertTrue(start >= 0, "migrateLegacyBannerPatternConstructors is missing")
         val end = source.indexOf("private fun migrateLegacyWallSignBlockCodecSource", start + 1).let {
@@ -10155,10 +9900,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy banner item factory lookup migrations require scoped registry evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun inferBannerPatternRegistryLookupExpression")
         assertTrue(start >= 0, "inferBannerPatternRegistryLookupExpression is missing")
         val end = source.indexOf("private fun inferCreativeTabBannerPatternLookup", start + 1).let {
@@ -10180,10 +9922,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy banner item factory call rewrites use executable source`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun rewriteQualifiedLegacyBannerItemStackFactoryCalls")
         assertTrue(start >= 0, "rewriteQualifiedLegacyBannerItemStackFactoryCalls is missing")
         val end = source.indexOf("private fun looksLikeJavaMethodDeclaration", start + 1).let {
@@ -10215,10 +9954,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `deferred register and holder collectors do not infer owners from java file names`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun registerMissingDeferredRegisterFields")
         assertTrue(start >= 0, "registerMissingDeferredRegisterFields is missing")
         val end = source.indexOf("private fun migrateRecordComponentFieldAccessSource", start + 1).let {
@@ -10240,10 +9976,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `deferred register listener migration uses executable source evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateDeferredRegisterListenerReferences")
         assertTrue(start >= 0, "migrateDeferredRegisterListenerReferences is missing")
         val end = source.indexOf("private fun registerMissingDeferredRegisterFields", start + 1).let {
@@ -10275,10 +10008,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `deferred register array completeness uses executable source evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun registerMissingDeferredRegisterFields")
         assertTrue(start >= 0, "registerMissingDeferredRegisterFields is missing")
         val end = source.indexOf("private fun String.lineStartIndent", start + 1).let {
@@ -10319,10 +10049,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `record component access migration uses executable source evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val collectorStart = source.indexOf("private fun collectJavaRecordComponents")
         assertTrue(collectorStart >= 0, "collectJavaRecordComponents is missing")
         val collectorEnd = source.indexOf("private fun collectFinalMapDecorationSubclassClasses", collectorStart + 1).let {
@@ -10375,10 +10102,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `placement modifier type registry collectors do not infer owners from java file names`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun collectPlacementModifierTypeRegistryFields")
         assertTrue(start >= 0, "collectPlacementModifierTypeRegistryFields is missing")
         val end = source.indexOf("private fun migrateBuiltInPlacementModifierTypeRegistrations", start + 1).let {
@@ -10399,10 +10123,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `placement modifier type migration does not use project mod id namespace fallback`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateBuiltInPlacementModifierTypeRegistrations")
         assertTrue(start >= 0, "migrateBuiltInPlacementModifierTypeRegistrations is missing")
         val end = source.indexOf("private fun migratePlacementModifierTypeDeferredHolderReferences", start + 1).let {
@@ -10426,10 +10147,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `worldgen region accessor migrations do not infer mixin owners from java file names`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun legacyWorldGenRegionStructureManagerAccessor")
         assertTrue(start >= 0, "legacyWorldGenRegionStructureManagerAccessor is missing")
         val end = source.indexOf("private fun rewriteWorldGenRegionStructureManagerAccessorCalls", start + 1).let {
@@ -10482,10 +10200,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `missing mapping alias migrations do not infer owners from java file names`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateMissingMappingsAliases")
         assertTrue(start >= 0, "migrateMissingMappingsAliases is missing")
         val end = source.indexOf("private fun extractMissingMappingAliasRules", start + 1).let {
@@ -10506,10 +10221,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `base packet migrations do not infer owners from java file names`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateBasePacketPayloads")
         assertTrue(start >= 0, "migrateBasePacketPayloads is missing")
         val end = source.indexOf("private fun rewritePacketRelayCalls", start + 1).let {
@@ -10542,10 +10254,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `deferred holder presence migration uses declared owners and executable code`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateDeferredHolderPresenceChecks")
         assertTrue(start >= 0, "migrateDeferredHolderPresenceChecks is missing")
         val end = source.indexOf("private fun migrateMenuScreensRegistration", start + 1).let {
@@ -10576,10 +10285,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `source backed payload migration does not depend on generated network class names`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateSourceBackedAccessorCalls")
         assertTrue(start >= 0, "migrateSourceBackedAccessorCalls is missing")
         val end = source.indexOf("private fun migrateUseItemOnInteractionResultReturns", start + 1).let {
@@ -10603,10 +10309,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `top level packet payload migration does not infer direction from names or client references`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val staticStart = source.indexOf("private fun staticPacketCandidate")
         assertTrue(staticStart >= 0, "staticPacketCandidate is missing")
         val staticEnd = source.indexOf("private fun packetReceptionDirection", staticStart + 1).let {
@@ -10662,10 +10365,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy advancement trigger migration does not depend on fixed project class names`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateAdvancementCriterionTriggers")
         assertTrue(start >= 0, "migrateAdvancementCriterionTriggers is missing")
         val end = source.indexOf("private data class LegacyCriterionRegistration", start + 1).let {
@@ -10689,10 +10389,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy capability facade attachment migration does not depend on dirtiness class names`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyCapabilityFacadeToAttachment")
         assertTrue(start >= 0, "migrateLegacyCapabilityFacadeToAttachment is missing")
         val end = source.indexOf("private fun modIdReferenceForGeneratedClass", start + 1).let {
@@ -10718,10 +10415,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy capability facade lookup migration does not depend on dirtiness class names`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyCapabilityFacadeLookups")
         assertTrue(start >= 0, "migrateLegacyCapabilityFacadeLookups is missing")
         val end = source.indexOf("private fun migrateLegacyCapabilityFacadeToAttachment", start + 1).let {
@@ -10747,10 +10441,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `fluid item capability migration does not depend on custom fluid class names`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateCustomFluidItemCapabilities")
         assertTrue(start >= 0, "migrateCustomFluidItemCapabilities is missing")
         val end = source.indexOf("private data class CuriosItemCapabilityMigration", start + 1).let {
@@ -10787,10 +10478,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `curios item capability migration derives local helper names from source structure`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateCuriosItemCapabilities")
         assertTrue(start >= 0, "migrateCuriosItemCapabilities is missing")
         val end = source.indexOf("private fun registerCuriosItemCapabilitiesOnModBus", start + 1).let {
@@ -10824,10 +10512,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `curios helper and inventory optional migrations use executable source evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateCuriosHelperRemovalApis")
         assertTrue(start >= 0, "migrateCuriosHelperRemovalApis is missing")
         val end = source.indexOf("private fun migrateCuriosAttributeModifierHolderTypes", start + 1).let {
@@ -10862,10 +10547,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `curios attribute modifier holder migration uses executable source evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateCuriosAttributeModifierHolderTypes")
         assertTrue(start >= 0, "migrateCuriosAttributeModifierHolderTypes is missing")
         val end = source.indexOf("private fun migrateAttributeModifierMultimapHolderTypes", start + 1).let {
@@ -10907,10 +10589,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy item max damage migration uses executable item declarations`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyItemMaxDamageCalls")
         assertTrue(start >= 0, "migrateLegacyItemMaxDamageCalls is missing")
         val end = source.indexOf("private fun migrateRecipeHolderIdAndLocalMmlibApi", start + 1).let {
@@ -10943,10 +10622,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `cacheable function optional boundary migration uses executable source evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateCacheableFunctionOptionalBoundaries")
         assertTrue(start >= 0, "migrateCacheableFunctionOptionalBoundaries is missing")
         val end = source.indexOf("private fun migrateRecipeHolderAccess", start + 1).let {
@@ -10982,10 +10658,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `recipe holder access migration binds declared names instead of fixed locals`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateRecipeHolderAccess")
         assertTrue(start >= 0, "migrateRecipeHolderAccess is missing")
         val end = source.indexOf("private fun migrateLegacyItemMaxDamageCalls", start + 1).let {
@@ -11026,10 +10699,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `nitrogen tooltip predicate migration uses executable source evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateNitrogenTooltipPredicateLambdas")
         assertTrue(start >= 0, "migrateNitrogenTooltipPredicateLambdas is missing")
         val end = source.indexOf("private fun migrateNitrogenTooltipPredicateLambda", start + 1).let {
@@ -11062,10 +10732,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `nitrogen block property pair runtime migration uses executable source evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateNitrogenBlockPropertyPairRuntimeAccess")
         assertTrue(start >= 0, "migrateNitrogenBlockPropertyPairRuntimeAccess is missing")
         val end = source.indexOf("private fun migrateRecipeDisplayRecipeIdWithoutHolderSource", start + 1).let {
@@ -11102,10 +10769,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `recipe display recipe id migration uses executable recipe receiver evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateRecipeDisplayRecipeIdWithoutHolderSource")
         assertTrue(start >= 0, "migrateRecipeDisplayRecipeIdWithoutHolderSource is missing")
         val end = source.indexOf("private fun migrateLegacyPlacementBanDisplaySource", start + 1).let {
@@ -11147,10 +10811,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `placement ban display bypass block migration uses executable receiver evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateLegacyPlacementBanDisplaySource")
         assertTrue(start >= 0, "migrateLegacyPlacementBanDisplaySource is missing")
         val end = source.indexOf("private fun replacePlacementBanJeiSetRecipe", start + 1).let {
@@ -11194,10 +10855,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `placement ban display biome migration uses executable receiver evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val helperStart = source.indexOf("private fun migratePlacementBanBiomeAccess")
         assertTrue(helperStart >= 0, "migratePlacementBanBiomeAccess is missing")
         val start = source.indexOf("private fun migrateLegacyPlacementBanDisplaySource")
@@ -11237,10 +10895,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `nullable import cleanup uses executable annotation evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("val nullableExecutableCode = maskJavaCommentsAndLiterals(result)")
         assertTrue(start >= 0, "Nullable import cleanup block is missing")
         val end = source.indexOf("return result", start + 1).let {
@@ -11275,10 +10930,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `nested simplechannel migration does not depend on fixed networking class names`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun migrateKnownNestedSimpleChannelNetworking")
         assertTrue(start >= 0, "migrateKnownNestedSimpleChannelNetworking is missing")
         val end = source.indexOf("private data class ModAccess", start + 1).let {
@@ -11307,10 +10959,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `nested simplechannel packet direction uses executable source evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun nestedPacketDirection")
         assertTrue(start >= 0, "nestedPacketDirection is missing")
         val end = source.indexOf("private fun nestedSimpleChannelModIdExpression", start + 1).let {
@@ -11340,10 +10989,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `nested simplechannel packet discovery uses executable source evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         fun bodyBetween(startMarker: String, endMarker: String): String {
             val start = source.indexOf(startMarker)
             assertTrue(start >= 0, "$startMarker is missing")
@@ -11401,10 +11047,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `legacy simplechannel wrapper cleanup requires payload registration evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("// 8. Replace old SimpleChannel registration class")
         assertTrue(start >= 0, "legacy SimpleChannel replacement block is missing")
         val end = source.indexOf("changes.addAll(cleanupInlineSimpleChannelRegistrations", start + 1).let {
@@ -11441,10 +11084,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `simplechannel packet payload migration requires channel namespace evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
         val start = source.indexOf("private fun transformPacketClasses")
         assertTrue(start >= 0, "transformPacketClasses is missing")
         val end = source.indexOf("private fun detectModBusVariable", start + 1).let {
@@ -11634,10 +11274,7 @@ class MappingCompletenessTest {
 
     @Test
     fun `structural mod id helpers use executable Java evidence`() {
-        val projectRoot = Path.of("").toAbsolutePath()
-        val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val source = StructuralRuleSources.text
 
         fun functionBody(name: String): String {
             val start = source.indexOf("private fun $name")
@@ -11655,7 +11292,6 @@ class MappingCompletenessTest {
         val detectModIdsFromText = functionBody("detectModIdsFromText")
         val javaTypeBlocks = functionBody("javaTypeBlocks")
         val javaStaticFinalStringConstant = functionBody("javaStaticFinalStringConstant")
-        val staticStringConstant = functionBody("hasStaticFinalStringConstant")
         val forbidden = listOf(
             "main class raw annotation scan" to (detectModMainClass to Regex("""@Mod[\s\S]{0,120}containsMatchIn\(text\)""")),
             "main class first-match return" to (detectModMainClass to Regex("""return\s+file""")),
@@ -11667,8 +11303,7 @@ class MappingCompletenessTest {
             "explicit mod id first annotation match" to (explicitModIdReference to Regex("""@Mod[\s\S]{0,160}\.find\(code\)""")),
             "detect text raw direct scan" to (detectModIdsFromText to Regex("""@Mod[\s\S]{0,160}\.find\(text\)""")),
             "detect text raw constant scan" to (detectModIdsFromText to Regex("""\.find\(text\)""")),
-            "detect text first candidate return" to (detectModIdsFromText to Regex("""return\s+it\.groupValues\[1]""")),
-            "static constant raw contains scan" to (staticStringConstant to Regex("""containsMatchIn\(source\)"""))
+            "detect text first candidate return" to (detectModIdsFromText to Regex("""return\s+it\.groupValues\[1]"""))
         )
         val offenders = forbidden
             .filter { (_, scoped) -> scoped.second.containsMatchIn(scoped.first) }
@@ -11694,7 +11329,8 @@ class MappingCompletenessTest {
                 explicitModIdReference.contains("javaModIdReferenceExpression(mainPackage, generatedPackage, owner, constName)") &&
                 explicitModIdReference.contains("references.singleOrNull()?.let { return it }") &&
                 javaModIdReferenceExpression.contains("javaTypeReferenceExpression(mainPackage, generatedPackage, owner)") &&
-                javaTypeReferenceExpression.contains("owner.isPublic") &&
+                // A nested owner is externally referenceable only when its complete enclosing chain is public.
+                javaTypeReferenceExpression.contains("owner.isAccessibleOutsidePackage") &&
                 detectModIdsFromText.contains("val candidates = linkedSetOf<String>()") &&
                 detectModIdsFromText.contains("val code = maskJavaComments(text)") &&
                 detectModIdsFromText.contains("val executableCode = maskJavaCommentsAndLiterals(text)") &&
@@ -11705,10 +11341,7 @@ class MappingCompletenessTest {
                 detectModIdsFromText.contains("return candidates") &&
                 javaTypeBlocks.contains("isPublic = Regex") &&
                 javaTypeBlocks.contains("findMatchingBrace(executableCode, openBrace)") &&
-                javaStaticFinalStringConstant.contains("declaringType == owner") &&
-                staticStringConstant.contains("val code = maskJavaComments(source)") &&
-                staticStringConstant.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
-                staticStringConstant.contains(".find(code)"),
+                javaStaticFinalStringConstant.contains("declaringType == owner"),
             "Structural mod id helpers must read @Mod and constants from comment-masked Java and prove executable source evidence"
         )
         assertTrue(
@@ -11841,6 +11474,24 @@ class MappingCompletenessTest {
             "commented out" to Regex("""commented\s+out""", RegexOption.IGNORE_CASE),
             "placeholder" to Regex("""\bplaceholder\b""", RegexOption.IGNORE_CASE)
         )
+        val allowedHumanReviewContexts = mapOf(
+            "README.md" to listOf(
+                Regex(
+                    """generated\s+projects\s+are\s+candidates\s+for\s+human\s+review\s+and\s+focused\s+gameplay\s+testing""",
+                    setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+                ),
+                Regex(
+                    """human\s+review\s+remains\s+part\s+of\s+preparing\s+a\s+generated\s+project\s+for\s+wider\s+release""",
+                    RegexOption.IGNORE_CASE
+                )
+            ),
+            "docs/releases/0.4.0.md" to listOf(
+                Regex(
+                    """generated\s+code\s+available\s+for\s+human\s+review\s+and\s+focused\s+gameplay\s+testing""",
+                    setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+                )
+            )
+        )
 
         val files = scannedRoots.flatMap { root ->
             when {
@@ -11859,7 +11510,19 @@ class MappingCompletenessTest {
             val relative = projectRoot.relativize(file).invariantSeparatorsPathString
             val text = file.readText()
             forbidden
-                .filter { (_, pattern) -> pattern.containsMatchIn(text) }
+                .filter { (label, pattern) ->
+                    if (label != "human review") {
+                        pattern.containsMatchIn(text)
+                    } else {
+                        val matches = pattern.findAll(text).toList()
+                        val allowed = allowedHumanReviewContexts[relative].orEmpty()
+                        matches.any { match ->
+                            allowed.none { context ->
+                                context.find(text)?.range?.let { match.range.first in it } == true
+                            }
+                        }
+                    }
+                }
                 .map { (label, _) -> "$relative contains $label" }
         }
 
@@ -11969,9 +11632,7 @@ class MappingCompletenessTest {
     @Test
     fun `executable regex helpers preserve source capture groups`() {
         val projectRoot = Path.of("").toAbsolutePath()
-        val structural = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
+        val structural = StructuralRuleSources.text
         val text = projectRoot
             .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
             .readText()

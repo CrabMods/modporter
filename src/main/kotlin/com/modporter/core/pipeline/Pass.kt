@@ -61,4 +61,10 @@ interface Pass {
      * Check if this pass is applicable to the given project.
      */
     fun isApplicable(projectDir: Path): Boolean = true
+
+    /**
+     * Whether the pass migrates the build root (settings, plugin classpath, wrapper) rather than
+     * the mod module; the two differ in a multi-project build (see [GradleModLayout]).
+     */
+    val migratesBuildRoot: Boolean get() = false
 }

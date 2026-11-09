@@ -1,0 +1,1180 @@
+
+    @Test
+    fun `state switching button texture migration uses executable source evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun containsLegacyStateSwitchingButtonInitCall")
+        assertTrue(start >= 0, "containsLegacyStateSwitchingButtonInitCall is missing")
+        val end = source.indexOf("private fun legacyStateSwitchingButtonAssignmentTarget", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw initTextureValues detector" to """source.indexOf("initTextureValues(")""",
+            "raw superclass match" to """containsMatchIn(source)""",
+            "raw superclass replacement" to "source.replace(Regex(",
+            "raw initTextureValues rewrite" to """rewriteJavaCall(source, "initTextureValues")""",
+            "raw LegacyStateSwitchingButton skip check" to """source.contains("extends LegacyStateSwitchingButton")""",
+            "raw object creation scan" to """find(source, cursor)""",
+            "global object creation replace" to "result.replace(before, after)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.indexOf("initTextureValues(", cursor)""") &&
+                body.contains("findMatchingParen(executableCode, openParen)") &&
+                body.contains("""containsMatchIn(maskJavaCommentsAndLiterals(source))""") &&
+                body.contains("replaceExecutableRegex(source, Regex(") &&
+                body.contains("""rewriteExecutableJavaCall(source, "initTextureValues")""") &&
+                body.contains("""executableCode.contains("extends LegacyStateSwitchingButton")""") &&
+                body.contains("new\\s+StateSwitchingButton") &&
+                body.contains(".find(executableCode, cursor)") &&
+                body.contains("replacements.asReversed().forEach"),
+            "StateSwitchingButton texture migration must use executable source for detection, rewriting, and object creation replacement"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "StateSwitchingButton texture migration must not infer or rewrite from comments/strings: $offenders"
+        )
+    }
+
+    @Test
+    fun `inventory screen entity preview migration uses executable call evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateInventoryScreenEntityPreviewCalls")
+        assertTrue(start >= 0, "migrateInventoryScreenEntityPreviewCalls is missing")
+        val end = source.indexOf("private fun migrateLegacyTesselatorSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw InventoryScreen prefilter" to """source.contains("InventoryScreen.renderEntityInInventory")""",
+            "raw follows mouse rewrite" to """rewriteJavaCall(source, "renderEntityInInventoryFollowsMouse")""",
+            "raw direct preview rewrite" to """rewriteJavaCall(result, "renderEntityInInventory")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("InventoryScreen.renderEntityInInventory")""") &&
+                body.contains("""rewriteExecutableJavaCall(source, "renderEntityInInventoryFollowsMouse")""") &&
+                body.contains("""rewriteExecutableJavaCall(result, "renderEntityInInventory")""") &&
+                body.contains("""receiver != "InventoryScreen"""") &&
+                body.contains("args.size != 7") &&
+                body.contains("new org.joml.Vector3f"),
+            "InventoryScreen entity preview migration must use executable call evidence and preserve preview argument semantics"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "InventoryScreen entity preview migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `implicit buffer buildOrThrow migration uses enclosing method evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyClientRenderingSource")
+        assertTrue(start >= 0, "migrateLegacyClientRenderingSource is missing")
+        val end = source.indexOf("private fun migrateLegacyTesselatorSource", start + 1)
+        assertTrue(end > start, "migrateLegacyClientRenderingSource boundary is missing")
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "first BufferBuilder fallback" to "firstBufferBuilder",
+            "whole file buffer replacement" to """result.replace("buffer.buildOrThrow()"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("migrateImplicitBufferBuildOrThrowCalls(result)") &&
+                source.contains("private fun migrateImplicitBufferBuildOrThrowCalls") &&
+                source.contains("hasBufferBuilderBufferDeclarationOutsideMethods(executableSource, methods)") &&
+                source.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                source.contains("val method = methods.singleOrNull { match.range.first in it.range }") &&
+                source.contains("method must declare exactly one non-buffer BufferBuilder"),
+            "Implicit buffer.buildOrThrow migration must use executable enclosing-method BufferBuilder evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Implicit buffer.buildOrThrow migration must not use whole-file first BufferBuilder fallback: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy tesselator end migration requires active buffer evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateTesselatorVariableEndCalls")
+        assertTrue(start >= 0, "migrateTesselatorVariableEndCalls is missing")
+        val end = source.indexOf("private fun migrateTesselatorEndHelperMethods", start + 1)
+        assertTrue(end > start, "migrateTesselatorVariableEndCalls boundary is missing")
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "first buffer fallback" to """bufferVariables.first()"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableBody = maskJavaCommentsAndLiterals(body)") &&
+                body.contains("val endingTesselator = endingTesselators.singleOrNull()") &&
+                body.contains("activeTesselatorBufferVariable(executableBody, bufferVariables, endingTesselator)") &&
+                body.contains("Cannot derive active Tesselator BufferBuilder") &&
+                body.contains("replaceExecutableRegex(body, Regex(") &&
+                source.contains("private fun activeTesselatorBufferVariable") &&
+                source.contains("return activeBuffers.singleOrNull()"),
+            "Legacy Tesselator.end migration must derive a unique active BufferBuilder from executable begin(...) assignments"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy Tesselator.end migration must not choose an arbitrary BufferBuilder: $offenders"
+        )
+    }
+
+    @Test
+    fun `data result getOrThrow migration uses executable call evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyDataResultGetOrThrowCalls")
+        assertTrue(start >= 0, "migrateLegacyDataResultGetOrThrowCalls is missing")
+        val end = source.indexOf("private fun migrateKnownVanillaCodecCodecCalls", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw getOrThrow prefilter" to """source.contains(".getOrThrow(")""",
+            "raw getOrThrow rewrite" to """rewriteJavaCall(source, "getOrThrow")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains(".getOrThrow(")""") &&
+                body.contains("""rewriteExecutableJavaCall(source, "getOrThrow")""") &&
+                body.contains("args.size != 2") &&
+                body.contains("""args[0].trim() != "true""""),
+            "DataResult getOrThrow migration must inspect executable calls and preserve argument-shape checks"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "DataResult getOrThrow migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `known vanilla codec codec migration uses executable source evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateKnownVanillaCodecCodecCalls")
+        assertTrue(start >= 0, "migrateKnownVanillaCodecCodecCalls is missing")
+        val end = source.indexOf("private fun migrateMapCodecFeatureConstructorArguments", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw CODEC.codec prefilter" to """source.contains(".CODEC.codec()")""",
+            "raw CODEC.codec regex replacement" to """.replace(result) { match -> match.groupValues[1] }"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains(".CODEC.codec()")""") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("match.groupValues[1]"),
+            "Known vanilla CODEC.codec() migration must rewrite executable Java only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Known vanilla CODEC.codec() migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `record codec builder witness migration uses executable source evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateRecordCodecBuilderWitnessSource")
+        assertTrue(start >= 0, "migrateRecordCodecBuilderWitnessSource is missing")
+        val end = source.indexOf("private fun migrateLegacyTickEventSource", start + 1)
+        assertTrue(end > start, "migrateRecordCodecBuilderWitnessSource boundary is missing")
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw RecordCodecBuilder prefilter" to """source.contains("RecordCodecBuilder.")""",
+            "raw ResourceLocation list codec replacement" to """source.replace("ResourceLocation.CODEC.codec().listOf()", "ResourceLocation.CODEC.listOf()")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("RecordCodecBuilder.")""") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("""ResourceLocation\.CODEC\.codec\(\)\.listOf\(\)""") &&
+                body.contains(""".findAll(maskJavaCommentsAndLiterals(result))""") &&
+                body.contains("""maskJavaCommentsAndLiterals(result).contains("RecordCodecBuilder.<${'$'}typeName>")"""),
+            "RecordCodecBuilder witness migration must rewrite ResourceLocation CODEC list calls only in executable source"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "RecordCodecBuilder witness migration must not rewrite comments or arbitrary strings: $offenders"
+        )
+    }
+
+    @Test
+    fun `registry object reflection migration uses executable source evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyRegistryObjectReflection")
+        assertTrue(start >= 0, "migrateLegacyRegistryObjectReflection is missing")
+        val end = source.indexOf("private fun payloadPathName", start + 1)
+        assertTrue(end > start, "migrateLegacyRegistryObjectReflection boundary is missing")
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw RegistryObject.class prefilter" to """source.contains("RegistryObject.class")""",
+            "raw RegistryObject.class replacement" to """source.replace("RegistryObject.class", "DeferredHolder.class")""",
+            "raw RegistryObject fields replacement" to """source.replace("RegistryObject fields", "DeferredHolder fields")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("RegistryObject.class")""") &&
+                body.contains("replaceExecutableRegex(source, Regex") &&
+                body.contains("val maskedResult = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("executableSlice.trimStart().startsWith(\"return\")") &&
+                body.contains("applyStringEdits(result, messageEdits)"),
+            "RegistryObject reflection migration must rewrite class literals and paired return messages with executable evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "RegistryObject reflection migration must not rewrite comments or arbitrary strings: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy event bus post migration uses executable call and cancellation evidence`() {
+        val source = StructuralRuleSources.text
+
+        fun bodyBetween(startMarker: String, endMarker: String): String {
+            val start = source.indexOf(startMarker)
+            assertTrue(start >= 0, "$startMarker is missing")
+            val end = source.indexOf(endMarker, start + 1).let { if (it < 0) source.length else it }
+            return source.substring(start, end)
+        }
+
+        val migrationBody = bodyBetween(
+            "private fun migrateLegacyEventBusPostBooleans",
+            "private fun collapseDuplicateEventBusPostCancellationChecks"
+        )
+        val stripBody = bodyBetween(
+            "private fun stripUnusedEventBusPostCancellationChecks",
+            "private data class EventBusPostCall"
+        )
+        val finderBody = bodyBetween(
+            "private fun findEventBusPostCall",
+            "private fun trailingIsCanceledCallEnds"
+        )
+        val trailingBody = bodyBetween(
+            "private fun trailingIsCanceledCallEnds",
+            "private fun isStandaloneExpressionStart"
+        )
+        val standaloneBody = bodyBetween(
+            "private fun isStandaloneExpressionStart",
+            "private fun migrateLegacyFollowOwnerGoalConstructors"
+        )
+        val combined = migrationBody + stripBody + finderBody + trailingBody + standaloneBody
+        val offenders = listOf(
+            "raw post prefilter" to """source.contains("EVENT_BUS.post(")""",
+            "raw post rewrite" to """rewriteJavaCall(source, "post")""",
+            "raw post finder" to "source.indexOf(token, cursor)",
+            "raw post paren matcher" to "findMatchingParen(source, openParen)",
+            "raw receiver finder" to "findExpressionReceiverStart(source, tokenIndex)",
+            "raw isCanceled chain match" to """source.startsWith(".isCanceled", dot)""",
+            "raw isCanceled paren matcher" to "findMatchingParen(source, openParen)"
+        )
+            .filter { (_, marker) -> combined.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            migrationBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                migrationBody.contains("""executableCode.contains("EVENT_BUS.post(")""") &&
+                migrationBody.contains("""rewriteExecutableJavaCall(source, "post")""") &&
+                migrationBody.contains("""receiver.endsWith("EVENT_BUS")"""),
+            "Legacy event bus post migration must rewrite post calls from executable Java only"
+        )
+        assertTrue(
+            stripBody.contains("val executableCode = maskJavaCommentsAndLiterals(result)") &&
+                stripBody.contains("skipWhitespace(executableCode, chainEnd)") &&
+                stripBody.contains("executableCode[next] != ';'"),
+            "Unused event bus post cancellation cleanup must inspect executable semicolon context"
+        )
+        assertTrue(
+            finderBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                finderBody.contains("executableCode.indexOf(token, cursor)") &&
+                finderBody.contains("findMatchingParen(executableCode, openParen)") &&
+                finderBody.contains("findExpressionReceiverStart(executableCode, tokenIndex)") &&
+                finderBody.contains("splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))"),
+            "Event bus post finder must locate calls in executable Java while preserving original arguments"
+        )
+        assertTrue(
+            trailingBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                trailingBody.contains("""executableCode.startsWith(".isCanceled", dot)""") &&
+                trailingBody.contains("findMatchingParen(executableCode, openParen)") &&
+                trailingBody.contains("executableCode.substring(openParen + 1, closeParen).isNotBlank()"),
+            "Event bus cancellation-chain cleanup must identify isCanceled calls in executable Java only"
+        )
+        assertTrue(
+            standaloneBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                standaloneBody.contains("executableCode.substring(lineStart, expressionStart).trim().isNotEmpty()") &&
+                standaloneBody.contains("executableCode[index].isWhitespace()") &&
+                standaloneBody.contains("executableCode[index] == ';'"),
+            "Standalone event bus post cleanup must ignore comments and literals around the expression"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy event bus post migration must not rewrite or clean comments and string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy FollowOwnerGoal constructor migration uses executable constructor evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyFollowOwnerGoalConstructors")
+        assertTrue(start >= 0, "migrateLegacyFollowOwnerGoalConstructors is missing")
+        val end = source.indexOf("private fun migrateLegacyDyeColorFloatArrays", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw FollowOwnerGoal prefilter" to """source.contains("new FollowOwnerGoal(")""",
+            "raw FollowOwnerGoal constructor rewrite" to """rewriteJavaNew(source, "FollowOwnerGoal")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("new FollowOwnerGoal(")""") &&
+                body.contains("""rewriteExecutableJavaNew(source, "FollowOwnerGoal")""") &&
+                body.contains("args.size == 5") &&
+                body.contains("args.take(4)"),
+            "FollowOwnerGoal constructor migration must locate constructors in executable Java and preserve old five-argument semantics"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "FollowOwnerGoal constructor migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy vanilla block constructor migration uses executable constructor evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyVanillaBlockConstructors121")
+        assertTrue(start >= 0, "migrateLegacyVanillaBlockConstructors121 is missing")
+        val end = source.indexOf("private fun looksLikeBlockPropertiesExpression", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val constructors = listOf(
+            "StairBlock",
+            "ButtonBlock",
+            "FenceGateBlock",
+            "PressurePlateBlock",
+            "DoorBlock",
+            "TrapDoorBlock",
+            "TorchBlock",
+            "WallTorchBlock"
+        )
+        val offenders = constructors.flatMap { constructor ->
+            listOf(
+                "raw $constructor prefilter" to """source.contains("new $constructor(")""",
+                "raw $constructor constructor rewrite" to """rewriteJavaNew(result, "$constructor")"""
+            )
+        }
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                constructors.all { constructor ->
+                    body.contains("""executableCode.contains("new $constructor(")""") &&
+                        body.contains("""rewriteExecutableJavaNew(result, "$constructor")""")
+                } &&
+                body.contains("looksLikeBlockPropertiesExpression") &&
+                body.contains("looksLikeParticleOptionsExpression") &&
+                body.contains("args.size != 4") &&
+                body.contains("args.size != 3") &&
+                body.contains("args.size != 2"),
+            "Legacy vanilla block constructor migration must locate every supported constructor in executable Java and preserve signature-shape checks"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy vanilla block constructor migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy model event constructor migration uses executable constructor evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyModelEventSource")
+        assertTrue(start >= 0, "migrateLegacyModelEventSource is missing")
+        val end = source.indexOf("private fun migrateRegisterAdditionalModelResourceLocations", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw ModelResourceLocation prefilter" to """source.contains("ModelResourceLocation")""",
+            "raw ModelEvent prefilter" to """source.contains("ModelEvent.")""",
+            "raw ModelResourceLocation constructor rewrite" to """rewriteJavaNew(result, "ModelResourceLocation")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("ModelResourceLocation")""") &&
+                body.contains("""executableCode.contains("ModelEvent.")""") &&
+                body.contains("""rewriteExecutableJavaNew(result, "ModelResourceLocation")""") &&
+                body.contains("args.size != 2") &&
+                body.contains("variant == \"\\\"inventory\\\"\""),
+            "Legacy model event constructor migration must locate ModelResourceLocation constructors in executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy model event constructor migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy vanilla advancement criterion constructors use executable constructor evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyAdvancementDatagenSource")
+        assertTrue(start >= 0, "migrateLegacyAdvancementDatagenSource is missing")
+        val end = source.indexOf("private fun legacyCriteriaTriggerExpression", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val constructors = listOf(
+            "ItemUsedOnLocationTrigger.TriggerInstance",
+            "PlayerTrigger.TriggerInstance",
+            "InventoryChangeTrigger.TriggerInstance"
+        )
+        val offenders = constructors
+            .filter { constructor -> body.contains("""rewriteJavaNew(result, "$constructor")""") }
+            .map { constructor -> "raw $constructor constructor rewrite" }
+
+        assertTrue(
+            constructors.all { constructor ->
+                body.contains("""rewriteExecutableJavaNew(result, "$constructor")""")
+            } &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("returnPattern.findAll(executableCode)") &&
+                body.contains("signaturePattern.findAll(maskJavaCommentsAndLiterals(result))"),
+            "Legacy vanilla advancement criterion constructor migrations must locate constructors and return helpers in executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy vanilla advancement criterion constructor migrations must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `criterion instance factory hints use executable source evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun collectCriterionInstanceFactoryHints")
+        assertTrue(start >= 0, "collectCriterionInstanceFactoryHints is missing")
+        val end = source.indexOf("private fun collectDeferredRegisterOwners", start + 1)
+        assertTrue(end > start, "collectCriterionInstanceFactoryHints boundary is missing")
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw record Instance prefilter" to "source.contains(\"record Instance\")",
+            "raw Criterion prefilter" to "source.contains(\"Criterion<\")",
+            "raw factory regex search" to ".findAll(source)",
+            "raw factory body search" to "source.substring(openBrace, closeBrace).contains(\"new Instance(Optional.empty())\")",
+            "raw DeferredHolder prefilter" to "source.contains(\"DeferredHolder\")",
+            "raw CriterionTrigger prefilter" to "source.contains(\"CriterionTrigger\")"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("executableCode.contains(\"record Instance\")") &&
+                body.contains("executableCode.contains(\"Criterion<\")") &&
+                body.contains(".findAll(executableCode)") &&
+                body.contains("executableCode.substring(openBrace, closeBrace).contains(\"new Instance(Optional.empty())\")") &&
+                body.contains("executableCode.contains(\"DeferredHolder\")") &&
+                body.contains("executableCode.contains(\"CriterionTrigger\")"),
+            "Criterion instance factory hints must derive from executable Java declarations and factory bodies"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Criterion instance factory hints must not be inferred from comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy advancement datagen empty criterion factories use executable rewrites`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyAdvancementDatagenSource")
+        assertTrue(start >= 0, "migrateLegacyAdvancementDatagenSource is missing")
+        val end = source.indexOf("private fun legacyCriteriaTriggerExpression", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw ContextAwarePredicate empty constructor replacement" to ".replace(result, \"new ${'$'}1(java.util.Optional.empty())\")",
+            "raw empty factory replacement" to ".replace(result, factoryCall)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("replaceExecutableRegex(\n            result,\n            Regex(\"\"\"new\\s+([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*\\.Instance)") &&
+                body.contains("ContextAwarePredicate\\.ANY") &&
+                body.contains("replaceExecutableRegex(\n                result,\n                Regex(\"\"\"new\\s+${'$'}{Regex.escape(instanceType)}") &&
+                body.contains(") { factoryCall }"),
+            "Legacy advancement datagen empty criterion factory migration must rewrite only executable constructor tokens"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy advancement datagen empty criterion factory migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy advancement datagen holder id migration uses executable source evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyAdvancementDatagenSource")
+        assertTrue(start >= 0, "migrateLegacyAdvancementDatagenSource is missing")
+        val end = source.indexOf("private fun legacyCriteriaTriggerExpression", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw advancement save holder rewrite" to ".replace(result) { match -> \"AdvancementHolder",
+            "raw PlayerTrigger advancement argument rewrite" to ".replace(result, \"${'$'}1AdvancementHolder${'$'}2\")",
+            "raw PlayerTrigger criterion return rewrite" to ".replace(result, \"${'$'}1 Criterion<PlayerTrigger.TriggerInstance> ${'$'}2\")",
+            "raw holder id replacement" to "result.replace(\"${'$'}variable.getId()",
+            "raw getAdvancement id replacement" to "result.replace(\".getAdvancement().getId()",
+            "raw holder variable search" to ".findAll(result)\n            .map { it.groupValues[1] }\n            .toSet()\n        holderVariables.forEach"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableHolderSource = maskJavaCommentsAndLiterals(result)") &&
+                body.contains(".findAll(executableHolderSource)") &&
+                body.contains("replaceExecutableRegex(result, Regex(\"\"\"\\b${'$'}{Regex.escape(variable)}\\.getId") &&
+                body.contains("replaceExecutableRegex(result, Regex(\"\"\"\\.getAdvancement\\s*\\("),
+            "Legacy advancement datagen holder-id migration must use executable Java declarations and accessors"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy advancement datagen holder-id migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy advancement datagen location predicates use executable provider evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyAdvancementDatagenSource")
+        assertTrue(start >= 0, "migrateLegacyAdvancementDatagenSource is missing")
+        val end = source.indexOf("private fun legacyCriteriaTriggerExpression", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw provider name search" to ".find(result)\n            ?.groupValues\n            ?.get(1)",
+            "raw inDimension replacement" to "result.replace(\"LocationPredicate.inDimension(",
+            "raw inBiome replacement" to "result.replace(\"LocationPredicate.inBiome(",
+            "raw inStructure replacement" to "result.replace(\"LocationPredicate.inStructure(",
+            "raw inBiome invocation rewrite" to "rewriteJavaInvocationArguments(result, \"LocationPredicate.Builder.inBiome\")",
+            "raw inStructure invocation rewrite" to "rewriteJavaInvocationArguments(result, \"LocationPredicate.Builder.inStructure\")"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains(".find(executableCode)") &&
+                body.contains("replaceExecutableRegex(\n            result,\n            Regex(\"\"\"\\bLocationPredicate\\.inDimension") &&
+                body.contains("replaceExecutableRegex(\n                result,\n                Regex(\"\"\"\\bLocationPredicate\\.inBiome") &&
+                body.contains("replaceExecutableRegex(\n                result,\n                Regex(\"\"\"\\bLocationPredicate\\.inStructure") &&
+                body.contains("rewriteExecutableJavaInvocationArguments(result, \"LocationPredicate.Builder.inBiome\")") &&
+                body.contains("rewriteExecutableJavaInvocationArguments(result, \"LocationPredicate.Builder.inStructure\")"),
+            "Legacy advancement datagen LocationPredicate migration must use executable Java providers, tokens, and invocation arguments"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy advancement datagen LocationPredicate migration must not use comments or string literals as provider or rewrite evidence: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy advancement datagen import decisions use executable source evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyAdvancementDatagenSource")
+        assertTrue(start >= 0, "migrateLegacyAdvancementDatagenSource is missing")
+        val end = source.indexOf("private fun legacyCriteriaTriggerExpression", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw hasNbt prefilter" to "if (result.contains(\".hasNbt(\"))",
+            "raw addStat invocation rewrite" to "rewriteJavaInvocationArguments(result, \"addStat\")",
+            "raw custom stat import prefilter" to "if (result.contains(\"ResourceKey.create(Registries.CUSTOM_STAT\"))",
+            "raw data component import" to "addImportIfMissing(result, \"net.minecraft.core.component.DataComponentPredicate\")",
+            "raw custom stat import" to "addImportIfMissing(result, \"net.minecraft.core.registries.BuiltInRegistries\")",
+            "raw AdvancementHolder import prefilter" to "result.contains(\"AdvancementHolder\")",
+            "raw AdvancementHolder import addition" to "addImportIfMissing(result, \"net.minecraft.advancements.AdvancementHolder\")",
+            "raw Advancement import removal" to "removeImport(result, \"net.minecraft.advancements.Advancement\")",
+            "raw Advancement import retention check" to "containsMatchIn(withoutAdvancementImport)",
+            "raw Criterion import prefilter" to "result.contains(\"Criterion<\")",
+            "raw CriteriaTriggers import prefilter" to "result.contains(\"CriteriaTriggers.\")"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("maskJavaCommentsAndLiterals(result).contains(\".hasNbt(\")") &&
+                body.contains("val beforeCustomDataPredicate = result") &&
+                body.contains("if (result != beforeCustomDataPredicate)") &&
+                body.contains("rewriteExecutableJavaInvocationArguments(result, \"addStat\")") &&
+                body.contains("maskJavaCommentsAndLiterals(result).contains(\"ResourceKey.create(Registries.CUSTOM_STAT\")") &&
+                body.contains("addExecutableImportIfMissing(result, \"net.minecraft.core.component.DataComponentPredicate\")") &&
+                body.contains("addExecutableImportIfMissing(result, \"net.minecraft.core.registries.BuiltInRegistries\")") &&
+                body.contains("maskJavaCommentsAndLiterals(result).contains(\"AdvancementHolder\")") &&
+                body.contains("removeExecutableImport(result, \"net.minecraft.advancements.Advancement\")") &&
+                body.contains("maskJavaCommentsAndLiterals(withoutAdvancementImport)") &&
+                body.contains("val executableResult = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("executableResult.contains(\"Criterion<\")") &&
+                body.contains("executableResult.contains(\"CriteriaTriggers.\")"),
+            "Legacy advancement datagen import and cleanup decisions must use executable Java evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy advancement datagen imports must not be added or retained because of comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy neoforge model api constructors use executable constructor evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyNeoForgeModelApiSource")
+        assertTrue(start >= 0, "migrateLegacyNeoForgeModelApiSource is missing")
+        val end = source.indexOf("private fun migrateAttributeModifierResourceLocationIds", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw BlockElementFace prefilter" to """source.contains("BlockElementFace")""",
+            "raw ResourceLocation prefilter" to """source.contains("new ResourceLocation(")""",
+            "raw BlockElementFace constructor rewrite" to """rewriteJavaNew(result, "BlockElementFace")""",
+            "raw ResourceLocation constructor rewrite" to """rewriteJavaNew(result, "ResourceLocation")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("BlockElementFace")""") &&
+                body.contains("""executableCode.contains("new ResourceLocation(")""") &&
+                body.contains("""rewriteExecutableJavaNew(result, "BlockElementFace")""") &&
+                body.contains("""rewriteExecutableJavaNew(result, "ResourceLocation")""") &&
+                body.contains("findAll(maskJavaCommentsAndLiterals(result))") &&
+                body.contains("replaceExecutableJavaRegex(result"),
+            "Legacy NeoForge model API constructor and face accessor migrations must inspect executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy NeoForge model API migrations must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `attribute modifier constructor id migration uses executable constructor evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateAttributeModifierResourceLocationIds")
+        assertTrue(start >= 0, "migrateAttributeModifierResourceLocationIds is missing")
+        val end = source.indexOf("private fun modifierConstantPathName", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val namespaceCallStart = source.indexOf("attributeModifierNamespaceExpression = explicitModIdReferenceForGeneratedClass")
+        assertTrue(namespaceCallStart >= 0, "attribute modifier namespace evidence call is missing")
+        val namespaceCall = source.substring(
+            namespaceCallStart,
+            minOf(source.length, namespaceCallStart + 300)
+        )
+        val offenders = listOf(
+            "raw AttributeModifier constructor rewrite" to """rewriteJavaNew(result, "AttributeModifier")""",
+            "raw string-name AttributeModifier regex rewrite" to """new\s+AttributeModifier\(\s*"([^"]+)""",
+            "raw uuid-name AttributeModifier regex rewrite" to """new\s+AttributeModifier\(\s*([^,\r\n]+)\s*,\s*"([^"]+)""",
+            "project mod id namespace fallback parameter" to "projectModIdExpression",
+            "metadata mod id namespace fallback" to "metadataModId = modId"
+        )
+            .filter { (_, marker) -> body.contains(marker) || namespaceCall.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("""rewriteExecutableJavaNew(result, "AttributeModifier")""") &&
+                body.contains("args.size == 3") &&
+                body.contains("args.size != 4") &&
+                body.contains("idAliases[legacyId] = id") &&
+                body.contains("legacyName.endsWith(\".toString()\")") &&
+                body.contains("declaredModClassIdExpression") &&
+                namespaceCall.contains("metadataModId = null"),
+            "AttributeModifier constructor id migration must parse executable Java constructors and preserve legacy name/id semantics without metadata namespace fallbacks"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "AttributeModifier constructor id migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy advancement rewards constructor migration uses executable constructor evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyLootAndRegistryAccess")
+        assertTrue(start >= 0, "migrateLegacyLootAndRegistryAccess is missing")
+        val end = source.indexOf("private fun migrateLegacyLootTableResourceLocationRegistry", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw AdvancementRewards constructor prefilter" to """result.contains("new AdvancementRewards(")""",
+            "raw AdvancementRewards constructor rewrite" to """rewriteJavaNew(result, "AdvancementRewards")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("maskJavaCommentsAndLiterals(result).contains(\"new AdvancementRewards(\")") &&
+                body.contains("""rewriteExecutableJavaNew(result, "AdvancementRewards")""") &&
+                body.contains("if (args.size != 4)") &&
+                body.contains("legacyResourceLocationArrayToList(args[1])") &&
+                body.contains("legacyResourceLocationArrayToList(args[2])"),
+            "Legacy AdvancementRewards constructor migration must locate constructors in executable Java and preserve loot/recipe argument semantics"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy AdvancementRewards constructor migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy advancement fallback packet migration uses executable token ranges`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyAdvancementHolderApis")
+        assertTrue(start >= 0, "migrateLegacyAdvancementHolderApis is missing")
+        val end = source.indexOf("private fun migrateLegacyAdvancementParentLoop", start + 1)
+        assertTrue(end > start, "migrateLegacyAdvancementHolderApis boundary is missing")
+        val body = source.substring(start, end)
+        val fallbackMarker = """FALLBACK\s*:\s*new"""
+        val fallbackIndex = body.indexOf(fallbackMarker)
+        assertTrue(fallbackIndex >= 0, "fallback packet rewrite marker is missing")
+        val fallbackRewriteWindow = body.substring(maxOf(0, fallbackIndex - 120), minOf(body.length, fallbackIndex + 260))
+        val offenders = listOf(
+            "raw fallback packet regex rewrite" to fallbackRewriteWindow.contains(".replace(result)")
+        )
+            .filter { (_, present) -> present }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            fallbackRewriteWindow.contains("replaceExecutableRegex(") &&
+                fallbackRewriteWindow.contains(fallbackMarker),
+            "Legacy advancement fallback packet migration must rewrite only executable token ranges"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy advancement fallback packet migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy advancement holder API migration uses executable source evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyAdvancementHolderApis")
+        assertTrue(start >= 0, "migrateLegacyAdvancementHolderApis is missing")
+        val end = source.indexOf("private fun migrateLegacyAdvancementParentLoop", start + 1)
+        assertTrue(end > start, "migrateLegacyAdvancementHolderApis boundary is missing")
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw getAdvancement lookup replacement" to "result.replace(\".getAdvancements().getAdvancement(",
+            "raw manager get lookup replacement" to "result.replace(\"manager.getAdvancements().get(",
+            "raw server manager variable replacement" to "result.replace(\"${'$'}managerVariable.getAdvancement(",
+            "raw predicate type replacement" to "result.replace(\"Predicate<Advancement>\"",
+            "raw javadoc link replacement" to "result.replace(\"{@link Advancement}\"",
+            "raw matches signature replacement" to "result.replace(\"matches(Advancement ",
+            "raw retrieveOverride signature replacement" to "result.replace(\"retrieveOverride(Advancement ",
+            "raw checkRoot signature replacement" to "result.replace(\"checkRoot(Advancement ",
+            "raw holder getDisplay replacement" to "result.replace(\"${'$'}variable.getDisplay()",
+            "raw holder getId replacement" to "result.replace(\"${'$'}variable.getId()",
+            "raw holder variable search" to ".findAll(result)",
+            "raw Advancement import removal" to """removeImport(result, "net.minecraft.advancements.Advancement")""",
+            "comment-sensitive Advancement import retention" to "containsMatchIn(withoutAdvancementImport)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableManagerSource = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("val executableHolderSource = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("addExecutableImportIfMissing(result, \"net.minecraft.advancements.AdvancementHolder\")") &&
+                body.contains("removeExecutableImport(result, \"net.minecraft.advancements.Advancement\")") &&
+                body.contains("maskJavaCommentsAndLiterals(withoutAdvancementImport)"),
+            "Legacy advancement holder migration must derive and rewrite only executable Java API surfaces"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy advancement holder migration must not rewrite comments/strings or retain imports because of comments: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy creative enchantment instance migration uses executable constructor and loop evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyCreativeTabEnchantmentInstances")
+        assertTrue(start >= 0, "migrateLegacyCreativeTabEnchantmentInstances is missing")
+        val end = source.indexOf("private fun migrateLegacyHolderAccessors", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw EnchantmentInstance source prefilter" to """source.contains("EnchantmentInstance(")""",
+            "raw ENCHANTMENTS source prefilter" to """source.contains(".ENCHANTMENTS.getEntries()")""",
+            "raw EnchantmentInstance constructor prefilter" to """result.contains("new EnchantmentInstance(Enchantments.")""",
+            "raw EnchantmentInstance constructor rewrite" to """rewriteJavaNew(result, "EnchantmentInstance")""",
+            "raw helper invocation rewrite" to """rewriteJavaInvocationArguments(result, helperName)"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableSource.contains("EnchantmentInstance(")""") &&
+                body.contains("val initialExecutableCode = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("""rewriteExecutableJavaNew(result, "EnchantmentInstance")""") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("findMatchingBrace(executableCode, openBrace)") &&
+                body.contains("rewriteExecutableJavaInvocationArguments(result, helperName)") &&
+                body.contains("replaceExecutableJavaRegex(result, loopPattern)") &&
+                body.contains("replaceExecutableJavaRegex(result, Regex(\"\"\"new\\s+EnchantmentInstance"),
+            "Legacy creative tab EnchantmentInstance migration must locate constructors, helper calls, and enchantment loops in executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy creative tab EnchantmentInstance migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy enchantment constant rename migration uses executable references`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyEnchantmentConstantNames")
+        assertTrue(start >= 0, "migrateLegacyEnchantmentConstantNames is missing")
+        val end = source.indexOf("private fun migrateLegacyEnchantmentLevelHelperCall", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw Enchantments prefilter" to """source.contains("Enchantments.")""",
+            "raw Enchantments constant replacement" to "result.replace(\"Enchantments.${'$'}oldName\", \"Enchantments.${'$'}newName\")"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("maskJavaCommentsAndLiterals(source).contains(\"Enchantments.\")") &&
+                body.contains("replaceExecutableJavaRegex(result, Regex(\"\"\"\\bEnchantments\\."),
+            "Legacy enchantment constant rename migration must rewrite only executable Enchantments references"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy enchantment constant rename migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy item constructor migration uses executable constructor and superclass evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyItemConstructorsAndProperties")
+        assertTrue(start >= 0, "migrateLegacyItemConstructorsAndProperties is missing")
+        val end = source.indexOf("private fun migrateLegacyTierLevelSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw SwordItem source prefilter" to """source.contains("new SwordItem(")""",
+            "raw meat source prefilter" to """source.contains(".meat()")""",
+            "raw meat replacement" to """source.replace(".meat()", "")""",
+            "raw BowlFoodItem replacement" to """result.replace("new BowlFoodItem(", "new Item(")""",
+            "raw SwordItem constructor rewrite" to """rewriteJavaNew(result, "SwordItem")""",
+            "raw SwordItem superclass check" to "Regex(\"\"\"\\bextends\\s+SwordItem\\b\"\"\").containsMatchIn(result)",
+            "raw super constructor rewrite" to """rewriteSuperConstructorCalls(result)"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableSource.contains("new SwordItem(")""") &&
+                body.contains("replaceExecutableJavaRegex(result, Regex(\"\"\"\\.meat\\(\\)\"\"\"))") &&
+                body.contains("replaceExecutableJavaRegex(result, Regex(\"\"\"\\bnew\\s+BowlFoodItem") &&
+                body.contains("""rewriteExecutableJavaNew(result, "SwordItem")""") &&
+                body.contains("containsMatchIn(maskJavaCommentsAndLiterals(result))") &&
+                body.contains("migrateLegacyToolItemSuperConstructors(result)") &&
+                body.contains("LexicalPreservingPrinter.setup(cu)") &&
+                body.contains("type.constructors.forEach") &&
+                body.contains("ExplicitConstructorInvocationStmt") &&
+                body.contains("net.minecraft.world.item.SwordItem"),
+            "Legacy item constructor migration must prove exact Minecraft owners and class-scoped constructors"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy item constructor migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy sound event supplier constructor migration uses executable declarations and calls`() {
+        val source = StructuralRuleSources.text
+        val collectStart = source.indexOf("private fun collectSoundEventSupplierConstructors")
+        assertTrue(collectStart >= 0, "collectSoundEventSupplierConstructors is missing")
+        val collectEnd = source.indexOf("private fun isLegacySoundEventSupplierParameter", collectStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val collectBody = source.substring(collectStart, collectEnd)
+        val migrateStart = source.indexOf("private fun migrateLegacySoundEventSupplierLambdas")
+        assertTrue(migrateStart >= 0, "migrateLegacySoundEventSupplierLambdas is missing")
+        val migrateEnd = source.indexOf("private fun migrateSoundEventSupplierConstructorArgs", migrateStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val migrateBody = source.substring(migrateStart, migrateEnd)
+        val offenders = listOf(
+            "raw package scan" to ".find(source)",
+            "raw declared type scan" to ".findAll(source)",
+            "raw constructor scan" to "constructorPattern.findAll(source)",
+            "raw record scan" to "recordPattern.findAll(source)",
+            "raw SoundEvents prefilter" to """source.contains("SoundEvents.")""",
+            "raw supplier constructor rewrite" to "rewriteJavaNew(result, className)",
+            "raw super scan" to """result.indexOf("super(", cursor)""",
+            "raw super paren match" to "findMatchingParen(result, openParen)"
+        )
+            .filter { (_, marker) -> collectBody.contains(marker) || migrateBody.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            collectBody.contains("val code = maskJavaComments(source)") &&
+                collectBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                collectBody.contains(".find(code)") &&
+                collectBody.contains(".findAll(executableCode)") &&
+                collectBody.contains("constructorPattern.findAll(executableCode)") &&
+                collectBody.contains("recordPattern.findAll(executableCode)") &&
+                migrateBody.contains("maskJavaCommentsAndLiterals(source).contains(\"SoundEvents.\")") &&
+                migrateBody.contains("rewriteExecutableJavaNew(result, className)") &&
+                migrateBody.contains("val executableCode = maskJavaCommentsAndLiterals(result)") &&
+                migrateBody.contains("executableCode.indexOf(\"super(\", cursor)") &&
+                migrateBody.contains("findMatchingParen(executableCode, openParen)"),
+            "Legacy sound event supplier migration must collect constructor signatures and call sites from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy sound event supplier migration must not use comments or string literals as constructor evidence: $offenders"
+        )
+    }
+
+    @Test
+    fun `drop experience constructor migration uses executable constructor and call evidence`() {
+        val source = StructuralRuleSources.text
+        val subclassStart = source.indexOf("private fun migrateDropExperienceSubclassConstructorSource")
+        assertTrue(subclassStart >= 0, "migrateDropExperienceSubclassConstructorSource is missing")
+        val subclassEnd = source.indexOf("private fun migrateDropExperienceConstructorCallSitesSource", subclassStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val subclassBody = source.substring(subclassStart, subclassEnd)
+        val callStart = source.indexOf("private fun migrateDropExperienceConstructorCallSitesSource")
+        assertTrue(callStart >= 0, "migrateDropExperienceConstructorCallSitesSource is missing")
+        val callEnd = source.indexOf("private fun looksLikeIntProviderExpression", callStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val callBody = source.substring(callStart, callEnd)
+        val offenders = listOf(
+            "raw subclass constructor scan" to "constructorPattern.find(source)",
+            "raw subclass constructor replace" to "constructorPattern.replaceFirst",
+            "raw subclass super replace" to "superPattern.replace(result",
+            "raw callsite prefilter" to """source.contains("new ")""",
+            "raw int provider variable scan" to ".findAll(source)",
+            "raw drop experience callsite rewrite" to "rewriteJavaNew(result, className)"
+        )
+            .filter { (_, marker) -> subclassBody.contains(marker) || callBody.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            subclassBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                subclassBody.contains("constructorPattern.find(executableCode)") &&
+                subclassBody.contains("replaceExecutableJavaRegex(result, superPattern)") &&
+                callBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                callBody.contains("executableCode.contains(\"new \")") &&
+                callBody.contains(".findAll(executableCode)") &&
+                callBody.contains("rewriteExecutableJavaNew(result, className)"),
+            "DropExperienceBlock constructor migration must use executable Java evidence for declarations and calls"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "DropExperienceBlock constructor migration must not use comments or string literals as evidence: $offenders"
+        )
+    }
+
+    @Test
+    fun `stair and flower constructor migrations use executable constructor and call evidence`() {
+        val source = StructuralRuleSources.text
+        fun body(startMarker: String, endMarker: String): String {
+            val start = source.indexOf(startMarker)
+            assertTrue(start >= 0, "$startMarker is missing")
+            val end = source.indexOf(endMarker, start + 1).let { if (it < 0) source.length else it }
+            return source.substring(start, end)
+        }
+
+        val stairSubclassBody = body(
+            "private fun migrateStairBlockSubclassConstructorSource",
+            "private fun migrateStairBlockConstructorCallSitesSource"
+        )
+        val stairCallBody = body(
+            "private fun migrateStairBlockConstructorCallSitesSource",
+            "private fun migrateFlowerBlockMobEffectHolderConstructors"
+        )
+        val flowerSubclassBody = body(
+            "private fun migrateFlowerBlockSubclassConstructorSource",
+            "private fun migrateFlowerBlockConstructorCallSitesSource"
+        )
+        val flowerCallBody = body(
+            "private fun migrateFlowerBlockConstructorCallSitesSource",
+            "private fun normalizeMobEffectHolderExpression"
+        )
+        val combined = listOf(stairSubclassBody, stairCallBody, flowerSubclassBody, flowerCallBody).joinToString("\n")
+        val offenders = listOf(
+            "raw subclass constructor scan" to "constructorPattern.find(source)",
+            "raw subclass super scan" to "superPattern.containsMatchIn(source)",
+            "raw subclass constructor replace" to "constructorPattern.replaceFirst",
+            "raw stair callsite prefilter" to """source.contains(".defaultBlockState()")""",
+            "raw flower callsite prefilter" to """source.contains("Effects.")""",
+            "raw supplier import retention" to "containsMatchIn(result)",
+            "raw flower supplier retention" to """result.contains("Supplier<")""",
+            "raw constructor callsite rewrite" to "rewriteJavaNew(result, className)"
+        )
+            .filter { (_, marker) -> combined.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            stairSubclassBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                stairSubclassBody.contains("constructorPattern.find(executableCode)") &&
+                stairSubclassBody.contains("superPattern.containsMatchIn(executableCode)") &&
+                stairSubclassBody.contains("val resultExecutableCode = maskJavaCommentsAndLiterals(result)") &&
+                stairCallBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                stairCallBody.contains("executableCode.contains(\".defaultBlockState()\")") &&
+                stairCallBody.contains("rewriteExecutableJavaNew(result, className)") &&
+                flowerSubclassBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                flowerSubclassBody.contains("constructorPattern.find(executableCode)") &&
+                flowerSubclassBody.contains("superPattern.containsMatchIn(executableCode)") &&
+                flowerSubclassBody.contains("val resultExecutableCode = maskJavaCommentsAndLiterals(result)") &&
+                flowerCallBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                flowerCallBody.contains("executableCode.contains(\"Effects.\")") &&
+                flowerCallBody.contains("rewriteExecutableJavaNew(result, className)"),
+            "StairBlock and FlowerBlock constructor migrations must use executable Java evidence for declarations and calls"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "StairBlock and FlowerBlock constructor migrations must not use comments or string literals as evidence: $offenders"
+        )
+    }
+
+    @Test
+    fun `map codec serialization migration uses executable source evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateMapCodecSerializationCalls")
+        assertTrue(start >= 0, "migrateMapCodecSerializationCalls is missing")
+        val end = source.indexOf("private fun migrateLegacyDataResultGetOrThrowCalls", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw CODEC prefilter" to """source.contains(".CODEC.")""",
+            "raw CODEC replacement" to ".replace(result)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains(".CODEC.")""") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("""\.CODEC)\.(parse|encodeStart)"""),
+            "MapCodec serialization migration must rewrite only executable CODEC parse/encodeStart calls"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "MapCodec serialization migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `creative tab entries and bytebuf map migrations use executable call evidence`() {
+        val source = StructuralRuleSources.text
+
+        fun bodyBetween(startMarker: String, endMarker: String): String {
+            val start = source.indexOf(startMarker)
+            assertTrue(start >= 0, "$startMarker is missing")
+            val end = source.indexOf(endMarker, start + 1).let { if (it < 0) source.length else it }
+            return source.substring(start, end)
+        }
+
+        val creativeBody = bodyBetween(
+            "private fun migrateCreativeTabEntriesAccessSource",
+            "private fun migrateItemStackHoverNameSource"
+        )
+        val networkBody = bodyBetween(
+            "private fun migrateFriendlyByteBufAmbiguousMethodReferencesSource",
+            "private fun streamEncoderMethodReferenceLambda"
+        )
+        val offenders = listOf(
+            "raw putAfter prefilter" to creativeBody.contains("""source.contains(".getEntries().putAfter(")"""),
+            "raw putAfter rewrite" to creativeBody.contains("""rewriteJavaCall(source, "putAfter")"""),
+            "raw writeMap prefilter" to networkBody.contains("""source.contains(".writeMap(")"""),
+            "raw readMap prefilter" to networkBody.contains("""source.contains(".readMap(")"""),
+            "raw writeUUID prefilter" to networkBody.contains("""source.contains("FriendlyByteBuf::writeUUID")"""),
+            "raw readUUID prefilter" to networkBody.contains("""source.contains("FriendlyByteBuf::readUUID")"""),
+            "raw writeMap rewrite" to networkBody.contains("""rewriteJavaCall(source, "writeMap")"""),
+            "raw readMap rewrite" to networkBody.contains("""rewriteJavaCall(result, "readMap")""")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            creativeBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                creativeBody.contains("""executableCode.contains(".getEntries().putAfter(")""") &&
+                creativeBody.contains("""rewriteExecutableJavaCall(source, "putAfter")""") &&
+                creativeBody.contains("""receiver.endsWith(".getEntries()")""") &&
+                creativeBody.contains("""receiver.removeSuffix(".getEntries()")"""),
+            "Creative tab entry insertion migration must derive calls from executable Java and preserve receiver shape"
+        )
+        assertTrue(
+            networkBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                networkBody.contains("""executableCode.contains(".writeMap(")""") &&
+                networkBody.contains("""executableCode.contains(".readMap(")""") &&
+                networkBody.contains("""executableCode.contains("FriendlyByteBuf::writeUUID")""") &&
+                networkBody.contains("""executableCode.contains("FriendlyByteBuf::readUUID")""") &&
+                networkBody.contains("""rewriteExecutableJavaCall(source, "writeMap")""") &&
+                networkBody.contains("""rewriteExecutableJavaCall(result, "readMap")""") &&
+                networkBody.contains("streamEncoderMethodReferenceLambda") &&
+                networkBody.contains("streamDecoderMethodReferenceLambda"),
+            "FriendlyByteBuf map migration must derive calls and method-reference evidence from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Creative tab and FriendlyByteBuf map migrations must not rewrite comments or string literals: $offenders"
+        )
+    }

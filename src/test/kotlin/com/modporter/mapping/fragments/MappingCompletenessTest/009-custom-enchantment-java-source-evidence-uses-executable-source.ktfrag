@@ -1,0 +1,1183 @@
+
+    @Test
+    fun `custom enchantment Java source evidence uses executable source`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+
+        fun functionBody(name: String): String {
+            val start = source.indexOf("private fun $name")
+            assertTrue(start >= 0, "$name is missing")
+            val end = source.indexOf("\n    private fun ", start + 1).let {
+                if (it < 0) source.length else it
+            }
+            return source.substring(start, end)
+        }
+
+        val packageName = functionBody("legacyJavaPackageName")
+        val context = functionBody("legacyJavaContext")
+        val modIds = functionBody("detectLegacyJavaModIds")
+        val classIndex = functionBody("indexJavaClassSources")
+        val registrations = functionBody("collectLegacyCustomEnchantmentRegistrations")
+        val categories = functionBody("collectLegacyEnchantmentCategories")
+        val registryEntries = functionBody("collectLegacyRegistryEntries")
+        val itemEntries = functionBody("collectLegacyItemRegistryEntries")
+        val resourceKeys = functionBody("migrateCustomEnchantmentResourceKeys")
+        val forbidden = listOf(
+            "raw package scan" to (packageName to Regex("""\.find\(source\)""")),
+            "raw import scan" to (context to Regex("""\.findAll\(source\)""")),
+            "raw mod id constant scan" to (modIds to Regex("""\.findAll\(source\)""")),
+            "raw mod annotation scan" to (modIds to Regex("""\.find\(source\)""")),
+            "raw class source scan" to (classIndex to Regex("""classPattern\.findAll\(source\)""")),
+            "raw custom enchantment register prefilter" to (registrations to Regex("""source\.contains\("DeferredRegister"\)""")),
+            "raw custom enchantment register scan" to (registrations to Regex("""registerPattern\.findAll\(source\)""")),
+            "raw custom enchantment entry scan" to (registrations to Regex("""entryPattern\.findAll\(source\)""")),
+            "raw enchantment category scan" to (categories to Regex("""categoryPattern\.findAll\(source\)""")),
+            "raw registry register scan" to (registryEntries to Regex("""registerPattern\.findAll\(source\)""")),
+            "raw registry entry scan" to (registryEntries to Regex("""entryPattern\.findAll\(source\)""")),
+            "raw item register scan" to (itemEntries to Regex("""registerPattern\.findAll\(source\)""")),
+            "raw item entry scan" to (itemEntries to Regex("""entryPattern\.findAll\(source\)""")),
+            "raw resource key prefilter" to (resourceKeys to Regex("""source\.contains\("DeferredRegister<Enchantment>"\)""")),
+            "raw resource key register scan" to (resourceKeys to Regex("""registerPattern\.find\(source\)""")),
+            "raw resource key entry scan" to (resourceKeys to Regex("""entryPattern\.findAll\(source\)""")),
+            "raw resource key register replacement" to (resourceKeys to Regex("""registerPattern\.replace\(source""")),
+            "raw resource key entry replacement" to (resourceKeys to Regex("""entryPattern\.replace\(result"""))
+        )
+        val offenders = forbidden
+            .filter { (_, scoped) -> scoped.second.containsMatchIn(scoped.first) }
+            .map { (label, _) -> "TextReplacementPass contains $label" }
+
+        assertTrue(
+            packageName.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                packageName.contains(".find(executableSource)") &&
+                context.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                context.contains(".findAll(executableSource)") &&
+                modIds.contains("val code = maskJavaComments(source)") &&
+                modIds.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                modIds.contains(".findAll(code)") &&
+                modIds.contains("val typeDeclarations = findJavaTypeDeclarations(code)") &&
+                modIds.contains("declaration.start > match.range.last") &&
+                modIds.contains("val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)") &&
+                modIds.contains("executableSegment.contains(\"static\")") &&
+                modIds.contains("executableSegment.contains(\"String\")") &&
+                modIds.contains("executableSegment.contains(\"@Mod\")") &&
+                modIds.contains("executableSegment.contains(\"class\")") &&
+                classIndex.contains("findJavaTypeDeclarations(source)") &&
+                classIndex.contains(".filter { it.kind == \"class\" }") &&
+                registrations.contains("val code = maskJavaComments(source)") &&
+                registrations.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                registrations.contains("executableCode.contains(\"DeferredRegister\")") &&
+                registrations.contains("registerPattern.findAll(code)") &&
+                registrations.contains("entryPattern.findAll(code)") &&
+                registrations.contains("val registerSegment = executableCode.substring(registerMatch.range.first, registerMatch.range.last + 1)") &&
+                registrations.contains("val entrySegment = executableCode.substring(entryMatch.range.first, entryMatch.range.last + 1)") &&
+                categories.contains("val code = maskJavaComments(source)") &&
+                categories.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                categories.contains("categoryPattern.findAll(code)") &&
+                categories.contains("val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)") &&
+                categories.contains("executableSegment.contains(\"EnchantmentCategory\")") &&
+                registryEntries.contains("val code = maskJavaComments(source)") &&
+                registryEntries.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                registryEntries.contains("registerPattern.findAll(code)") &&
+                registryEntries.contains("entryPattern.findAll(code)") &&
+                registryEntries.contains("source = code") &&
+                itemEntries.contains("val code = maskJavaComments(source)") &&
+                itemEntries.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                itemEntries.contains("registerPattern.findAll(code)") &&
+                itemEntries.contains("entryPattern.findAll(code)") &&
+                itemEntries.contains("source = code") &&
+                resourceKeys.contains("val code = maskJavaComments(source)") &&
+                resourceKeys.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                resourceKeys.contains("executableCode.contains(\"DeferredRegister\")") &&
+                resourceKeys.contains("executableCode.contains(\"DeferredHolder\")") &&
+                resourceKeys.contains("executableCode.contains(\"Enchantment\")") &&
+                resourceKeys.contains("executableCode.contains(\".register(\")") &&
+                resourceKeys.contains("registerPattern.find(code)") &&
+                resourceKeys.contains("val registerField = registerMatch.groupValues[1]") &&
+                resourceKeys.contains("Regex.escape(registerField)") &&
+                resourceKeys.contains("entryPattern.findAll(code)") &&
+                resourceKeys.contains("val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)") &&
+                resourceKeys.contains("executableSegment.contains(\"\$registerField.register(\")") &&
+                resourceKeys.contains("val replacements = mutableListOf(registerMatch.range to helper)") &&
+                resourceKeys.contains("replacements.sortedByDescending") &&
+                resourceKeys.contains("replaceExecutableRegex("),
+            "Custom enchantment Java source evidence must come from executable Java, with string values read only from comment-masked source"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Custom enchantment Java source evidence must not treat comments, strings, or text blocks as package/import/mod-id/class evidence: $offenders"
+        )
+    }
+
+    @Test
+    fun `custom enchantment data migrations do not infer declaration owners from java file names`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = source.indexOf("private fun detectLegacyJavaModIds")
+        assertTrue(start >= 0, "detectLegacyJavaModIds is missing")
+        val end = source.indexOf("private fun collectLegacyItemRegistryEntries", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "java file-name owner" to Regex("""file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
+            "type-name elvis file fallback" to Regex("""javaTypeNameContainingOffset\([^)]*\)\s*\?:\s*file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
+            "bare @Mod file owner fallback" to Regex("""ids\.putIfAbsent\([^,\r\n]*className"""),
+            "global simple mod id table" to Regex("""\bsimpleValues\b""")
+        )
+        val offenders = forbidden
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "TextReplacementPass custom enchantment data contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Custom enchantment data migrations must use source-declared Java owners, not Java file-name fallback inference: $offenders"
+        )
+    }
+
+    @Test
+    fun `custom enchantment class derivation uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+
+        fun functionBody(name: String): String {
+            val start = source.indexOf("private fun $name")
+            assertTrue(start >= 0, "$name is missing")
+            val end = source.indexOf("\n    private fun ", start + 1).let {
+                if (it < 0) source.length else it
+            }
+            return source.substring(start, end)
+        }
+
+        val itemTarget = functionBody("deriveLegacyEnchantmentItemTarget")
+        val constructorArgs = functionBody("extractLegacyConstructorSuperArgs")
+        val intReturn = functionBody("parseLegacyIntReturnMethod")
+        val costResolver = functionBody("resolveLegacyEnchantmentCost")
+        val costMethods = functionBody("legacyEnchantmentCostMethods")
+        val costExpression = functionBody("parseLegacyCostMethodBody")
+        val booleanReturn = functionBody("legacyBooleanReturn")
+        val classChainAny = functionBody("legacyClassChainAny")
+        val classChainFirst = functionBody("legacyClassChainFirstBoolean")
+        val forbidden = listOf(
+            "raw item support scan" to (itemTarget to Regex("""\.find\(source\)""")),
+            "raw constructor declaration scan" to (constructorArgs to Regex("""\.find\(source\)""")),
+            "raw constructor brace match" to (constructorArgs to Regex("""findMatchingBrace\(source""")),
+            "raw constructor delimiter match" to (constructorArgs to Regex("""findMatchingDelimiter\(body""")),
+            "raw integer return scan" to (intReturn to Regex("""\.find\(body\)""")),
+            "raw boolean return scan" to (booleanReturn to Regex("""\.find\(body\)""")),
+            "raw class-chain extends scan" to (classChainAny to Regex("""\.find\(source\)""")),
+            "raw first-boolean class-chain extends scan" to (classChainFirst to Regex("""\.find\(source\)"""))
+        )
+        val offenders = forbidden
+            .filter { (_, scoped) -> scoped.second.containsMatchIn(scoped.first) }
+            .map { (label, _) -> "TextReplacementPass contains $label" }
+
+        assertTrue(
+            itemTarget.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                itemTarget.contains(".find(executableCode)") &&
+                constructorArgs.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                constructorArgs.contains(".find(executableCode)") &&
+                constructorArgs.contains("findMatchingBrace(executableCode, openBrace)") &&
+                constructorArgs.contains("val executableBody = executableCode.substring(openBrace + 1, closeBrace)") &&
+                constructorArgs.contains("findMatchingDelimiter(executableBody, openParen, '(', ')')") &&
+                intReturn.contains("val executableBody = maskJavaCommentsAndLiterals(body)") &&
+                intReturn.contains(".find(executableBody)") &&
+                costResolver.contains("legacyEnchantmentOwnerBody(source, currentClassName, registration, errors)") &&
+                costResolver.contains("if (methods.size > 1)") &&
+                costResolver.contains("val method = methods.single()") &&
+                costResolver.contains("parseLegacyCostMethodBody(it, method.parameterName, methodName, minCost)") &&
+                costMethods.contains("val parsed = localJavaParser().parse(source)") &&
+                costMethods.contains("val packageName = unit.packageDeclaration.map { it.nameAsString }.orElse(\"\")") &&
+                costMethods.contains("val qualifiedName = if (packageName.isBlank())") &&
+                costMethods.contains("qualifiedName == className") &&
+                costMethods.contains("if (owners.size != 1)") &&
+                costMethods.contains("method.parameters.size == 1") &&
+                costMethods.contains("PrimitiveType.Primitive.INT") &&
+                costMethods.contains("method.body.orElse(null)") &&
+                costMethods.contains("?.singleOrNull() as? ReturnStmt") &&
+                costExpression.contains(".matchEntire(normalizedExpression)") &&
+                booleanReturn.contains("val executableBody = maskJavaCommentsAndLiterals(body)") &&
+                booleanReturn.contains(".find(executableBody)") &&
+                classChainAny.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                classChainAny.contains(".find(executableSource)") &&
+                classChainFirst.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                classChainFirst.contains(".find(executableSource)"),
+            "Custom enchantment class derivation must prove constructors, returns, item support, and extends clauses from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Custom enchantment class derivation must not treat comments, strings, or text blocks as class semantics: $offenders"
+        )
+    }
+
+    @Test
+    fun `custom enchantment effect derivation uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+
+        fun functionBody(name: String): String {
+            val start = source.indexOf("private fun $name")
+            assertTrue(start >= 0, "$name is missing")
+            val end = source.indexOf("\n    private fun ", start + 1).let {
+                if (it < 0) source.length else it
+            }
+            return source.substring(start, end)
+        }
+
+        val exclusiveSet = functionBody("deriveLegacyExclusiveSet")
+        val igniteEffect = functionBody("derivePostHurtIgniteEffect")
+        val mobEffect = functionBody("derivePostHurtMobEffect")
+        val methodCalls = functionBody("legacyMethodCalls")
+        val damageBonus = functionBody("deriveDamageBonusEffect")
+        val chance = functionBody("legacyRandomChancePerLevel")
+        val forbidden = listOf(
+            "raw exclusive-set reference scan" to (exclusiveSet to Regex("""\.findAll\(body\)""")),
+            "raw ignite effect containment" to (igniteEffect to Regex("""body\.contains\("setSecondsOnFire\("\)""")),
+            "raw ignite effect scan" to (igniteEffect to Regex("""\.find\(body\)""")),
+            "raw helper body effect containment" to (mobEffect to Regex("""legacyMethodBody\(source,\s*call\.name\)[\s\S]{0,120}\?\.contains\("new MobEffectInstance\("\)""")),
+            "raw helper effect reference scan" to (mobEffect to Regex("""\.find\(helperBody\)""")),
+            "raw method call scan" to (methodCalls to Regex("""pattern\.findAll\(source\)""")),
+            "raw method call open paren" to (methodCalls to Regex("""source\.indexOf\('\(',\s*match\.range\.first\)""")),
+            "raw method call delimiter" to (methodCalls to Regex("""findMatchingDelimiter\(source""")),
+            "raw method call argument extraction" to (methodCalls to Regex("""splitTopLevelArguments\(source\.substring""")),
+            "raw damage bonus return scan" to (damageBonus to Regex("""\.find\(body\)""")),
+            "raw random chance scan" to (chance to Regex("""\.find\(source\)"""))
+        )
+        val offenders = forbidden
+            .filter { (_, scoped) -> scoped.second.containsMatchIn(scoped.first) }
+            .map { (label, _) -> "TextReplacementPass contains $label" }
+
+        assertTrue(
+            exclusiveSet.contains("val executableBody = maskJavaCommentsAndLiterals(body)") &&
+                exclusiveSet.contains(".findAll(executableBody)") &&
+                igniteEffect.contains("val executableBody = maskJavaCommentsAndLiterals(body)") &&
+                igniteEffect.contains("executableBody.contains(\"setSecondsOnFire(\")") &&
+                igniteEffect.contains(".find(executableBody)") &&
+                mobEffect.contains("call.executableArguments[3].contains(\"shouldHit\")") &&
+                mobEffect.contains("maskJavaCommentsAndLiterals(it).contains(\"new MobEffectInstance(\")") &&
+                mobEffect.contains("val executableHelperBody = maskJavaCommentsAndLiterals(helperBody)") &&
+                mobEffect.contains(".find(executableHelperBody)") &&
+                mobEffect.contains("helperCall.executableArguments[1].trim().toDoubleOrNull()") &&
+                mobEffect.contains("parseLegacyAmplifierExpression(helperCall.executableArguments[2].trim())") &&
+                methodCalls.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                methodCalls.contains("pattern.findAll(executableSource)") &&
+                methodCalls.contains("executableSource.indexOf('(', match.range.first)") &&
+                methodCalls.contains("findMatchingDelimiter(executableSource, openParen, '(', ')')") &&
+                methodCalls.contains("executableArguments = splitTopLevelArguments(executableSource.substring(openParen + 1, closeParen))") &&
+                damageBonus.contains("val executableBody = maskJavaCommentsAndLiterals(body)") &&
+                damageBonus.contains(".find(executableBody)") &&
+                chance.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                chance.contains(".find(executableSource)"),
+            "Custom enchantment effect derivation must prove helper calls, effects, chance, damage, and exclusions from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Custom enchantment effect derivation must not treat comments, strings, or text blocks as gameplay semantics: $offenders"
+        )
+    }
+
+    @Test
+    fun `loot table registry migrations do not use class name suffix inference`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyLootTableResourceLocationRegistry")
+        assertTrue(start >= 0, "migrateLegacyLootTableResourceLocationRegistry is missing")
+        val end = source.indexOf("\n    private fun ", start + 1).let { if (it < 0) source.length else it }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "class name loot suffix variable" to "classLooksLikeLootRegistry",
+            "LootTables class suffix regex" to Regex("""LootTables\|LootIds|Loot\|LootTables"""),
+            "local LootTable marker fallback" to "inSourceLootTableApiMarker",
+            "blank owner class fallback" to "classNameOfJavaSource(source) ?: \"\""
+        )
+        val offenders = forbidden
+            .filter { (_, marker) ->
+                when (marker) {
+                    is String -> body.contains(marker)
+                    is Regex -> marker.containsMatchIn(body)
+                    else -> false
+                }
+            }
+            .map { (label, _) -> "migrateLegacyLootTableResourceLocationRegistry contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Loot table registry migrations must use API/register-set structure, not class-name suffix inference: $offenders"
+        )
+        assertTrue(
+            body.contains("legacyResourceLocationSetReturnMethods"),
+            "Loot table registry migrations must prove set-returning helper methods from external loot API call sites"
+        )
+        assertTrue(
+            body.contains("legacyResourceLocationSetAliases"),
+            "Loot table registry migrations must propagate proof through explicit set aliases instead of local markers"
+        )
+
+        val keyExpressionStart = source.indexOf("private fun isLootTableResourceKeyExpression")
+        assertTrue(keyExpressionStart >= 0, "isLootTableResourceKeyExpression is missing")
+        val keyExpressionEnd = source.indexOf("\n    private fun ", keyExpressionStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val keyExpressionBody = source.substring(keyExpressionStart, keyExpressionEnd)
+        val keyExpressionOffenders = listOf(
+            "owner name Loot suffix regex" to Regex("""\(\?:Loot\|LootTables\)|LootTables\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(keyExpressionBody) }
+            .map { (label, _) -> "isLootTableResourceKeyExpression contains $label" }
+
+        assertTrue(
+            keyExpressionOffenders.isEmpty(),
+            "Loot table key-expression detection must use API/evidence structure, not owner-name suffix inference: $keyExpressionOffenders"
+        )
+
+        val resourceKeyCollectorsStart = source.indexOf("private fun collectResourceKeyLootTableFieldOwners")
+        assertTrue(resourceKeyCollectorsStart >= 0, "collectResourceKeyLootTableFieldOwners is missing")
+        val resourceKeyCollectorsEnd = source.indexOf("private fun collectMapCodecConstantOwners", resourceKeyCollectorsStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val resourceKeyCollectorsBody = source.substring(resourceKeyCollectorsStart, resourceKeyCollectorsEnd)
+        val resourceKeyCollectorOffenders = listOf(
+            "java file-name owner fallback" to Regex("""classNameOfJavaSource\(source\)\s*\?:\s*javaFile\.fileName\.toString\(\)\.removeSuffix\("\.java"\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(resourceKeyCollectorsBody) }
+            .map { (label, _) -> "loot table ResourceKey collectors contain $label" }
+
+        assertTrue(
+            resourceKeyCollectorOffenders.isEmpty(),
+            "Loot table ResourceKey collectors must use source-declared Java owners, not Java file-name fallback inference: $resourceKeyCollectorOffenders"
+        )
+    }
+
+    @Test
+    fun `registry backed item stack predicate migrations do not infer owners from java file names`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun collectLegacyItemStackPredicateOverrideMethods")
+        assertTrue(start >= 0, "collectLegacyItemStackPredicateOverrideMethods is missing")
+        val end = source.indexOf("private fun migrateLegacyRegistryBackedItemStackPredicateOverrides", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "java file-name owner fallback" to Regex("""classNameOfJavaSource\(source\)\s*\?:\s*javaFile\.fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
+            "raw source method scan" to Regex("""methodPattern\.findAll\(source\)"""),
+            "raw source owner declaration" to Regex("""classNameOfJavaSource\(source\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "collectLegacyItemStackPredicateOverrideMethods contains $label" }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("classNameOfJavaSource(executableCode)") &&
+                body.contains("methodPattern.findAll(executableCode)"),
+            "Registry-backed item-stack predicate method collection must use executable Java only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Registry-backed item-stack predicate migrations must use source-declared Java owners, not Java file-name fallback inference: $offenders"
+        )
+    }
+
+    @Test
+    fun `registry backed item stack predicate registry access requires unique player backed source type`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyRegistryBackedItemStackPredicateOverrides")
+        assertTrue(start >= 0, "migrateLegacyRegistryBackedItemStackPredicateOverrides is missing")
+        val end = source.indexOf("private fun migrateLegacyItemStackPredicateOverrideCallSites", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw inventory field scan" to Regex("""\.find(?:All)?\(source\)"""),
+            "global simple type fallback" to Regex("""javaTypes\.(?:singleOrNull|firstOrNull)\s*\{[^}]*className"""),
+            "unconditional player field visibility" to Regex("""var\s+result\s*=\s*migratePlayerBackedSimpleContainerFieldVisibility\(source\)"""),
+            "raw map rewrite result replace" to Regex("""\.replace\(result,\s*"Map<Function<RegistryAccess""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("legacyItemStackPredicateOverrideMethodAccesses(methods, javaTypes)") &&
+                body.contains("requiredContainerTypes") &&
+                body.contains("currentTypeFqn in requiredContainerTypes") &&
+                body.contains("resolveKnownJavaTypeReference") &&
+                body.contains("isPlayerBackedSimpleContainerType(type)") &&
+                body.contains("inventoryFields.singleOrNull()") &&
+                body.contains("replaceExecutableRegex("),
+            "Registry-backed item-stack predicate migration must resolve a unique source-backed player container before rewriting"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Registry-backed item-stack predicate migration must not guess registryAccess or rewrite raw comments: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy banner component migrations do not infer owners from java file names`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun collectLegacyBannerPatternLayerFactories")
+        assertTrue(start >= 0, "collectLegacyBannerPatternLayerFactories is missing")
+        val end = source.indexOf("private fun migrateLegacyBannerPatternLayerSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "java file-name owner fallback" to Regex("""classNameOfJavaSource\(source\)\s*\?:\s*javaFile\.fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
+            "raw source owner declaration" to Regex("""classNameOfJavaSource\(source\)"""),
+            "raw source package declaration" to Regex("""packageNameOf\(source\)"""),
+            "raw pattern field scan" to Regex("""\.findAll\(source\)"""),
+            "raw method range scan" to Regex("""javaMethodRanges\(source\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "legacy banner component collectors contain $label" }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("classNameOfJavaSource(executableCode)") &&
+                body.contains("packageNameOf(executableCode)") &&
+                body.contains(".findAll(executableCode)") &&
+                body.contains("val code = maskJavaComments(source)") &&
+                body.contains("classNameOfJavaSource(code)") &&
+                body.contains("packageNameOf(code)") &&
+                body.contains("javaMethodRanges(code)"),
+            "Legacy banner component collectors must derive owners and factories from comment-masked Java source"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy banner component migrations must use source-declared Java owners, not Java file-name fallback inference: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy banner pattern constructors require deferred register namespace evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyBannerPatternConstructors")
+        assertTrue(start >= 0, "migrateLegacyBannerPatternConstructors is missing")
+        val end = source.indexOf("private fun migrateLegacyWallSignBlockCodecSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw BannerPattern prefilter" to Regex("""source\.contains\(\s*"BannerPattern"\s*\)"""),
+            "raw constructor prefilter" to Regex("""source\.contains\(\s*"new BannerPattern\("\s*\)"""),
+            "raw constructor rewrite" to Regex("""\brewriteJavaNew\s*\(\s*source\s*,\s*"BannerPattern""""),
+            "raw namespace scan" to Regex("""\.find\s*\(\s*source\s*\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "legacy BannerPattern constructor migration contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy BannerPattern constructor migration must inspect executable Java code, not comments or string literals: $offenders"
+        )
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("executableCode.contains(\"BannerPattern\")") &&
+                body.contains("executableCode.contains(\"new BannerPattern(\")") &&
+                body.contains("rewriteExecutableJavaNew(source, \"BannerPattern\")") &&
+                body.contains("bannerPatternDeferredRegisterNamespaceExpression(source)") &&
+                body.contains("rewriteExecutableJavaCall(source, \"create\")") &&
+                body.contains("receiver == \"DeferredRegister\"") &&
+                body.contains("args[0].trim() == \"Registries.BANNER_PATTERN\"") &&
+                body.contains("namespaces.distinct().singleOrNull()"),
+            "Legacy BannerPattern constructor migration must read executable constructor calls and unambiguous namespace evidence from the BANNER_PATTERN DeferredRegister"
+        )
+        assertTrue(
+            !body.contains("inferModAccess"),
+            "Legacy BannerPattern constructor migration must not use @Mod/mod access as a namespace fallback"
+        )
+    }
+
+    @Test
+    fun `legacy banner item factory lookup migrations require scoped registry evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun inferBannerPatternRegistryLookupExpression")
+        assertTrue(start >= 0, "inferBannerPatternRegistryLookupExpression is missing")
+        val end = source.indexOf("private fun inferCreativeTabBannerPatternLookup", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "file-prefix scope fallback" to Regex("""inferBannerPatternLookupFromScope\s*\(\s*source\.substring\s*\(\s*0\s*,\s*offset\s*\)"""),
+            "unscoped null-header lookup fallback" to Regex("""inferBannerPatternLookupFromScope\s*\([^)]*,\s*null\s*\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "inferBannerPatternRegistryLookupExpression contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy banner item factory call migrations must use the current Java method or creative-tab lambda as registry evidence, not file-prefix lookup fallback: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy banner item factory call rewrites use executable source`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun rewriteQualifiedLegacyBannerItemStackFactoryCalls")
+        assertTrue(start >= 0, "rewriteQualifiedLegacyBannerItemStackFactoryCalls is missing")
+        val end = source.indexOf("private fun looksLikeJavaMethodDeclaration", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw qualified call rewrite" to Regex("""rewriteJavaCallWithOffset\(source,\s*factory\.methodName"""),
+            "raw unqualified token scan" to Regex("""result\.indexOf\(token,\s*cursor\)"""),
+            "raw unqualified paren matching" to Regex("""findMatchingParen\(result,\s*openParen\)"""),
+            "raw declaration check" to Regex("""looksLikeJavaMethodDeclaration\(result,\s*tokenIndex,\s*closeParen\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("rewriteExecutableJavaCallWithOffset(source, factory.methodName)") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("executableCode.indexOf(token, cursor)") &&
+                body.contains("findMatchingParen(executableCode, openParen)") &&
+                body.contains("looksLikeJavaMethodDeclaration(executableCode, tokenIndex, closeParen)"),
+            "Legacy banner item factory calls must be located in executable Java, not comments or strings"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy banner item factory calls must not rewrite commented examples: $offenders"
+        )
+    }
+
+    @Test
+    fun `deferred register and holder collectors do not infer owners from java file names`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun registerMissingDeferredRegisterFields")
+        assertTrue(start >= 0, "registerMissingDeferredRegisterFields is missing")
+        val end = source.indexOf("private fun migrateRecordComponentFieldAccessSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "main class file-name owner fallback" to Regex("""classNameOfJavaSource\(mainClass\.readText\(\)\)\s*\?:\s*mainClass\.fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
+            "java file-name owner fallback" to Regex("""classNameOfJavaSource\(source\)\s*\?:\s*javaFile\.fileName\.toString\(\)\.removeSuffix\("\.java"\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "deferred register/holder collector contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "DeferredRegister and DeferredHolder collectors must use source-declared Java owners, not Java file-name fallback inference: $offenders"
+        )
+    }
+
+    @Test
+    fun `deferred register listener migration uses executable source evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateDeferredRegisterListenerReferences")
+        assertTrue(start >= 0, "migrateDeferredRegisterListenerReferences is missing")
+        val end = source.indexOf("private fun registerMissingDeferredRegisterFields", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw listener prefilter" to body.contains("""original.contains("::register")"""),
+            "raw source prefilter" to body.contains("""source.contains("::register")"""),
+            "raw listener replacement" to body.contains("listenerPattern.replace(source)")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableOriginal = maskJavaCommentsAndLiterals(original)") &&
+                body.contains("""executableOriginal.contains("::register")""") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("::register")""") &&
+                body.contains("replaceExecutableRegex(source, listenerPattern)") &&
+                body.contains("return@replaceExecutableRegex match.value"),
+            "DeferredRegister listener migration must locate stale Class::register listeners in executable Java only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "DeferredRegister listener migration must not rewrite comments or text block examples: $offenders"
+        )
+    }
+
+    @Test
+    fun `deferred register array completeness uses executable source evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun registerMissingDeferredRegisterFields")
+        assertTrue(start >= 0, "registerMissingDeferredRegisterFields is missing")
+        val end = source.indexOf("private fun String.lineStartIndent", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw original reference scan" to Regex("""containsMatchIn\(original\)"""),
+            "raw migrated reference scan" to Regex("""containsMatchIn\(migrated\)"""),
+            "raw array match" to Regex("""\.find\(source\)"""),
+            "raw brace match" to Regex("""findMatchingBrace\(source,\s*openBrace\)"""),
+            "raw source reference scan" to Regex("""containsMatchIn\(source\)"""),
+            "raw owner method scan" to Regex("""methodPattern\.findAll\(ownerSource\)"""),
+            "raw main owner-call scan" to Regex("""containsMatchIn\(mainSource\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableOriginal = maskJavaCommentsAndLiterals(original)") &&
+                body.contains("val executableMigrated = maskJavaCommentsAndLiterals(migrated)") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains(".find(executableCode)") &&
+                body.contains("findMatchingBrace(executableCode, openBrace)") &&
+                body.contains("deferredRegisterReferencePattern(it).containsMatchIn(executableCode)") &&
+                body.contains("private fun hasDeferredRegisterArray(source: String): Boolean") &&
+                body.contains("val executableOwnerSource = maskJavaCommentsAndLiterals(ownerSource)") &&
+                body.contains("val executableMainSource = maskJavaCommentsAndLiterals(mainSource)") &&
+                body.contains("methodPattern.findAll(executableOwnerSource)") &&
+                body.contains("containsMatchIn(executableMainSource)"),
+            "DeferredRegister array completeness must use executable Java for array detection, existing references, and owner method evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "DeferredRegister array completeness must not infer from comments or text block examples: $offenders"
+        )
+    }
+
+    @Test
+    fun `record component access migration uses executable source evidence`() {
+        val source = StructuralRuleSources.text
+        val collectorStart = source.indexOf("private fun collectJavaRecordComponents")
+        assertTrue(collectorStart >= 0, "collectJavaRecordComponents is missing")
+        val collectorEnd = source.indexOf("private fun collectFinalMapDecorationSubclassClasses", collectorStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val collectorBody = source.substring(collectorStart, collectorEnd)
+        val migrationStart = source.indexOf("private fun migrateRecordComponentFieldAccessSource")
+        assertTrue(migrationStart >= 0, "migrateRecordComponentFieldAccessSource is missing")
+        val migrationEnd = source.indexOf("private fun migrateRecordCodecBuilderWitnessSource", migrationStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val migrationBody = source.substring(migrationStart, migrationEnd)
+
+        val collectorOffenders = listOf(
+            "raw record declaration scan" to Regex("""findAll\(source\)"""),
+            "raw record paren match" to Regex("""findMatchingParen\(source,\s*openParen\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(collectorBody) }
+            .map { (label, _) -> label }
+        val migrationOffenders = listOf(
+            "raw record type prefilter" to Regex("""result\.contains\(typeName\)"""),
+            "raw record variable scan" to Regex("""findAll\(result\)"""),
+            "raw local record declaration scan" to Regex("""containsMatchIn\(result\)"""),
+            "raw component accessor replacement" to Regex("""\.replace\(result,\s*"\${'$'}variable\.\${'$'}component\(\)"\)"""),
+            "raw lambda component replacement" to Regex("""\.replace\(result,\s*"\${'$'}1\.\${'$'}component\(\)"\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(migrationBody) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            collectorBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                collectorBody.contains(".findAll(executableCode)") &&
+                collectorBody.contains("findMatchingParen(executableCode, openParen)"),
+            "Record component collection must parse declarations from executable Java, not comments or strings"
+        )
+        assertTrue(
+            migrationBody.contains("val executableResult = maskJavaCommentsAndLiterals(result)") &&
+                migrationBody.contains("executableResult.contains(typeName)") &&
+                migrationBody.contains(".findAll(executableResult)") &&
+                migrationBody.contains("containsMatchIn(executableResult)") &&
+                migrationBody.contains("replaceExecutableRegex(") &&
+                migrationBody.contains("match.groupValues[1]"),
+            "Record component access migration must locate and rewrite executable Java only"
+        )
+        assertTrue(
+            collectorOffenders.isEmpty() && migrationOffenders.isEmpty(),
+            "Record component access migration must not use raw source scans or raw replacements: collector=$collectorOffenders migration=$migrationOffenders"
+        )
+    }
+
+    @Test
+    fun `placement modifier type registry collectors do not infer owners from java file names`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun collectPlacementModifierTypeRegistryFields")
+        assertTrue(start >= 0, "collectPlacementModifierTypeRegistryFields is missing")
+        val end = source.indexOf("private fun migrateBuiltInPlacementModifierTypeRegistrations", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "java file-name owner fallback" to Regex("""classNameOfJavaSource\(source\)\s*\?:\s*javaFile\.fileName\.toString\(\)\.removeSuffix\("\.java"\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "placement modifier type collector contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Placement modifier type registry collectors must use source-declared Java owners, not Java file-name fallback inference: $offenders"
+        )
+    }
+
+    @Test
+    fun `placement modifier type migration does not use project mod id namespace fallback`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateBuiltInPlacementModifierTypeRegistrations")
+        assertTrue(start >= 0, "migrateBuiltInPlacementModifierTypeRegistrations is missing")
+        val end = source.indexOf("private fun migratePlacementModifierTypeDeferredHolderReferences", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+
+        assertTrue(
+            body.contains("placementModifierRegistryNamespaceExpression(source)") &&
+                body.contains("ResourceLocation\\.fromNamespaceAndPath") &&
+                body.contains("ResourceLocation\\.parse"),
+            "Placement modifier type migration must derive namespace from existing ResourceLocation registrations"
+        )
+        assertTrue(
+            !body.contains("modId: String") &&
+                !body.contains("return modId") &&
+                !body.contains("\"${'$'}it\""),
+            "Placement modifier type migration must not synthesize a DeferredRegister namespace from project mod id"
+        )
+    }
+
+    @Test
+    fun `worldgen region accessor migrations do not infer mixin owners from java file names`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun legacyWorldGenRegionStructureManagerAccessor")
+        assertTrue(start >= 0, "legacyWorldGenRegionStructureManagerAccessor is missing")
+        val end = source.indexOf("private fun rewriteWorldGenRegionStructureManagerAccessorCalls", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "java file-name owner fallback" to Regex("""javaTopLevelTypeName\(source\)\s*\?:\s*file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "WorldGenRegion accessor collector contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "WorldGenRegion accessor migrations must use source-declared mixin owners, not Java file-name fallback inference: $offenders"
+        )
+    }
+
+    @Test
+    fun `title screen update indicator cleanup uses executable class declarations`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun removeUnusedTitleScreenUpdateIndicatorClasses")
+        assertTrue(start >= 0, "removeUnusedTitleScreenUpdateIndicatorClasses is missing")
+        val end = source.indexOf("private fun cleanupTitleScreenRemovedAccessorImports", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "java file-name owner fallback" to Regex("""file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
+            "raw source inheritance sentinel" to Regex("""source\.contains\("extends TitleScreenModUpdateIndicator"\)"""),
+            "raw source class scan" to Regex("""\.find\(source\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "TitleScreen update indicator cleanup contains $label" }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains(".find(executableCode)") &&
+                body.contains("?: return@mapNotNull null"),
+            "TitleScreen update indicator cleanup must prove an executable class declaration before deleting files"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "TitleScreen update indicator cleanup must not infer owners from file names or comments/strings: $offenders"
+        )
+    }
+
+    @Test
+    fun `missing mapping alias migrations do not infer owners from java file names`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateMissingMappingsAliases")
+        assertTrue(start >= 0, "migrateMissingMappingsAliases is missing")
+        val end = source.indexOf("private fun extractMissingMappingAliasRules", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "java file-name owner" to Regex("""file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "missing mapping alias migration contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "MissingMapping alias migrations must use source-declared Java owners, not Java file-name fallback inference: $offenders"
+        )
+    }
+
+    @Test
+    fun `base packet migrations do not infer owners from java file names`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateBasePacketPayloads")
+        assertTrue(start >= 0, "migrateBasePacketPayloads is missing")
+        val end = source.indexOf("private fun rewritePacketRelayCalls", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "java file-name owner" to Regex("""file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
+            "java file-name candidate filter" to Regex("""fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
+            "raw BasePacket marker" to Regex("""contains\("BasePacket"\)"""),
+            "raw PacketRelay marker" to Regex("""contains\("PacketRelay\."\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "BasePacket migration contains $label" }
+
+        assertTrue(
+            source.contains("private fun hasNitrogenBasePacketApiReference") &&
+                source.contains("private fun hasNitrogenPacketRelayApiReference") &&
+                source.contains("resolveKnownJavaTypeReference(") &&
+                source.contains("com.aetherteam.nitrogen.network.BasePacket") &&
+                source.contains("com.aetherteam.nitrogen.network.PacketRelay") &&
+                source.contains("typeHeaderImplementsNitrogenBasePacket"),
+            "BasePacket migrations must resolve the Nitrogen API owner through Java imports/FQNs"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "BasePacket migrations must use source-declared Java owners, not Java file-name fallback inference: $offenders"
+        )
+    }
+
+    @Test
+    fun `deferred holder presence migration uses declared owners and executable code`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateDeferredHolderPresenceChecks")
+        assertTrue(start >= 0, "migrateDeferredHolderPresenceChecks is missing")
+        val end = source.indexOf("private fun migrateMenuScreensRegistration", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "java file-name owner fallback" to Regex("""file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
+            "ad hoc class regex owner" to Regex("""classPattern\.find\(content\)"""),
+            "raw content replace" to Regex("""content\.replace\("""),
+            "raw declaration scan" to Regex("""declarationPattern\.findAll\(content\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "DeferredHolder presence migration contains $label" }
+
+        assertTrue(
+            body.contains("classNameOfJavaSource(content) ?: return@flatMap emptyList()") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(content)") &&
+                body.contains("declarationPattern.findAll(executableCode)") &&
+                body.contains("replaceExecutableRegex("),
+            "DeferredHolder presence migration must bind static holders to declared Java owners and rewrite only executable code"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "DeferredHolder presence migration must not infer owners from file names or rewrite comments/strings: $offenders"
+        )
+    }
+
+    @Test
+    fun `source backed payload migration does not depend on generated network class names`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateSourceBackedAccessorCalls")
+        assertTrue(start >= 0, "migrateSourceBackedAccessorCalls is missing")
+        val end = source.indexOf("private fun migrateUseItemOnInteractionResultReturns", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "generated ModNetwork class marker" to Regex("""class\s+ModNetwork|class ModNetwork|ModNetwork\.java"""),
+            "untyped registrar text marker" to Regex("""source\.contains\("registrar\."\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "source-backed payload migration contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Source-backed payload migration must use PayloadRegistrar registration structure, not generated network class names or raw registrar text: $offenders"
+        )
+        assertTrue(body.contains("registeredPayloadTypes(source)"))
+        assertTrue(body.contains("PayloadRegistrar"))
+    }
+
+    @Test
+    fun `top level packet payload migration does not infer direction from names or client references`() {
+        val source = StructuralRuleSources.text
+        val staticStart = source.indexOf("private fun staticPacketCandidate")
+        assertTrue(staticStart >= 0, "staticPacketCandidate is missing")
+        val staticEnd = source.indexOf("private fun packetReceptionDirection", staticStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val staticBody = source.substring(staticStart, staticEnd)
+        val directionStart = source.indexOf("private fun packetReceptionDirection")
+        assertTrue(directionStart >= 0, "packetReceptionDirection is missing")
+        val directionEnd = source.indexOf("private fun simpleChannelNamespaceExpression", directionStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val directionBody = source.substring(directionStart, directionEnd)
+        val migrationStart = source.indexOf("private fun transformPacketClasses")
+        assertTrue(migrationStart >= 0, "transformPacketClasses is missing")
+        val migrationEnd = source.indexOf("if (packetClasses.isEmpty())", migrationStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val registrationBody = source.substring(migrationStart, migrationEnd)
+        val combined = listOf(staticBody, directionBody, registrationBody).joinToString("\n")
+        val offenders = listOf(
+            "S2C class-name direction" to """className.startsWith("S2C")""",
+            "ToClient class-name direction" to """className.contains("ToClient")""",
+            "Minecraft client reference direction" to """packetContent.contains("Minecraft.getInstance()")""",
+            "ClientLevel reference direction" to """packetContent.contains("ClientLevel")""",
+            "Dist client reference direction" to """packetContent.contains("Dist.CLIENT")""",
+            "client import direction" to """containsMatchIn(packetContent)""",
+            "raw registerMessage prefilter" to """content.contains(".registerMessage(")""",
+            "raw registerMessage scan" to "findAll(content)",
+            "raw registration paren match" to "findMatchingParen(content, openParen)",
+            "raw packet constructor scan" to ".find(packetContent)"
+        )
+            .filter { (_, marker) -> combined.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            staticBody.contains("val executableCode = maskJavaCommentsAndLiterals(content)") &&
+                staticBody.contains("packetReceptionDirection(executableCode)") &&
+                directionBody.contains("hasClientReceptionGuard && !hasServerReceptionGuard -> true") &&
+                directionBody.contains("hasServerReceptionGuard && !hasClientReceptionGuard -> false") &&
+                registrationBody.contains("val executableContent = maskJavaCommentsAndLiterals(content)") &&
+                registrationBody.contains("findAll(executableContent)") &&
+                registrationBody.contains("findMatchingParen(executableContent, openParen)") &&
+                registrationBody.contains("val executablePacketContent = maskJavaCommentsAndLiterals(packetContent)") &&
+                registrationBody.contains("?: packetReceptionDirection(executablePacketContent)") &&
+                registrationBody.contains("?: return@registrations"),
+            "Top-level packet payload migration must use explicit registration direction or executable reception-side guards"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Top-level packet payload migration must not infer direction from class names, client references, or comments: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy advancement trigger migration does not depend on fixed project class names`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateAdvancementCriterionTriggers")
+        assertTrue(start >= 0, "migrateAdvancementCriterionTriggers is missing")
+        val end = source.indexOf("private data class LegacyCriterionRegistration", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "fixed trigger file name" to "AdvancementTrigger.java",
+            "fixed registrar file name" to "ExtraEventsRegister.java",
+            "fixed registrar call" to "ExtraEventsRegister.register(",
+            "fixed trigger constructor" to "new AdvancementTrigger"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "legacy advancement trigger migration contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy advancement trigger migrations must use source-declared trigger and registrar owners, not fixed project names: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy capability facade attachment migration does not depend on dirtiness class names`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyCapabilityFacadeToAttachment")
+        assertTrue(start >= 0, "migrateLegacyCapabilityFacadeToAttachment is missing")
+        val end = source.indexOf("private fun modIdReferenceForGeneratedClass", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "fixed DirtinessCapability name" to "DirtinessCapability",
+            "fixed DirtinessData name" to "DirtinessData",
+            "fixed DirtinessAttachment name" to "DirtinessAttachment",
+            "dirtiness rule id" to "struct-dirtiness",
+            "java file-name semantic filter" to ".fileName.toString() ==",
+            "placeholder attachment id fallback" to "ifBlank { \"data\" }"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "legacy capability facade migration contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy capability facade attachment migrations must use source-declared facade/data owners, not dirtiness-specific names: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy capability facade lookup migration does not depend on dirtiness class names`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateLegacyCapabilityFacadeLookups")
+        assertTrue(start >= 0, "migrateLegacyCapabilityFacadeLookups is missing")
+        val end = source.indexOf("private fun migrateLegacyCapabilityFacadeToAttachment", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "fixed DirtinessCapability name" to "DirtinessCapability",
+            "fixed DirtinessData name" to "DirtinessData",
+            "fixed DirtinessAttachment name" to "DirtinessAttachment",
+            "old direct dirtiness getCapability rewrite" to "getCapability(DirtinessCapability.DIRTINESS",
+            "old dirtiness getOrNull block rewrite" to "DirtinessData data = DirtinessCapability.getOrNull",
+            "dirtiness rule id" to "struct-dirtiness"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "legacy capability facade lookup migration contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy capability facade lookup migrations must use source-declared facade/data owners, not dirtiness-specific names: $offenders"
+        )
+    }
+
+    @Test
+    fun `fluid item capability migration does not depend on custom fluid class names`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateCustomFluidItemCapabilities")
+        assertTrue(start >= 0, "migrateCustomFluidItemCapabilities is missing")
+        val end = source.indexOf("private data class CuriosItemCapabilityMigration", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "fixed CustomFluidCapabilities name" to "CustomFluidCapabilities",
+            "fixed CustomFluidItems name" to "CustomFluidItems",
+            "fixed CustomFluidContainerHandler name" to "CustomFluidContainerHandler",
+            "fixed CustomFluidContainerProvider name" to "CustomFluidContainerProvider",
+            "fixed bucket field name" to "CUSTOM_FLUID_BUCKET",
+            "fixed bottle field name" to "CUSTOM_FLUID_BOTTLE",
+            "raw initCapabilities prefilter" to "source.contains(\"initCapabilities\")",
+            "raw factory prefilter" to "source.contains(\"\${factory.className}.\")",
+            "raw initCapabilities method extraction" to "javaMethodText(source, \"initCapabilities\")"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "fluid item capability migration contains $label" }
+
+        assertTrue(
+            body.contains("legacyFluidItemProviderFactory") &&
+                body.contains("legacyFluidItemProviderRegistrations") &&
+                body.contains("findRegisteredItemReferences(javaFiles, itemClassName)") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("javaMethodText(executableCode, \"initCapabilities\")"),
+            "Fluid item capability migration must derive provider and item registrations from source structure"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Fluid item capability migration must not depend on fixed custom-fluid class names: $offenders"
+        )
+    }
+
+    @Test
+    fun `curios item capability migration derives local helper names from source structure`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateCuriosItemCapabilities")
+        assertTrue(start >= 0, "migrateCuriosItemCapabilities is missing")
+        val end = source.indexOf("private fun registerCuriosItemCapabilitiesOnModBus", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "fixed local setupCurio helper" to "setupCurio",
+            "fixed local setupCuriosCapability factory" to "setupCuriosCapability",
+            "raw Curios provider file scan" to "text.contains(\"CurioItemCapability.createProvider\")",
+            "raw ICurio provider file scan" to "text.contains(\"new ICurio\")",
+            "raw Curios provider index lookup" to "source.indexOf(\"CurioItemCapability.createProvider\")"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "curios item capability migration contains $label" }
+
+        assertTrue(
+            body.contains("legacyCuriosProviderFactory") &&
+                body.contains("legacyCuriosHelperMethodNames") &&
+                body.contains("legacyCuriosItemHooks") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("javaMethodRangesIncludingDefault(executableCode)") &&
+                body.contains("findRegisteredItemReferences(javaFiles, itemClassName)"),
+            "Curios item capability migration must derive provider, helper, and item registrations from executable source structure"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Curios item capability migration must not depend on fixed project-local helper names or raw-source evidence: $offenders"
+        )
+    }
+
+    @Test
+    fun `curios helper and inventory optional migrations use executable source evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateCuriosHelperRemovalApis")
+        assertTrue(start >= 0, "migrateCuriosHelperRemovalApis is missing")
+        val end = source.indexOf("private fun migrateCuriosAttributeModifierHolderTypes", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw Curios helper prefilter" to "source.contains(\"CuriosApi.getCuriosHelper()\")",
+            "raw Curios inventory prefilter" to "source.contains(\"CuriosApi.getCuriosInventory\")",
+            "raw LazyOptional prefilter" to "source.contains(\"LazyOptional\")",
+            "raw helper getEquippedCurios rewrite" to "rewriteJavaCall(result, \"getEquippedCurios\")",
+            "raw helper findFirstCurio rewrite" to "rewriteJavaCall(result, \"findFirstCurio\")",
+            "raw LazyOptional type replacement" to ".replace(source, \"Optional<ICuriosItemHandler>\")",
+            "raw LazyOptional resolve replacement" to ".replace(result, variable)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "curios helper migration contains $label" }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("rewriteExecutableJavaCall(result, \"getEquippedCurios\")") &&
+                body.contains("rewriteExecutableJavaCall(result, \"findFirstCurio\")") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("val executableResult = maskJavaCommentsAndLiterals(result)"),
+            "Curios helper and inventory optional migrations must inspect executable Java and rewrite only executable code"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Curios helper and inventory optional migrations must not treat comments or strings as migration evidence: $offenders"
+        )
+    }
+
+    @Test
+    fun `curios attribute modifier holder migration uses executable source evidence`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun migrateCuriosAttributeModifierHolderTypes")
+        assertTrue(start >= 0, "migrateCuriosAttributeModifierHolderTypes is missing")
+        val end = source.indexOf("private fun migrateAttributeModifierMultimapHolderTypes", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw getAttributeModifiers prefilter" to body.contains("""source.contains("getAttributeModifiers")"""),
+            "raw AttributeModifier prefilter" to body.contains("""source.contains("AttributeModifier")"""),
+            "raw Multimap prefilter" to body.contains("""source.contains("Multimap")"""),
+            "raw Attribute prefilter" to body.contains("""source.contains("Attribute")"""),
+            "raw Curios type scan" to body.contains("containsMatchIn(source)"),
+            "raw Multimap replacement" to body.contains(".replace(result, \"Multimap<Holder<Attribute>, AttributeModifier>\")"),
+            "raw ImmutableMultimap builder replacement" to body.contains(".replace(result, \"ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier>\")"),
+            "raw ImmutableMultimap replacement" to body.contains(".replace(result, \"ImmutableMultimap<Holder<Attribute>, AttributeModifier>\")"),
+            "raw Holder import insertion" to body.contains("""addImportIfMissing(result, "net.minecraft.core.Holder")""")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("getAttributeModifiers")""") &&
+                body.contains("""executableCode.contains("AttributeModifier")""") &&
+                body.contains("""executableCode.contains("Multimap")""") &&
+                body.contains("""executableCode.contains("Attribute")""") &&
+                body.contains("containsMatchIn(executableCode)") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("""\bMultimap\s*<\s*Attribute\s*,\s*AttributeModifier\s*>""") &&
+                body.contains("""\bImmutableMultimap\.Builder\s*<\s*Attribute\s*,\s*AttributeModifier\s*>""") &&
+                body.contains("""addExecutableImportIfMissing(result, "net.minecraft.core.Holder")"""),
+            "Curios attribute modifier holder migration must rewrite only executable Curios attribute generic surfaces"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Curios attribute modifier holder migration must not rewrite comments or strings: $offenders"
+        )
+    }

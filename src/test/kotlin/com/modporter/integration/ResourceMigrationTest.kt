@@ -2909,4 +2909,25 @@ class ResourceMigrationTest {
 
         assertTrue(genDir.resolve("tags/item").exists(), "Should also rename in generated resources")
     }
+
+    @Test
+    fun `game test source set mod metadata is migrated like the main resources`() {
+        val testMeta = tempDir.resolve("src/bucketTest/resources/META-INF")
+        testMeta.createDirectories()
+        testMeta.resolve("mods.toml").writeText("""
+            modLoader="javafml"
+            loaderVersion="[47,)"
+            license="MIT"
+            [[mods]]
+            modId="example_bucket_tests"
+            version="1.0.0"
+        """.trimIndent())
+
+        ResourceMigrationPass(MappingDatabase.loadDefault()).apply(tempDir)
+
+        assertFalse(testMeta.resolve("mods.toml").exists())
+        val migrated = testMeta.resolve("neoforge.mods.toml").readText()
+        assertTrue(migrated.contains("modId=\"example_bucket_tests\""), migrated)
+        assertFalse(migrated.contains("[47,)"), migrated)
+    }
 }
