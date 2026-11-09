@@ -1,11 +1,13 @@
 package com.modporter.core.transforms.build
 
 import java.nio.file.Path
+import java.nio.file.Files
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.assertFalse
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -16,6 +18,15 @@ class PortalApiMigrationStructuralBridgeTest {
 
     @Test
     fun `structural portal probe bridge still closes onto the direct portal api`() {
+        verifyBridge(multiFile = false)
+    }
+
+    @Test
+    fun `wildcard portal probe closes through the cross file provider and teleporter chain`() {
+        verifyBridge(multiFile = true)
+    }
+
+    private fun verifyBridge(multiFile: Boolean) {
         val sourceDir = directory.resolve("src/main/java/com/example/portal")
         sourceDir.createDirectories()
         val tracks = sourceDir.resolve("AllPortalTracks.java")
@@ -84,6 +95,41 @@ class PortalApiMigrationStructuralBridgeTest {
             }
             """.trimIndent() + "\n"
         )
+        val provider = if (multiFile) {
+            val original = tracks.readText()
+            val teleporterStart = original.indexOf("    static Exit fromTeleporter(")
+            val teleporterEnd = original.indexOf("    static Exit aether(", teleporterStart)
+            check(teleporterStart >= 0 && teleporterEnd > teleporterStart)
+            val teleporter = original.substring(teleporterStart, teleporterEnd)
+            tracks.writeText(
+                original.removeRange(teleporterStart, teleporterEnd)
+                    .replace("return fromTeleporter(", "return PortalTrackProvider.fromTeleporter(")
+                    .replace("return fromProbe(", "return PortalTrackProvider.fromProbe(")
+            )
+            sourceDir.resolve("PortalTrackProvider.java").also { file ->
+                file.writeText(
+                    """
+                    package com.example.portal;
+
+                    import java.util.function.BiFunction;
+                    import java.util.function.Function;
+                    import net.minecraft.resources.ResourceKey;
+                    import net.minecraft.server.level.ServerLevel;
+                    import net.minecraft.world.level.Level;
+                    import com.modporter.generated.example.compat.LegacyPortalProbe;
+
+                    public class PortalTrackProvider {
+                        static Exit fromProbe(ServerLevel level, Face face,
+                                              ResourceKey<Level> firstDimension,
+                                              ResourceKey<Level> secondDimension,
+                                              BiFunction<ServerLevel, Probe, ?> provider) {
+                            return AllPortalTracks.fromProbe(level, face, firstDimension, secondDimension, provider);
+                        }
+
+                    """.trimIndent() + "\n" + teleporter + "}\n"
+                )
+            }
+        } else null
         val betterEnd = sourceDir.resolve("BetterEndPortalCompat.java")
         betterEnd.writeText(
             """
@@ -114,6 +160,10 @@ class PortalApiMigrationStructuralBridgeTest {
             """.trimIndent() + "\n"
         )
 
+        val original = snapshot()
+        val preview = PortalApiMigration().migrate(directory, dryRun = true)
+        assertTrue(preview.any { it.ruleId == "build-portal-dimension-transition-pipeline" })
+        assertEquals(original, snapshot())
         val changes = PortalApiMigration().migrate(directory, dryRun = false)
         val migrated = tracks.readText()
 
@@ -129,5 +179,21 @@ class PortalApiMigrationStructuralBridgeTest {
         assertFalse(migrated.contains("getDeclaredConstructor"), migrated)
         assertFalse(betterEnd.exists())
         assertFalse(probe.exists())
+        if (provider != null) {
+            val bridge = provider.readText()
+            assertFalse(bridge.contains("BiFunction"), bridge)
+            assertFalse(bridge.contains("Function"), bridge)
+            assertFalse(bridge.contains("LegacyPortalProbe"), bridge)
+            assertTrue(bridge.contains("AllPortalTracks.fromProbe(level, face, firstDimension, secondDimension)"), bridge)
+        }
+        val migratedSnapshot = snapshot()
+        assertTrue(PortalApiMigration().migrate(directory, dryRun = false).isEmpty())
+        assertEquals(migratedSnapshot, snapshot())
+    }
+
+    private fun snapshot(): Map<String, List<Byte>> = Files.walk(directory).use { paths ->
+        paths.filter(Files::isRegularFile).toList().associate { path ->
+            directory.relativize(path).toString() to Files.readAllBytes(path).toList()
+        }
     }
 }

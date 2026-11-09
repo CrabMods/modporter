@@ -219,26 +219,34 @@ internal class ThirdPartyReflectionMixinMigration {
         }
         if (configs.size == 1) return configs.single()
 
-        val sourcePackages = sources.mapNotNull { source ->
+        val sourcePackages = sources.map { source ->
             Regex("""(?m)^\s*package\s+([A-Za-z_$][\w$.]*)\s*;""")
                 .find(maskJavaCommentsAndLiterals(source))?.groupValues?.get(1)
+                ?: error("Optional-target accessor generation cannot derive a consumer's source package ownership")
         }.distinct()
         require(sourcePackages.isNotEmpty()) {
             "Optional-target accessor generation cannot derive source package ownership for ${configs.size} Mixin configs"
         }
-        val scored = configs.map { config ->
-            config to sourcePackages.maxOf { sourcePackage ->
-                commonPackagePrefix(config.packageName, sourcePackage)
+        val selected = sourcePackages.map { sourcePackage ->
+            val scored = configs.map { config ->
+                config to commonPackagePrefix(config.packageName, sourcePackage)
             }
+            val bestScore = scored.maxOf { it.second }
+            val owners = scored.filter { it.second == bestScore }
+            require(bestScore >= 2 && owners.size == 1) {
+                val observed = scored.joinToString { (config, score) -> "${config.packageName}=$score" }
+                "Optional-target accessor generation cannot identify one source-owning Mixin config " +
+                    "for package $sourcePackage; observed $observed"
+            }
+            owners.single().first
         }
-        val bestScore = scored.maxOf { it.second }
-        val owners = scored.filter { it.second == bestScore }
-        require(bestScore >= 2 && owners.size == 1) {
-            val observed = scored.joinToString { (config, score) -> "${config.packageName}=$score" }
-            "Optional-target accessor generation cannot identify one source-owning Mixin config " +
-                "for packages ${sourcePackages.joinToString()}; observed $observed"
+        require(selected.distinctBy { it.file }.size == 1) {
+            "Optional-target accessor consumers select different source-owning Mixin configs: " +
+                sourcePackages.zip(selected).joinToString { (sourcePackage, config) ->
+                    "$sourcePackage=${config.packageName}"
+                }
         }
-        return owners.single().first
+        return selected.first()
     }
 
     private fun commonPackagePrefix(left: String, right: String): Int =
