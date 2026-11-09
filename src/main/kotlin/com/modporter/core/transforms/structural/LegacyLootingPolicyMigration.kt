@@ -711,15 +711,11 @@ internal object LegacyLootingPolicyMigration {
                 LEGACY_PLATFORM_SHA256,
                 "audited Forge 1.20.1 consumer graph"
             )
-            val targetHash = requireHash(
-                targetJar,
-                TARGET_PLATFORM_SHA256,
-                "audited NeoForge target"
-            )
-            val targetSourcesHash = requireHash(
-                targetSources,
-                TARGET_SOURCES_SHA256,
-                "audited NeoForge target sources"
+            val targetHash = sha256(targetJar)
+            val targetSourcesHash = sha256(targetSources)
+            LegacyLootingArtifactProfile.requireReviewedTargetAuxiliaryTuple(
+                targetHash,
+                targetSourcesHash
             )
             val mixinExtrasHash = requireHash(
                 mixinExtras,

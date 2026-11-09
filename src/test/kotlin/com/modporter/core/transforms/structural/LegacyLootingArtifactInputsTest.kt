@@ -247,6 +247,65 @@ class LegacyLootingArtifactInputsTest {
         )
     }
 
+    @Test
+    fun `reviewed target tuples admit exact variants and reject mixed or unknown hashes`() {
+        val original =
+            LegacyLootingArtifactProfile.CREATE_FORGE_47_1_33_TO_NEOFORGE_21_1_230
+        val dependencyPrepass =
+            LegacyLootingArtifactProfile
+                .CREATE_FORGE_47_1_33_TO_NEOFORGE_21_1_230_DEPENDENCY_PREPASS
+
+        assertSame(
+            original,
+            LegacyLootingArtifactProfile.requireReviewedTargetTuple(
+                original.targetNamedSha256,
+                original.targetMergedSha256,
+                original.targetSourcesSha256
+            )
+        )
+        assertSame(
+            dependencyPrepass,
+            LegacyLootingArtifactProfile.requireReviewedTargetTuple(
+                dependencyPrepass.targetNamedSha256,
+                dependencyPrepass.targetMergedSha256,
+                dependencyPrepass.targetSourcesSha256
+            )
+        )
+        assertSame(
+            dependencyPrepass,
+            LegacyLootingArtifactProfile.requireReviewedTargetAuxiliaryTuple(
+                dependencyPrepass.targetMergedSha256,
+                dependencyPrepass.targetSourcesSha256
+            )
+        )
+
+        val mixed = assertFailsWith<IllegalArgumentException> {
+            LegacyLootingArtifactProfile.requireReviewedTargetTuple(
+                dependencyPrepass.targetNamedSha256,
+                original.targetMergedSha256,
+                dependencyPrepass.targetSourcesSha256
+            )
+        }
+        assertTrue(mixed.message.orEmpty().contains("exactly one reviewed tuple"))
+
+        val mixedAuxiliary = assertFailsWith<IllegalArgumentException> {
+            LegacyLootingArtifactProfile.requireReviewedTargetAuxiliaryTuple(
+                original.targetMergedSha256,
+                dependencyPrepass.targetSourcesSha256
+            )
+        }
+        assertTrue(mixedAuxiliary.message.orEmpty().contains("exactly one reviewed tuple"))
+
+        val unknown = assertFailsWith<IllegalArgumentException> {
+            LegacyLootingArtifactProfile.requireReviewedTargetTuple(
+                "f".repeat(64),
+                dependencyPrepass.targetMergedSha256,
+                dependencyPrepass.targetSourcesSha256
+            )
+        }
+        assertTrue(unknown.message.orEmpty().contains("exactly one reviewed tuple"))
+    }
+
     private fun fixture(runName: String = "initial"): Fixture {
         val ownerProject = temporary.resolve("project").createDirectories()
         val leafProject = ownerProject.resolve("modules/$runName").createDirectories()

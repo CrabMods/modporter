@@ -92,14 +92,92 @@ internal data class LegacyLootingArtifactProfile(
                 mixinExtrasSha256 =
                     "9822e773bd9f42d36ed53ea3d67486207291747a7bfacc29beeb92040721bc9b"
             )
+
+        val CREATE_FORGE_47_1_33_TO_NEOFORGE_21_1_230_DEPENDENCY_PREPASS =
+            CREATE_FORGE_47_1_33_TO_NEOFORGE_21_1_230.copy(
+                targetNamedSha256 =
+                    "0d168b646b1f1dfe490afb05a9dc51db34df456c309ab2028e508ed99c7bbd77",
+                targetMergedSha256 =
+                    "1e7ce155d3193663d2f2e077358ecff835de4d758689c0bb1bb6525d43b2e34d",
+                targetSourcesSha256 =
+                    "e3189c01eaddc7abe6c6f71931dc62bc7b1b86ec08eafe9803335236e2ba3ede"
+            )
+
+        private val REVIEWED = listOf(
+            CREATE_FORGE_47_1_33_TO_NEOFORGE_21_1_230,
+            CREATE_FORGE_47_1_33_TO_NEOFORGE_21_1_230_DEPENDENCY_PREPASS
+        )
+
+        fun requireReviewedTargetTuple(
+            namedSha256: String,
+            mergedSha256: String,
+            sourcesSha256: String
+        ): LegacyLootingArtifactProfile {
+            val matches = REVIEWED.filter {
+                it.targetNamedSha256 == namedSha256 &&
+                    it.targetMergedSha256 == mergedSha256 &&
+                    it.targetSourcesSha256 == sourcesSha256
+            }
+            require(matches.size == 1) {
+                "Legacy looting target artifacts do not match exactly one reviewed tuple: " +
+                    "named=$namedSha256 merged=$mergedSha256 sources=$sourcesSha256"
+            }
+            return matches.single()
+        }
+
+        fun requireReviewedTargetAuxiliaryTuple(
+            mergedSha256: String,
+            sourcesSha256: String
+        ): LegacyLootingArtifactProfile {
+            val matches = REVIEWED.filter {
+                it.targetMergedSha256 == mergedSha256 &&
+                    it.targetSourcesSha256 == sourcesSha256
+            }
+            require(matches.size == 1) {
+                "Legacy looting target auxiliary artifacts do not match exactly one reviewed " +
+                    "tuple: merged=$mergedSha256 sources=$sourcesSha256"
+            }
+            return matches.single()
+        }
+
+        fun requireReviewed(inventory: LegacyMigrationArtifactPair): LegacyLootingArtifactProfile {
+            val source = inventory.source.platformArtifacts
+            val target = inventory.target.platformArtifacts
+            val profile = requireReviewedTargetTuple(
+                target.named.sha256,
+                target.merged.sha256,
+                target.sources.sha256
+            )
+            require(
+                inventory.source.platformIdentity == profile.sourceIdentity &&
+                    inventory.target.platformIdentity == profile.targetIdentity &&
+                    source.named.displayName.replace('\\', '/') ==
+                    profile.sourceNamedDisplayName &&
+                    source.named.sha256 == profile.sourceNamedSha256 &&
+                    source.merged.displayName.replace('\\', '/') ==
+                    profile.sourceMergedDisplayName &&
+                    source.merged.sha256 == profile.sourceMergedSha256 &&
+                    source.sources.displayName.replace('\\', '/') ==
+                    profile.sourceSourcesDisplayName &&
+                    source.sources.sha256 == profile.sourceSourcesSha256 &&
+                    target.named.displayName.replace('\\', '/') ==
+                    profile.targetNamedDisplayName &&
+                    target.merged.displayName.replace('\\', '/') ==
+                    profile.targetMergedDisplayName &&
+                    target.sources.displayName.replace('\\', '/') ==
+                    profile.targetSourcesDisplayName
+            ) {
+                "Legacy looting inventory identity does not match the reviewed artifact tuple"
+            }
+            return profile
+        }
     }
 }
 
 internal object LegacyLootingArtifactInputs {
     fun resolve(
         project: Path,
-        profile: LegacyLootingArtifactProfile =
-            LegacyLootingArtifactProfile.CREATE_FORGE_47_1_33_TO_NEOFORGE_21_1_230,
+        profile: LegacyLootingArtifactProfile? = null,
         templates: LegacyLootingPolicyMigration.Templates =
             LegacyLootingPolicyMigration.Templates.production()
     ): LegacyLootingPolicyMigration.Inputs =
@@ -113,8 +191,7 @@ internal object LegacyLootingArtifactInputs {
     fun resolve(
         project: Path,
         inventory: LegacyMigrationArtifactPair,
-        profile: LegacyLootingArtifactProfile =
-            LegacyLootingArtifactProfile.CREATE_FORGE_47_1_33_TO_NEOFORGE_21_1_230,
+        profile: LegacyLootingArtifactProfile? = null,
         templates: LegacyLootingPolicyMigration.Templates =
             LegacyLootingPolicyMigration.Templates.production()
     ): LegacyLootingPolicyMigration.Inputs {
@@ -123,52 +200,53 @@ internal object LegacyLootingArtifactInputs {
             "Legacy looting inventory belongs to a different project"
         }
         inventory.verifyCurrentBytes("legacy looting input resolution")
-        require(inventory.source.platformIdentity == profile.sourceIdentity) {
+        val selectedProfile = profile ?: LegacyLootingArtifactProfile.requireReviewed(inventory)
+        require(inventory.source.platformIdentity == selectedProfile.sourceIdentity) {
             "Legacy looting source platform is not the reviewed Forge 1.20.1-47.1.33 graph"
         }
-        require(inventory.target.platformIdentity == profile.targetIdentity) {
+        require(inventory.target.platformIdentity == selectedProfile.targetIdentity) {
             "Legacy looting target platform is not the reviewed NeoForge 21.1.230 graph"
         }
 
         val sourceNamed = requirePlatformArtifact(
             inventory.source.platformArtifacts.named,
-            profile.sourceNamedDisplayName,
-            profile.sourceNamedSha256,
+            selectedProfile.sourceNamedDisplayName,
+            selectedProfile.sourceNamedSha256,
             "source named platform",
             LegacyMigrationArtifactInventory.ComponentKind.GENERATED_PLATFORM
         )
         requirePlatformArtifact(
             inventory.source.platformArtifacts.merged,
-            profile.sourceMergedDisplayName,
-            profile.sourceMergedSha256,
+            selectedProfile.sourceMergedDisplayName,
+            selectedProfile.sourceMergedSha256,
             "source merged platform",
             LegacyMigrationArtifactInventory.ComponentKind.PLATFORM_AUXILIARY
         )
         requirePlatformArtifact(
             inventory.source.platformArtifacts.sources,
-            profile.sourceSourcesDisplayName,
-            profile.sourceSourcesSha256,
+            selectedProfile.sourceSourcesDisplayName,
+            selectedProfile.sourceSourcesSha256,
             "source platform sources",
             LegacyMigrationArtifactInventory.ComponentKind.PLATFORM_AUXILIARY
         )
         val targetNamed = requirePlatformArtifact(
             inventory.target.platformArtifacts.named,
-            profile.targetNamedDisplayName,
-            profile.targetNamedSha256,
+            selectedProfile.targetNamedDisplayName,
+            selectedProfile.targetNamedSha256,
             "target named platform",
             LegacyMigrationArtifactInventory.ComponentKind.GENERATED_PLATFORM
         )
         val targetMerged = requirePlatformArtifact(
             inventory.target.platformArtifacts.merged,
-            profile.targetMergedDisplayName,
-            profile.targetMergedSha256,
+            selectedProfile.targetMergedDisplayName,
+            selectedProfile.targetMergedSha256,
             "target merged platform",
             LegacyMigrationArtifactInventory.ComponentKind.PLATFORM_AUXILIARY
         )
         val targetSources = requirePlatformArtifact(
             inventory.target.platformArtifacts.sources,
-            profile.targetSourcesDisplayName,
-            profile.targetSourcesSha256,
+            selectedProfile.targetSourcesDisplayName,
+            selectedProfile.targetSourcesSha256,
             "target platform sources",
             LegacyMigrationArtifactInventory.ComponentKind.PLATFORM_AUXILIARY
         )
@@ -185,7 +263,7 @@ internal object LegacyLootingArtifactInputs {
             setOf("compileClasspath", "runtimeClasspath"),
             "target"
         )
-        val expectedMixinExtrasModule = moduleIdentity(profile.mixinExtrasComponent)
+        val expectedMixinExtrasModule = moduleIdentity(selectedProfile.mixinExtrasComponent)
         val mixinExtrasCandidates = inventory.target.closureArtifacts.filter {
             moduleIdentity(it.component) == expectedMixinExtrasModule
         }
@@ -193,10 +271,10 @@ internal object LegacyLootingArtifactInputs {
             "Target graph must contain one unambiguous $expectedMixinExtrasModule module"
         }
         val mixinExtras = mixinExtrasCandidates.single()
-        require(mixinExtras.component == profile.mixinExtrasComponent) {
+        require(mixinExtras.component == selectedProfile.mixinExtrasComponent) {
             "Target MixinExtras module has unexpected coordinate: ${mixinExtras.component}"
         }
-        require(mixinExtras.sha256 == profile.mixinExtrasSha256) {
+        require(mixinExtras.sha256 == selectedProfile.mixinExtrasSha256) {
             "Target MixinExtras module has unexpected bytes: ${mixinExtras.sha256}"
         }
         require(mixinExtras.componentKind == LegacyMigrationArtifactInventory.ComponentKind.MODULE) {
