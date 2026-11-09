@@ -1,0 +1,26 @@
+/*
+ * Copyright (c) 2026 ModPorter contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package @PACKAGE@.mixin;
+
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+/**
+ * Must be filtered before target resolution by LegacyPlantMixinPlugin. If the plugin was not
+ * created, this required injector deliberately has no target and makes the configuration fail.
+ */
+@Mixin(targets = "net.minecraft.SharedConstants", remap = false)
+public abstract class LegacyPlantPluginSentinel {
+    @Inject(
+        method = "modporter$legacyPlantMixinPluginMustBePresent()V",
+        at = @At("HEAD"),
+        require = 1
+    )
+    private static void modporter$failWithoutPlugin(CallbackInfo callback) {
+    }
+}

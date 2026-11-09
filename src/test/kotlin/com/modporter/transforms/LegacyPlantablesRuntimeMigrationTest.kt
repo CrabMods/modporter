@@ -8,6 +8,7 @@ import com.github.javaparser.ast.expr.MethodCallExpr
 import com.github.javaparser.ast.expr.NameExpr
 import com.modporter.core.transforms.structural.LegacyPlantablesRuntimeMigration
 import com.modporter.core.transforms.structural.StructuralRefactorPass
+import com.modporter.core.transforms.shared.LegacyPlantRuntimeResources
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
@@ -1294,7 +1295,12 @@ class LegacyPlantablesRuntimeMigrationTest {
     private fun writeSharedRuntimeFixture() {
         val templates = runtimeTemplates()
         val sourceHash = runtimeSourceHash(templates)
-        for ((name, template) in templates) {
+        // This JVM lane exercises the callable ABI and the optional-absent bootstrap.
+        // Loader selection and the consumer mixin run in the separate native fixture.
+        for ((name, template) in templates.filterKeys {
+            !it.startsWith("mixin/") &&
+                it !in setOf("LegacyPlantMixinPlugin", "LegacyPlantMushroomRotCompat")
+        }) {
             java(
                 "com/modporter/compat/plant/v1/$name.java",
                 template
@@ -1305,29 +1311,10 @@ class LegacyPlantablesRuntimeMigrationTest {
     }
 
     private fun runtimeTemplates(): Map<String, String> =
-        listOf(
-            "PlantType",
-            "IPlantable",
-            "LegacyPlantSustainer",
-            "LegacyPlantPlacement",
-            "LegacyPlantableAdapter",
-            "LegacySoilAdapter",
-            "LegacyPlantPlacementAdapter",
-            "LegacyPlantables"
-        ).associateWith { name ->
-            checkNotNull(javaClass.getResource("/compat/$name.java.template")).readText()
-        }
+        LegacyPlantRuntimeResources.javaTemplates()
 
-    private fun runtimeSourceHash(templates: Map<String, String>): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        for ((name, content) in templates.toSortedMap()) {
-            digest.update(name.toByteArray(Charsets.UTF_8))
-            digest.update(0.toByte())
-            digest.update(content.replace("\r\n", "\n").toByteArray(Charsets.UTF_8))
-            digest.update(0.toByte())
-        }
-        return digest.digest().joinToString("") { "%02x".format(it) }
-    }
+    private fun runtimeSourceHash(templates: Map<String, String>): String =
+        LegacyPlantRuntimeResources.canonicalSourceHashText(templates)
 
     private fun writeMetadata() {
         val file = directory.resolve("src/main/resources/META-INF/mods.toml")

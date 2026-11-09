@@ -13,6 +13,19 @@ overview is in third_party/create/LICENSE.md. Upstream Create assets are not
 redistributed in the source tree or fat JAR. Stock-asset admission tests fetch
 one hash-pinned upstream icon into an ignored, local test cache.
 
+The distribution contains three modified Forge-derived legacy-plant
+compatibility templates under LGPL-2.1-only. They retain the Forge Development
+LLC copyright and SPDX notices. Their pinned upstream provenance, exact file
+scope, modification boundary, and full license are in
+third_party/minecraftforge/README.md and third_party/minecraftforge/LICENSE.txt.
+The independently authored ModPorter helpers listed there remain Apache-2.0.
+
+The Dynamic Trees-derived legacy post-rot compatibility consumer is under MIT.
+It preserves the pinned Dynamic Trees 1.3.0-BETA13 source attribution,
+including `Copyright (c) 2016,2017 Ferreus Veritas`. Its exact source artifact,
+tag commit, adapted scope, and license are recorded in
+third_party/dynamictrees/README.md and third_party/dynamictrees/LICENSE.
+
 The distribution also contains third-party JVM dependencies. Their bundled
 license notices are retained in META-INF. See third_party/README.md for the
 dependency and fixture attribution inventory.

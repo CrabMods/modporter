@@ -514,6 +514,19 @@ internal class BuildSystemLegacyPlantTargetPlanner(
         )
         val buildFilesAfterRuntime = snapshotBuildFiles(stagedProject)
         val sourceFilesAfterRuntime = snapshotPreparedSourceFiles(stagedProject)
+        val resourceFilesAfterRuntime = snapshotPreparedResourceFiles(stagedProject)
+        val reviewedProfiles = ReviewedLegacyPlantAdapterProfiles.selectForTargetPlan(
+            sourceGraph,
+            dependencyPreparation.decisions,
+            runtimeIdentity
+        )
+        require(
+            reviewedProfiles.isEmpty() || adapterRegistrations.none { registration ->
+                registration.targetSelector == ReviewedLegacyPlantAdapterProfiles.TARGET_COMPONENT
+            }
+        ) {
+            "Reviewed Dynamic Trees compatibility cannot be replaced by arbitrary registrations"
+        }
         val preparation = BuildDependencyPreparationReceipt(
             result = PassResult(
                 passName = dependencyPreparation.result.passName,
@@ -527,14 +540,17 @@ internal class BuildSystemLegacyPlantTargetPlanner(
             buildFilesBefore = dependencyPreparation.buildFilesBefore,
             buildFilesAfter = buildFilesAfterRuntime,
             resourceFilesBefore = dependencyPreparation.resourceFilesBefore,
-            resourceFilesAfter = dependencyPreparation.resourceFilesAfter,
+            resourceFilesAfter = resourceFilesAfterRuntime,
             sourceFilesBefore = dependencyPreparation.sourceFilesBefore,
             sourceFilesAfter = sourceFilesAfterRuntime,
             changedBuildFiles = fileTransitions(
                 dependencyPreparation.buildFilesBefore,
                 buildFilesAfterRuntime
             ),
-            changedResourceFiles = dependencyPreparation.changedResourceFiles,
+            changedResourceFiles = fileTransitions(
+                dependencyPreparation.resourceFilesBefore,
+                resourceFilesAfterRuntime
+            ),
             changedSourceFiles = fileTransitions(
                 dependencyPreparation.sourceFilesBefore,
                 sourceFilesAfterRuntime
@@ -542,7 +558,8 @@ internal class BuildSystemLegacyPlantTargetPlanner(
         )
         return TargetBuildPlanReceipt(
             preparation = preparation,
-            adapterRegistrations = adapterRegistrations
+            adapterRegistrations = adapterRegistrations,
+            reviewedAdapterProfiles = reviewedProfiles
         )
     }
 
@@ -583,6 +600,24 @@ internal class BuildSystemLegacyPlantTargetPlanner(
                     relative to buildReceiptSha256(path.readBytes())
                 }
         }
+
+    private fun snapshotPreparedResourceFiles(projectDir: Path): Map<String, String> =
+        Files.walk(projectDir).use { paths ->
+            paths.filter { it.isRegularFile() }
+                .map { path ->
+                    path to path.relativeTo(projectDir).toString().replace('\\', '/')
+                }
+                .filter { (_, relative) ->
+                    relative.startsWith("src/main/resources/") ||
+                        relative.contains("/src/main/resources/")
+                }
+                .toList()
+                .sortedBy { it.second }
+                .associate { (path, relative) ->
+                    relative to buildReceiptSha256(path.readBytes())
+                }
+        }
+
 }
 
 internal data class PlatformArtifactFingerprint(
@@ -1181,15 +1216,55 @@ internal class Jvm21LegacyPlantBytecodeScanner(
             }
             val classes = artifacts.getValue(artifact)
             val artifactOwners = classes.map { it.facts.owner }.toSet()
+            val canonicalRuntimeClasses = runtimeIdentity.generatedSourceHashes().keys.map { name ->
+                "com/modporter/compat/plant/v1/$name"
+            }.toSet()
             val canonicalRuntime = artifact.componentKind == "project" &&
                 artifact.sha256 == runtimeIdentity.jarSha256 &&
-                CANONICAL_RUNTIME_CLASSES.all { it in artifactOwners } &&
+                canonicalRuntimeClasses.all { it in artifactOwners } &&
                 artifact.configurations.all { configuration ->
-                    CANONICAL_RUNTIME_CLASSES.all { owner ->
+                    canonicalRuntimeClasses.all { owner ->
                         activeByConfiguration.getValue(configuration)[owner]
                             ?.artifact == artifact
                     }
-                }
+                } && canonicalRuntimeResourcesMatch(artifact, runtimeIdentity)
+            if (artifact.componentKind == "project" &&
+                canonicalRuntimeClasses.any { it in artifactOwners } &&
+                !canonicalRuntime
+            ) {
+                blockers +=
+                    "canonical legacy plant runtime identity or active resource closure changed " +
+                        artifact.key
+            }
+            val reviewedEvidence = activeClasses.map { (configuration, owned) ->
+                ReviewedLegacyPlantClassEvidence(
+                    configuration = configuration,
+                    owner = owned.facts.owner,
+                    accessFlags = owned.facts.accessFlags,
+                    classSha256 = owned.classSha256,
+                    methods = owned.facts.methods.map { method ->
+                        ReviewedLegacyPlantMethodEvidence(
+                            name = method.name,
+                            descriptor = method.descriptor,
+                            accessFlags = method.accessFlags,
+                            codeAttributeSha256 = method.codeAttributeSha256
+                        )
+                    }
+                )
+            }
+            val reviewedProfile = ReviewedLegacyPlantAdapterProfiles.matchArtifact(
+                graph.phase,
+                artifact,
+                reviewedEvidence,
+                runtimeIdentity
+            )
+            if (ReviewedLegacyPlantAdapterProfiles.expectedArtifact(graph.phase, artifact) &&
+                reviewedProfile == null
+            ) {
+                blockers +=
+                    "reviewed Dynamic Trees artifact lacks complete active three-surface evidence " +
+                        artifact.key
+            }
             val platform = platformByArtifact[artifact]
             val allCanonical =
                 canonicalFlags.isNotEmpty() && canonicalFlags.all { it }
@@ -1220,8 +1295,15 @@ internal class Jvm21LegacyPlantBytecodeScanner(
                 }
             }
             PlantSurfaceScan(
-                hasPlantSurface = relevant.isNotEmpty(),
-                relevantClasses = relevant.distinct().sorted(),
+                hasPlantSurface = relevant.isNotEmpty() || reviewedProfile != null,
+                relevantClasses = (
+                    relevant + reviewedProfile?.let { profile ->
+                        when (graph.phase) {
+                            InventoryPhase.SOURCE -> profile.sourceClasses
+                            InventoryPhase.TARGET -> profile.targetClasses
+                        }.map { it.owner.replace('/', '.') }
+                    }.orEmpty()
+                ).distinct().sorted(),
                 classFacts = (
                     classFacts +
                         listOfNotNull(
@@ -1232,6 +1314,9 @@ internal class Jvm21LegacyPlantBytecodeScanner(
                                 graph.platformIdentity
                             }?.let {
                                 "platformIdentity=${it.sha256}"
+                            },
+                            reviewedProfile?.let {
+                                "reviewedAdapterProfile=${it.sha256}"
                             }
                         )
                     ).distinct().sorted(),
@@ -1242,7 +1327,8 @@ internal class Jvm21LegacyPlantBytecodeScanner(
                 isVerifiedSourcePlatform =
                     graph.phase == InventoryPhase.SOURCE && platform != null,
                 isCanonicalRuntime = canonicalRuntime,
-                adapterManifest = adapterManifest
+                adapterManifest = adapterManifest,
+                reviewedAdapterProfile = reviewedProfile
             )
         }
         val defined = activeByConfiguration.values.flatMap { it.keys }
@@ -1377,18 +1463,18 @@ internal class Jvm21LegacyPlantBytecodeScanner(
         val facts: JvmClassFacts
     )
 
-    companion object {
-        private val CANONICAL_RUNTIME_CLASSES = setOf(
-            "com/modporter/compat/plant/v1/PlantType",
-            "com/modporter/compat/plant/v1/IPlantable",
-            "com/modporter/compat/plant/v1/LegacyPlantSustainer",
-            "com/modporter/compat/plant/v1/LegacyPlantPlacement",
-            "com/modporter/compat/plant/v1/LegacyPlantableAdapter",
-            "com/modporter/compat/plant/v1/LegacySoilAdapter",
-            "com/modporter/compat/plant/v1/LegacyPlantPlacementAdapter",
-            "com/modporter/compat/plant/v1/LegacyPlantables"
-        )
-    }
+    private fun canonicalRuntimeResourcesMatch(
+        artifact: ResolvedArtifact,
+        runtimeIdentity: CanonicalRuntimeIdentity
+    ): Boolean = runCatching {
+        JarFile(artifact.file.toFile(), false).use { jar ->
+            runtimeIdentity.generatedResourceHashes().all { (path, expectedHash) ->
+                val entry = jar.getJarEntry(path) ?: return@use false
+                val bytes = jar.getInputStream(entry).use { it.readBytes() }
+                sha256(bytes) == expectedHash
+            }
+        }
+    }.getOrDefault(false)
 }
 
 /**
@@ -2234,13 +2320,14 @@ internal object LegacyPlantCoverageV2Verifier {
         val targetPlanRecords = receiptRecords(targetPlan)
         require(
             targetPlanRecords.singleValue("schema") ==
-                "legacy-plant-target-build-plan-v2"
+                "legacy-plant-target-build-plan-v3"
         )
         require(targetPlanRecords.all {
             it.first in setOf(
                 "schema",
                 "preparation",
-                "adapterRegistration"
+                "adapterRegistration",
+                "reviewedAdapterProfile"
             )
         }) {
             "Target BuildSystem plan contains an unknown record type"
@@ -2285,6 +2372,11 @@ internal object LegacyPlantCoverageV2Verifier {
         )
         val plannedAdapterRegistrations =
             parsePlannedAdapterRegistrations(targetPlanRecords)
+        val expectedReviewedProfile = ReviewedLegacyPlantAdapterProfiles.forRuntime(
+            runtimeIdentity
+        )
+        val plannedReviewedProfiles =
+            nestedTargetPlanReceipts(targetPlanRecords, "reviewedAdapterProfile")
         plannedAdapterRegistrations.forEach { registration ->
             require(
                 preparationSnapshots.sourceTransitions[
@@ -2309,10 +2401,36 @@ internal object LegacyPlantCoverageV2Verifier {
         }) {
             "Prepared canonical runtime sources do not match verified resource bytes"
         }
+        val runtimeResourceRoot =
+            ".modporter/legacy-plant-compat/src/main/resources/"
+        val runtimeResourceTransitions = preparationSnapshots.resourceTransitions
+            .filterKeys { it.startsWith(runtimeResourceRoot) }
+        require(
+            runtimeResourceTransitions.isNotEmpty() &&
+                preparationSnapshots.resourceTransitions.keys ==
+                    runtimeResourceTransitions.keys &&
+                runtimeResourceTransitions.values.all { (before, after) ->
+                    before == null && after != null
+                }
+        ) {
+            "Prepared runtime legal and compatibility resources lack exclusive ownership"
+        }
+        runtimeIdentity.generatedResourceHashes().forEach { (path, hash) ->
+            val preparedPath = runtimeResourceRoot + path
+            require(
+                preparationSnapshots.resourceAfter[preparedPath] == hash &&
+                    preparationSnapshots.resourceTransitions[preparedPath] == (null to hash)
+            ) {
+                "Prepared canonical runtime resource does not match verified bytes: $path"
+            }
+        }
+        require(runtimeIdentityReceipt.readText() == runtimeIdentity.canonicalText()) {
+            "Stored canonical runtime identity does not match current catalog bytes"
+        }
         val runtimeRecords = receiptRecords(runtimeIdentityReceipt)
         require(
             runtimeRecords.singleValue("schema") ==
-                "legacy-plant-canonical-runtime-identity-v1" &&
+                "legacy-plant-canonical-runtime-identity-v2" &&
                 runtimeRecords.singleValue("sourceSha256") ==
                 expectedRuntimeSourceSha256 &&
                 runtimeRecords.singleValue("jarSha256") ==
@@ -2399,6 +2517,21 @@ internal object LegacyPlantCoverageV2Verifier {
 
         val graphArtifacts = graphArtifactKeys(sourceGraph, "source") +
             graphArtifactKeys(targetGraph, "target")
+        val exactReviewedSourcePresent = graphArtifacts.any { artifact ->
+            artifact.phase == "source" &&
+                artifact.component == expectedReviewedProfile.sourceComponent &&
+                artifact.artifactSha256 == expectedReviewedProfile.sourceArtifactSha256
+        }
+        require(
+            if (exactReviewedSourcePresent) {
+                plannedReviewedProfiles ==
+                    mapOf(expectedReviewedProfile.sha256 to expectedReviewedProfile.canonicalText())
+            } else {
+                plannedReviewedProfiles.isEmpty()
+            }
+        ) {
+            "Target plan reviewed adapter profile does not match the sealed source graph"
+        }
         require(closureScanHashes.getValue("source").keys ==
             graphArtifacts.filter { it.phase == "source" }.map { it.key }.toSet())
         require(closureScanHashes.getValue("target").keys ==
@@ -2411,6 +2544,10 @@ internal object LegacyPlantCoverageV2Verifier {
         val artifactPaths = mutableMapOf<Pair<String, String>, Path>()
         val scanPaths = mutableMapOf<Pair<String, String>, Path>()
         val seedEntryLines = mutableListOf<String>()
+        val targetCoverageByKey = mutableMapOf<String, String>()
+        val targetProfileByKey = mutableMapOf<String, String?>()
+        val mappedCoverageRequirements =
+            mutableListOf<Triple<String, List<String>, String?>>()
         repeat(entryCount) { index ->
             val prefix = "entry.$index"
             var decisionRecords = emptyList<Pair<String, String>>()
@@ -2436,6 +2573,7 @@ internal object LegacyPlantCoverageV2Verifier {
                 "verified-vanilla",
                 "canonical-abi",
                 "shared-adapters",
+                "reviewed-adapters",
                 "removed-inert",
                 "mapped-target",
                 "verified-source-platform",
@@ -2455,6 +2593,7 @@ internal object LegacyPlantCoverageV2Verifier {
                         "verified-vanilla",
                         "canonical-abi",
                         "shared-adapters",
+                        "reviewed-adapters",
                         "canonical-runtime"
                     )
             )
@@ -2498,6 +2637,12 @@ internal object LegacyPlantCoverageV2Verifier {
                 "shared-adapters" -> require(
                     hasSurface &&
                         scanRecords.any { it.first == "adapterManifestSha256" }
+                )
+                "reviewed-adapters" -> require(
+                    hasSurface &&
+                        scanRecords.singleValue("reviewedAdapterProfileSha256") ==
+                            expectedReviewedProfile.sha256 &&
+                        plannedReviewedProfiles.containsKey(expectedReviewedProfile.sha256)
                 )
                 "removed-inert", "mapped-target" -> require(hasSurface)
                 "verified-source-platform" -> require(hasSurface && sourcePlatform)
@@ -2776,6 +2921,29 @@ internal object LegacyPlantCoverageV2Verifier {
                 }
             }
             require(covered.add(matching.phase to matching.key))
+            val scanProfileHash = scanRecords
+                .filter { it.first == "reviewedAdapterProfileSha256" }
+                .singleOrNull()?.second
+            if (phase == "target") {
+                require(targetCoverageByKey.put(matching.key, coverage) == null)
+                require(targetProfileByKey.put(matching.key, scanProfileHash) == null)
+            }
+            if (coverage == "mapped-target") {
+                mappedCoverageRequirements += Triple(
+                    component,
+                    matchedCoordinates.values.flatten().distinct(),
+                    scanProfileHash
+                )
+                if (component == expectedReviewedProfile.sourceComponent &&
+                    artifactHash == expectedReviewedProfile.sourceArtifactSha256
+                ) {
+                    require(scanProfileHash == expectedReviewedProfile.sha256)
+                    require(
+                        values.getValue("$prefix.decisionSha256") ==
+                            expectedReviewedProfile.decisionSha256
+                    )
+                }
+            }
             require(
                 artifactPaths.put(matching.phase to matching.key, artifact) == null &&
                     scanPaths.put(matching.phase to matching.key, scan) == null
@@ -2826,6 +2994,8 @@ internal object LegacyPlantCoverageV2Verifier {
                 coverage,
                 values.getValue("$prefix.scanSha256"),
                 values["$prefix.registrationManifestSha256"].orEmpty(),
+                scanRecords.filter { it.first == "reviewedAdapterProfileSha256" }
+                    .singleOrNull()?.second.orEmpty(),
                 values["$prefix.decisionSha256"].orEmpty(),
                 values["$prefix.removalSha256"].orEmpty(),
                 matchedCoordinates.toSortedMap().entries.joinToString(";") {
@@ -2835,6 +3005,39 @@ internal object LegacyPlantCoverageV2Verifier {
             ).joinToString("|")
         }
         require(covered == graphArtifacts.map { it.phase to it.key }.toSet())
+        val admittedMappedTargetCoverage = setOf(
+            "verified-vanilla",
+            "canonical-runtime",
+            "canonical-abi",
+            "shared-adapters",
+            "reviewed-adapters"
+        )
+        mappedCoverageRequirements.forEach { (sourceComponent, targets, sourceProfileHash) ->
+            require(
+                targets.isNotEmpty() &&
+                    targets.all { targetCoverageByKey[it] in admittedMappedTargetCoverage }
+            ) {
+                "Mapped target replay does not reproduce admitted semantic coverage"
+            }
+            if (sourceComponent == expectedReviewedProfile.sourceComponent) {
+                val reviewedTargets = graphArtifacts.filter { artifact ->
+                    artifact.phase == "target" &&
+                        artifact.component == expectedReviewedProfile.targetComponent &&
+                        artifact.artifactSha256 == expectedReviewedProfile.targetArtifactSha256
+                }
+                require(
+                    sourceProfileHash == expectedReviewedProfile.sha256 &&
+                        reviewedTargets.size == 1 &&
+                        targets == listOf(reviewedTargets.single().key) &&
+                        targetCoverageByKey[reviewedTargets.single().key] ==
+                            "reviewed-adapters" &&
+                        targetProfileByKey[reviewedTargets.single().key] ==
+                            expectedReviewedProfile.sha256
+                ) {
+                    "Reviewed Dynamic Trees replay lacks all three source surfaces"
+                }
+            }
+        }
         require(referencedDecisionHashes == plannedDecisionReceipts.keys) {
             "BuildSystem decisions are not covered exactly once by the inventory"
         }

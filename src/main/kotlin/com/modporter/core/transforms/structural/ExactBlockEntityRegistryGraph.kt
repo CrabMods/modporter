@@ -38,9 +38,14 @@ internal class ExactBlockEntityRegistryGraph private constructor(
         fun build(sourceRoot: Path): ExactBlockEntityRegistryGraph {
             if (!Files.isDirectory(sourceRoot)) return ExactBlockEntityRegistryGraph(emptyMap(), null)
             val files = Files.walk(sourceRoot).use { stream ->
-                stream.filter { it.extension == "java" }.toList()
+                stream.filter { it.extension == "java" }
+                    .sorted(compareBy<Path> {
+                        sourceRoot.relativize(it).toString().replace('\\', '/')
+                    })
+                    .toList()
             }
             val index = JavaProjectTypeIndex.build(sourceRoot)
+            files.forEach { file -> index.unit(file) }
             val references = linkedMapOf<String, MutableSet<String>>()
             files.forEach { file ->
                 index.unit(file).findAll(FieldDeclaration::class.java).forEach fields@{ field ->

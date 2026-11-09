@@ -1,0 +1,141 @@
+/*
+ * Copyright (c) 2026 ModPorter contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package @PACKAGE@;
+
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.Optional;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+
+/** Installs the exact reviewed Dynamic Trees producer adapters once per runtime. */
+public final class ReviewedExternalPlantAdapters {
+    private static final String OWNER = "modporter:reviewed-external:dynamictrees:1.7.2";
+
+    private static final LegacyPlantableAdapter<Object> SAPLING_ADAPTER =
+        new LegacyPlantableAdapter<>() {
+            @Override
+            public BlockState getPlant(Object value, BlockGetter level, BlockPos pos) {
+                if (!(value instanceof Block block)) {
+                    throw new LinkageError("Reviewed Dynamic Trees sapling is no longer a Block");
+                }
+                return block.defaultBlockState();
+            }
+
+            @Override
+            public PlantType getPlantType(Object value, BlockGetter level, BlockPos pos) {
+                return PlantType.PLAINS;
+            }
+        };
+
+    private static final LegacyPlantableAdapter<Object> SEED_ADAPTER =
+        new LegacyPlantableAdapter<>() {
+            @Override
+            public BlockState getPlant(Object value, BlockGetter level, BlockPos pos) {
+                LegacyPlantAdapterProfile.GameProfile profile =
+                    LegacyPlantAdapterProfile.requireGameProfile();
+                if (profile == null) {
+                    throw new LinkageError("Dynamic Trees seed adapter invoked while profile is absent");
+                }
+                Object species = invoke(profile.seedGetSpecies(), value);
+                if (species == null) {
+                    throw new LinkageError("Dynamic Trees Seed.getSpecies() returned null");
+                }
+                Object result = invoke(profile.speciesGetSapling(), species);
+                if (!(result instanceof Optional<?> optional)) {
+                    throw new LinkageError("Dynamic Trees Species.getSapling() did not return Optional");
+                }
+                Object sapling = optional.orElse(null);
+                if (sapling == null) return Blocks.AIR.defaultBlockState();
+                if (!(sapling instanceof Block block)) {
+                    throw new LinkageError("Dynamic Trees Species.getSapling() contained a non-Block");
+                }
+                return block.defaultBlockState();
+            }
+
+            @Override
+            public PlantType getPlantType(Object value, BlockGetter level, BlockPos pos) {
+                return PlantType.PLAINS;
+            }
+        };
+
+    private static volatile State state;
+    private static volatile LinkageError failure;
+
+    private ReviewedExternalPlantAdapters() {
+    }
+
+    public static void ensureInstalled() {
+        State current = state;
+        if (current == State.ABSENT || current == State.INSTALLED) return;
+        if (current == State.FAILED) throw failure;
+
+        synchronized (ReviewedExternalPlantAdapters.class) {
+            current = state;
+            if (current == State.ABSENT || current == State.INSTALLED) return;
+            if (current == State.FAILED) throw failure;
+            try {
+                LegacyPlantAdapterProfile.GameProfile profile =
+                    LegacyPlantAdapterProfile.requireGameProfile();
+                if (profile == null) {
+                    state = State.ABSENT;
+                    return;
+                }
+
+                // The profile verifies all owners, hashes, types and members before either write.
+                LegacyPlantables.registerPlantClass(
+                    OWNER,
+                    profile.dynamicSaplingBlockClass(),
+                    SAPLING_ADAPTER
+                );
+                LegacyPlantables.registerPlantClass(OWNER, profile.seedClass(), SEED_ADAPTER);
+                state = State.INSTALLED;
+            } catch (LinkageError error) {
+                failure = error;
+                state = State.FAILED;
+                throw error;
+            } catch (Throwable error) {
+                LinkageError wrapped = new LinkageError(
+                    "Reviewed Dynamic Trees plant adapter installation failed"
+                );
+                wrapped.initCause(error);
+                failure = wrapped;
+                state = State.FAILED;
+                throw wrapped;
+            }
+        }
+    }
+
+    private static Object invoke(Method method, Object receiver, Object... arguments) {
+        try {
+            return method.invoke(receiver, arguments);
+        } catch (InvocationTargetException error) {
+            Throwable cause = error.getCause();
+            if (cause instanceof RuntimeException runtime) throw runtime;
+            if (cause instanceof Error fatal) throw fatal;
+            LinkageError wrapped = new LinkageError(
+                "Reviewed Dynamic Trees method threw a checked exception: " + method
+            );
+            wrapped.initCause(cause);
+            throw wrapped;
+        } catch (ReflectiveOperationException error) {
+            LinkageError wrapped = new LinkageError(
+                "Reviewed Dynamic Trees method is no longer invocable: " + method
+            );
+            wrapped.initCause(error);
+            throw wrapped;
+        }
+    }
+
+    private enum State {
+        ABSENT,
+        INSTALLED,
+        FAILED
+    }
+}

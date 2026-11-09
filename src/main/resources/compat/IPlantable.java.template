@@ -1,6 +1,9 @@
 /*
  * Copyright (c) Forge Development LLC and contributors
  * SPDX-License-Identifier: LGPL-2.1-only
+ *
+ * Modified by ModPorter contributors on 2026-11-10 for the shared NeoForge
+ * 1.21.1 legacy-plant compatibility runtime; see third_party/minecraftforge/README.md.
  */
 
 package @PACKAGE@;

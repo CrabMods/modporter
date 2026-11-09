@@ -9,6 +9,7 @@ import com.modporter.core.transforms.build.BuildDependencyPreparationReceipt
 import com.modporter.core.transforms.build.BuildRemovedDependencyReceipt
 import com.modporter.core.transforms.build.BuildResolvedSourceDependency
 import com.modporter.core.transforms.build.BuildTargetCoordinate
+import com.modporter.core.transforms.shared.LegacyPlantRuntimeResources
 import java.nio.channels.FileChannel
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
@@ -210,6 +211,14 @@ internal object LegacyPlantDependencyInventoryProducer {
                     entries += CoverageEntry(InventoryPhase.TARGET, artifact, "canonical-runtime")
                 scan.isVerifiedTargetVanilla ->
                     entries += CoverageEntry(InventoryPhase.TARGET, artifact, "verified-vanilla")
+                scan.reviewedAdapterProfile?.let { profile ->
+                    targetPlan.reviewedAdapterProfiles.singleOrNull { it.sha256 == profile.sha256 }
+                } != null ->
+                    entries += CoverageEntry(
+                        InventoryPhase.TARGET,
+                        artifact,
+                        "reviewed-adapters"
+                    )
                 !scan.hasPlantSurface ->
                     entries += CoverageEntry(InventoryPhase.TARGET, artifact, "no-surface")
                 scan.allRelevantClassesImplementCanonicalAbi ->
@@ -315,7 +324,8 @@ internal object LegacyPlantDependencyInventoryProducer {
                         "verified-vanilla",
                         "canonical-runtime",
                         "canonical-abi",
-                        "shared-adapters"
+                        "shared-adapters",
+                        "reviewed-adapters"
                     )
                     val targetEntries = targets.mapNotNull { target ->
                         entries.singleOrNull {
@@ -329,6 +339,30 @@ internal object LegacyPlantDependencyInventoryProducer {
                             "source ${artifact.component} maps to a target without admitted legacy " +
                                 "semantics: ${targets.map { it.component }}"
                         continue
+                    }
+                    val reviewedProfile = scan.reviewedAdapterProfile
+                    if (reviewedProfile != null) {
+                        val plannedProfile = targetPlan.reviewedAdapterProfiles.singleOrNull {
+                            it.sha256 == reviewedProfile.sha256
+                        }
+                        val reviewedTargets = targets.filter {
+                            it.component == reviewedProfile.targetComponent &&
+                                it.sha256 == reviewedProfile.targetArtifactSha256
+                        }
+                        val targetProfileMatches = reviewedTargets.size == 1 &&
+                            targetScans.getValue(reviewedTargets.single())
+                                .reviewedAdapterProfile?.sha256 == reviewedProfile.sha256 &&
+                            targetEntries.single { it.artifact == reviewedTargets.single() }.coverage ==
+                                "reviewed-adapters"
+                        if (plannedProfile == null ||
+                            !reviewedProfile.matchesDecision(decision) ||
+                            !targetProfileMatches
+                        ) {
+                            blockers +=
+                                "source ${artifact.component} lacks whole-closure reviewed profile " +
+                                    "coverage for both producers and MushroomRot consumer"
+                            continue
+                        }
                     }
                     entries += CoverageEntry(
                         InventoryPhase.SOURCE,
@@ -437,6 +471,7 @@ internal object LegacyPlantDependencyInventoryProducer {
                         entry.coverage,
                         sha256(scan.canonicalReceipt()),
                         scan.adapterManifest?.sha256.orEmpty(),
+                        scan.reviewedAdapterProfile?.sha256.orEmpty(),
                         entry.decision?.sha256.orEmpty(),
                         entry.removal?.sha256.orEmpty(),
                         entry.matchedTargetCoordinates.entries
@@ -1303,7 +1338,8 @@ internal data class PlantSurfaceScan(
     val isVerifiedTargetVanilla: Boolean,
     val isVerifiedSourcePlatform: Boolean,
     val isCanonicalRuntime: Boolean,
-    val adapterManifest: AdapterManifestReceipt?
+    val adapterManifest: AdapterManifestReceipt?,
+    val reviewedAdapterProfile: ReviewedLegacyPlantAdapterProfileReceipt? = null
 ) {
     fun canonicalReceipt(): String = buildList {
         add("schema=legacy-plant-bytecode-scan-v1")
@@ -1313,6 +1349,7 @@ internal data class PlantSurfaceScan(
         add("isVerifiedSourcePlatform=$isVerifiedSourcePlatform")
         add("isCanonicalRuntime=$isCanonicalRuntime")
         adapterManifest?.let { add("adapterManifestSha256=${it.sha256}") }
+        reviewedAdapterProfile?.let { add("reviewedAdapterProfileSha256=${it.sha256}") }
         relevantClasses.sorted().forEach { add("relevantClass=${receiptAtom(it)}") }
         classFacts.sorted().forEach { add("fact=${receiptAtom(it)}") }
     }.joinToString("\n", postfix = "\n")
@@ -1457,25 +1494,39 @@ internal class CanonicalRuntimeIdentity private constructor(
         get() = receiptSha256(canonicalText())
 
     fun verify() {
-        require(sourceTemplates.keys == CANONICAL_SOURCE_NAMES) {
+        require(sourceTemplates.keys == LegacyPlantRuntimeResources.JAVA_NAMES) {
             "Canonical runtime source set changed"
         }
-        require(canonicalSourceSha256(sourceTemplates) == sourceSha256) {
-            "Canonical runtime source bytes changed"
+        require(
+            LegacyPlantRuntimeResources.canonicalSourceHashBytes(sourceTemplates) == sourceSha256
+        ) {
+            "Canonical runtime source or resource bytes changed"
         }
         require(jarHashReceipt.toString(Charsets.UTF_8).trim() == jarSha256) {
             "Canonical runtime JAR receipt changed"
         }
         require(jarSha256.matches(Regex("[0-9a-f]{64}")))
+        require(
+            generatedResourceHashes().keys ==
+                setOf(ReviewedLegacyPlantAdapterProfileReceipt.REQUIRED_MIXIN_CONFIG)
+        ) {
+            "Canonical runtime resource set changed"
+        }
     }
 
     fun canonicalText(): String = buildList {
-        add("schema=legacy-plant-canonical-runtime-identity-v1")
+        add("schema=legacy-plant-canonical-runtime-identity-v2")
         add("sourceSha256=$sourceSha256")
         add("jarSha256=$jarSha256")
         add("jarHashReceiptSha256=${receiptSha256(jarHashReceipt)}")
         sourceTemplates.toSortedMap().forEach { (name, bytes) ->
             add("source=$name|${receiptSha256(bytes)}")
+        }
+        LegacyPlantRuntimeResources.resourceTemplates().toSortedMap().forEach { (name, text) ->
+            add("resourceTemplate=$name|${receiptSha256(text)}")
+        }
+        generatedResourceHashes().toSortedMap().forEach { (name, hash) ->
+            add("resource=$name|$hash")
         }
     }.joinToString("\n", postfix = "\n")
 
@@ -1491,21 +1542,16 @@ internal class CanonicalRuntimeIdentity private constructor(
             val content = bytes.toString(Charsets.UTF_8)
                 .replace("@PACKAGE@", "com.modporter.compat.plant.v1")
                 .replace("@RUNTIME_SOURCE_SHA256@", sourceSha256)
+                .replace("\r\n", "\n")
+                .replace('\r', '\n')
             receiptSha256(content)
         }
 
-    companion object {
-        private val CANONICAL_SOURCE_NAMES = setOf(
-            "PlantType",
-            "IPlantable",
-            "LegacyPlantSustainer",
-            "LegacyPlantPlacement",
-            "LegacyPlantableAdapter",
-            "LegacySoilAdapter",
-            "LegacyPlantPlacementAdapter",
-            "LegacyPlantables"
-        )
+    fun generatedResourceHashes(): Map<String, String> =
+        LegacyPlantRuntimeResources.expandedResources(sourceSha256)
+            .mapValues { (_, content) -> receiptSha256(content) }
 
+    companion object {
         fun fromCanonicalResources(
             sourceTemplates: Map<String, ByteArray>,
             jarHashReceipt: ByteArray
@@ -1515,7 +1561,7 @@ internal class CanonicalRuntimeIdentity private constructor(
             val identity = CanonicalRuntimeIdentity(
                 sourceTemplates = copied,
                 jarHashReceipt = jarHashReceipt.copyOf(),
-                sourceSha256 = canonicalSourceSha256(copied),
+                sourceSha256 = LegacyPlantRuntimeResources.canonicalSourceHashBytes(copied),
                 jarSha256 = jarSha256
             )
             identity.verify()
@@ -1523,15 +1569,8 @@ internal class CanonicalRuntimeIdentity private constructor(
         }
 
         fun fromProductionResources(): CanonicalRuntimeIdentity {
-            val sources = CANONICAL_SOURCE_NAMES.associateWith { name ->
-                checkNotNull(
-                    CanonicalRuntimeIdentity::class.java.getResourceAsStream(
-                        "/compat/$name.java.template"
-                    )
-                ) {
-                    "Missing canonical legacy plant runtime source $name"
-                }.use { it.readBytes() }
-            }
+            val sources = LegacyPlantRuntimeResources.javaTemplates()
+                .mapValues { (_, content) -> content.toByteArray(Charsets.UTF_8) }
             val jarHashReceipt = checkNotNull(
                 CanonicalRuntimeIdentity::class.java.getResourceAsStream(
                     "/compat/legacy-plant-compat-v1.jar.sha256"
@@ -1541,33 +1580,28 @@ internal class CanonicalRuntimeIdentity private constructor(
             }.use { it.readBytes() }
             return fromCanonicalResources(sources, jarHashReceipt)
         }
-
-        private fun canonicalSourceSha256(sources: Map<String, ByteArray>): String {
-            val digest = MessageDigest.getInstance("SHA-256")
-            for ((name, bytes) in sources.toSortedMap()) {
-                digest.update(name.toByteArray(Charsets.UTF_8))
-                digest.update(0.toByte())
-                digest.update(
-                    bytes.toString(Charsets.UTF_8)
-                        .replace("\r\n", "\n")
-                        .toByteArray(Charsets.UTF_8)
-                )
-                digest.update(0.toByte())
-            }
-            return digest.digest().joinToString("") { "%02x".format(it) }
-        }
     }
 }
 
 internal data class TargetBuildPlanReceipt(
     val preparation: BuildDependencyPreparationReceipt,
-    val adapterRegistrations: List<PlannedAdapterRegistrationReceipt>
+    val adapterRegistrations: List<PlannedAdapterRegistrationReceipt>,
+    val reviewedAdapterProfiles: List<ReviewedLegacyPlantAdapterProfileReceipt> = emptyList()
 ) {
     init {
         require(
             adapterRegistrations.map(PlannedAdapterRegistrationReceipt::sha256)
                 .distinct().size == adapterRegistrations.size
         )
+        require(
+            reviewedAdapterProfiles.map(ReviewedLegacyPlantAdapterProfileReceipt::sha256)
+                .distinct().size == reviewedAdapterProfiles.size
+        )
+        reviewedAdapterProfiles.forEach { profile ->
+            require(preparation.decisions.singleOrNull(profile::matchesDecision) != null) {
+                "Reviewed adapter profile is not bound to its exact BuildSystem decision"
+            }
+        }
         adapterRegistrations.forEach { registration ->
             require(
                 preparation.changedSourceFiles.singleOrNull {
@@ -1588,7 +1622,7 @@ internal data class TargetBuildPlanReceipt(
         get() = receiptSha256(canonicalText())
 
     fun canonicalText(): String = buildList {
-        add("schema=legacy-plant-target-build-plan-v2")
+        add("schema=legacy-plant-target-build-plan-v3")
         add(
             "preparation=${receiptAtom(preparation.canonicalText())}|" +
                 preparation.sha256
@@ -1596,6 +1630,11 @@ internal data class TargetBuildPlanReceipt(
         adapterRegistrations.sortedBy(PlannedAdapterRegistrationReceipt::sha256).forEach {
             add("adapterRegistration=${receiptAtom(it.canonicalText())}|${it.sha256}")
         }
+        reviewedAdapterProfiles
+            .sortedBy(ReviewedLegacyPlantAdapterProfileReceipt::sha256)
+            .forEach {
+                add("reviewedAdapterProfile=${receiptAtom(it.canonicalText())}|${it.sha256}")
+            }
     }.joinToString("\n", postfix = "\n")
 }
 

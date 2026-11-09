@@ -1,0 +1,548 @@
+/*
+ * Copyright (c) 2026 ModPorter contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package @PACKAGE@;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
+import java.util.Objects;
+
+/**
+ * Fail-closed identity and API profile for the reviewed Dynamic Trees 1.7.2 adapters.
+ *
+ * The loading-stage path only reflects FML and SecureJar APIs. It deliberately does not load any
+ * Dynamic Trees or Minecraft class. The game-stage path uses this class's canonical game loader,
+ * never the thread context class loader, and checks every reflected API used by the adapters.
+ */
+public final class LegacyPlantAdapterProfile {
+    private static final String MOD_ID = "dynamictrees";
+    private static final String EXPECTED_VERSION = "1.7.2";
+    private static final String EXPECTED_MODULE = "dynamictrees";
+    private static final long EXPECTED_JAR_SIZE = 3_399_913L;
+    private static final String EXPECTED_JAR_SHA256 =
+        "ef94737b99e68a0b489b56f901fcc71a3ac8e7a16e3a22ac8413c5f66df566f0";
+
+    private static final String DYNAMIC_SAPLING =
+        "com.dtteam.dynamictrees.block.sapling.DynamicSaplingBlock";
+    private static final String SEED = "com.dtteam.dynamictrees.item.Seed";
+    private static final String SPECIES = "com.dtteam.dynamictrees.tree.species.Species";
+    private static final String MUSHROOM_ROT =
+        "com.dtteam.dynamictrees.systems.genfeature.MushroomRotGenFeature";
+    private static final String GEN_FEATURE_CONFIGURATION =
+        "com.dtteam.dynamictrees.systems.genfeature.GenFeatureConfiguration";
+    private static final String CONFIGURATION_PROPERTY =
+        "com.dtteam.dynamictrees.api.configuration.ConfigurationProperty";
+    private static final String POST_ROT_CONTEXT =
+        "com.dtteam.dynamictrees.systems.genfeature.context.PostRotContext";
+
+    private static final EntryHash[] EXPECTED_ENTRIES = {
+        new EntryHash(
+            "META-INF/neoforge.mods.toml",
+            "2e01c569cc41fa62ddd3bfb4b7a908621fa80fa1201c51b35bda78d830a66276"
+        ),
+        new EntryHash(
+            "com/dtteam/dynamictrees/block/sapling/DynamicSaplingBlock.class",
+            "096ff90b12032d3734a1cde68236cfb419119991fb8cec816f0197529148b5f9"
+        ),
+        new EntryHash(
+            "com/dtteam/dynamictrees/item/Seed.class",
+            "340725f2c959c26074790d6821b4289c47fc464ed21585f737438d7eee0df019"
+        ),
+        new EntryHash(
+            "com/dtteam/dynamictrees/tree/species/Species.class",
+            "1a8025d3b326bfa5b6cb769ddcf9ccd92125b8dae149a6dc15e7b5235914821e"
+        ),
+        new EntryHash(
+            "com/dtteam/dynamictrees/systems/genfeature/MushroomRotGenFeature.class",
+            "dc3abd8cba01da6b1ac2c7ffaf3d2d83a55e7c6ebb520dfd8e09f3d43178d445"
+        ),
+        new EntryHash(
+            "com/dtteam/dynamictrees/systems/genfeature/GenFeatureConfiguration.class",
+            "f6c01a9beb420500c4048767fcb575d9977c64a1b8e04e4e3a1f0455b09678cf"
+        ),
+        new EntryHash(
+            "com/dtteam/dynamictrees/api/configuration/ConfigurationProperty.class",
+            "f2c3bcc9f3953e66409b5e5294f913ecd14e28b084d59351160ae56c507da663"
+        ),
+        new EntryHash(
+            "com/dtteam/dynamictrees/systems/genfeature/context/PostRotContext.class",
+            "cd6b7c68fc9becf4e3afe2f491db3ce733c1c74a7e4da9a710626e16696d4f8d"
+        )
+    };
+
+    private static volatile State loadingState = State.UNKNOWN;
+    private static volatile LoadingProfile loadingProfile;
+    private static volatile LinkageError loadingFailure;
+    private static volatile State gameState = State.UNKNOWN;
+    private static volatile GameProfile gameProfile;
+    private static volatile LinkageError gameFailure;
+
+    private LegacyPlantAdapterProfile() {
+    }
+
+    /** Returns true only for the exact reviewed artifact; complete absence returns false. */
+    public static boolean validateLoadingProfile() {
+        State state = loadingState;
+        if (state == State.PRESENT) return true;
+        if (state == State.ABSENT) return false;
+        if (state == State.FAILED) throw loadingFailure;
+
+        synchronized (LegacyPlantAdapterProfile.class) {
+            state = loadingState;
+            if (state == State.PRESENT) return true;
+            if (state == State.ABSENT) return false;
+            if (state == State.FAILED) throw loadingFailure;
+            try {
+                LoadingProfile profile = inspectLoadingProfile();
+                if (profile == null) {
+                    loadingState = State.ABSENT;
+                    return false;
+                }
+                loadingProfile = profile;
+                loadingState = State.PRESENT;
+                return true;
+            } catch (LinkageError error) {
+                loadingFailure = error;
+                loadingState = State.FAILED;
+                throw error;
+            } catch (Throwable error) {
+                LinkageError failure = failure("Dynamic Trees loading profile validation failed", error);
+                loadingFailure = failure;
+                loadingState = State.FAILED;
+                throw failure;
+            }
+        }
+    }
+
+    /** Returns the exact game-stage reflection profile, or null when Dynamic Trees is absent. */
+    public static GameProfile requireGameProfile() {
+        if (!validateLoadingProfile()) return null;
+
+        State state = gameState;
+        if (state == State.PRESENT) return gameProfile;
+        if (state == State.FAILED) throw gameFailure;
+
+        synchronized (LegacyPlantAdapterProfile.class) {
+            state = gameState;
+            if (state == State.PRESENT) return gameProfile;
+            if (state == State.FAILED) throw gameFailure;
+            try {
+                GameProfile profile = inspectGameProfile(loadingProfile);
+                gameProfile = profile;
+                gameState = State.PRESENT;
+                return profile;
+            } catch (LinkageError error) {
+                gameFailure = error;
+                gameState = State.FAILED;
+                throw error;
+            } catch (Throwable error) {
+                LinkageError failure = failure("Dynamic Trees game profile validation failed", error);
+                gameFailure = failure;
+                gameState = State.FAILED;
+                throw failure;
+            }
+        }
+    }
+
+    private static LoadingProfile inspectLoadingProfile() throws ReflectiveOperationException, IOException {
+        ClassLoader loader = canonicalLoader();
+        Class<?> loadingModListClass;
+        try {
+            loadingModListClass = Class.forName(
+                "net.neoforged.fml.loading.LoadingModList",
+                false,
+                loader
+            );
+        } catch (ClassNotFoundException absentFml) {
+            if (hasAnyTargetResource(loader)) {
+                throw failure("Dynamic Trees classes are present without LoadingModList ownership", absentFml);
+            }
+            return null;
+        }
+
+        Object loadingModList = invoke(loadingModListClass.getMethod("get"), null);
+        if (loadingModList == null) {
+            throw failure("LoadingModList is available but has not been initialized", null);
+        }
+        Object modFileInfo = invoke(
+            loadingModListClass.getMethod("getModFileById", String.class),
+            loadingModList,
+            MOD_ID
+        );
+        if (modFileInfo == null) {
+            if (hasAnyTargetResource(loader)) {
+                throw failure("Dynamic Trees classes are present without an owning mod file", null);
+            }
+            return null;
+        }
+
+        Class<?> modFileInfoClass = Class.forName(
+            "net.neoforged.neoforgespi.language.IModFileInfo",
+            false,
+            loader
+        );
+        String moduleName = requireString(
+            invoke(modFileInfoClass.getMethod("moduleName"), modFileInfo),
+            "module name"
+        );
+        String version = requireString(
+            invoke(modFileInfoClass.getMethod("versionString"), modFileInfo),
+            "version"
+        );
+        if (!EXPECTED_MODULE.equals(moduleName) || !EXPECTED_VERSION.equals(version)) {
+            throw failure(
+                "Unreviewed Dynamic Trees identity: module=" + moduleName + ", version=" + version,
+                null
+            );
+        }
+
+        Object modFile = invoke(modFileInfoClass.getMethod("getFile"), modFileInfo);
+        Class<?> modFileClass = Class.forName(
+            "net.neoforged.neoforgespi.locating.IModFile",
+            false,
+            loader
+        );
+        Path jarPath = requirePath(
+            invoke(modFileClass.getMethod("getFilePath"), modFile),
+            "mod file path"
+        );
+        if (!Files.isRegularFile(jarPath)) {
+            throw failure("Dynamic Trees owning file is not a regular JAR: " + jarPath, null);
+        }
+        long size = Files.size(jarPath);
+        String jarHash = sha256(jarPath);
+        if (size != EXPECTED_JAR_SIZE || !EXPECTED_JAR_SHA256.equals(jarHash)) {
+            throw failure(
+                "Unreviewed Dynamic Trees JAR: size=" + size + ", sha256=" + jarHash,
+                null
+            );
+        }
+
+        Object secureJar = invoke(modFileClass.getMethod("getSecureJar"), modFile);
+        Class<?> secureJarClass = Class.forName("cpw.mods.jarhandling.SecureJar", false, loader);
+        String secureJarName = requireString(
+            invoke(secureJarClass.getMethod("name"), secureJar),
+            "SecureJar name"
+        );
+        if (!moduleName.equals(secureJarName)) {
+            throw failure(
+                "Dynamic Trees module ownership mismatch: metadata=" + moduleName
+                    + ", SecureJar=" + secureJarName,
+                null
+            );
+        }
+        Method getPath = secureJarClass.getMethod("getPath", String.class, String[].class);
+        for (EntryHash expected : EXPECTED_ENTRIES) {
+            Path entryPath = requirePath(
+                invoke(getPath, secureJar, expected.path(), new String[0]),
+                "SecureJar entry " + expected.path()
+            );
+            if (!Files.isRegularFile(entryPath)) {
+                throw failure("Missing reviewed Dynamic Trees entry: " + expected.path(), null);
+            }
+            String actual = sha256(entryPath);
+            if (!expected.sha256().equals(actual)) {
+                throw failure(
+                    "Changed Dynamic Trees entry " + expected.path() + ": sha256=" + actual,
+                    null
+                );
+            }
+        }
+        return new LoadingProfile(moduleName);
+    }
+
+    private static GameProfile inspectGameProfile(LoadingProfile loading)
+        throws ReflectiveOperationException {
+        ClassLoader loader = canonicalLoader();
+        Class<?> sapling = loadOwned(DYNAMIC_SAPLING, loading, loader);
+        Class<?> seed = loadOwned(SEED, loading, loader);
+        Class<?> species = loadOwned(SPECIES, loading, loader);
+        Class<?> mushroomRot = loadOwned(MUSHROOM_ROT, loading, loader);
+        Class<?> configuration = loadOwned(GEN_FEATURE_CONFIGURATION, loading, loader);
+        Class<?> property = loadOwned(CONFIGURATION_PROPERTY, loading, loader);
+        Class<?> context = loadOwned(POST_ROT_CONTEXT, loading, loader);
+
+        requireSuperclass(sapling, "net.minecraft.world.level.block.Block");
+        requireSuperclass(seed, "net.minecraft.world.item.Item");
+        Method saplingGetSpecies = requirePublicInstanceMethod(
+            sapling, DYNAMIC_SAPLING, "getSpecies", SPECIES
+        );
+        Method seedGetSpecies = requirePublicInstanceMethod(seed, SEED, "getSpecies", SPECIES);
+        Method speciesGetSapling = requirePublicInstanceMethod(
+            species, SPECIES, "getSapling", "java.util.Optional"
+        );
+        Method configurationGet = requirePublicInstanceMethod(
+            configuration,
+            "com.dtteam.dynamictrees.api.configuration.Configuration",
+            "get",
+            "java.lang.Object",
+            property
+        );
+        Method contextLevel = requirePublicInstanceMethod(
+            context,
+            "com.dtteam.dynamictrees.systems.genfeature.context.GenFeatureContext",
+            "level",
+            "net.minecraft.world.level.LevelAccessor"
+        );
+        Method contextPos = requirePublicInstanceMethod(
+            context,
+            "com.dtteam.dynamictrees.systems.genfeature.context.GenFeatureContext",
+            "pos",
+            "net.minecraft.core.BlockPos"
+        );
+        Method contextRandom = requirePublicInstanceMethod(
+            context,
+            "com.dtteam.dynamictrees.systems.genfeature.context.GenFeatureContext",
+            "random",
+            "net.minecraft.util.RandomSource"
+        );
+        Method contextRadius = requirePublicInstanceMethod(
+            context, POST_ROT_CONTEXT, "radius", "int"
+        );
+
+        Field mushroom = requirePublicStaticFinalField(
+            mushroomRot, "MUSHROOM", property, MUSHROOM_ROT
+        );
+        Field alternateMushroom = requirePublicStaticFinalField(
+            mushroomRot, "ALTERNATE_MUSHROOM", property, MUSHROOM_ROT
+        );
+        Field alternateChance = requirePublicStaticFinalField(
+            mushroomRot, "ALTERNATE_MUSHROOM_CHANCE", property, MUSHROOM_ROT
+        );
+        Method postRot = mushroomRot.getDeclaredMethod("postRot", configuration, context);
+        int postRotModifiers = postRot.getModifiers();
+        if (!Modifier.isProtected(postRotModifiers)
+            || Modifier.isStatic(postRotModifiers)
+            || postRot.getReturnType() != boolean.class) {
+            throw failure("Changed Dynamic Trees protected postRot descriptor", null);
+        }
+
+        return new GameProfile(
+            sapling,
+            seed,
+            saplingGetSpecies,
+            seedGetSpecies,
+            speciesGetSapling,
+            configurationGet,
+            mushroom,
+            alternateMushroom,
+            alternateChance,
+            contextLevel,
+            contextPos,
+            contextRandom,
+            contextRadius
+        );
+    }
+
+    private static Class<?> loadOwned(String name, LoadingProfile loading, ClassLoader loader)
+        throws ClassNotFoundException {
+        Class<?> type = Class.forName(name, false, loader);
+        if (type.getClassLoader() != loader) {
+            throw failure("Dynamic Trees class loader mismatch for " + name, null);
+        }
+        Module module = type.getModule();
+        if (!loading.moduleName().equals(module.getName()) || module.getClassLoader() != loader) {
+            throw failure(
+                "Dynamic Trees module ownership mismatch for " + name + ": " + module.getName(),
+                null
+            );
+        }
+        return type;
+    }
+
+    private static Method requirePublicInstanceMethod(
+        Class<?> lookupType,
+        String declaringClass,
+        String name,
+        String returnType,
+        Class<?>... parameterTypes
+    ) throws NoSuchMethodException {
+        Method method = lookupType.getMethod(name, parameterTypes);
+        int modifiers = method.getModifiers();
+        if (!Modifier.isPublic(modifiers)
+            || Modifier.isStatic(modifiers)
+            || !declaringClass.equals(method.getDeclaringClass().getName())
+            || !returnType.equals(method.getReturnType().getName())) {
+            throw failure(
+                "Changed Dynamic Trees method " + lookupType.getName() + "." + name,
+                null
+            );
+        }
+        return method;
+    }
+
+    private static Field requirePublicStaticFinalField(
+        Class<?> lookupType,
+        String name,
+        Class<?> fieldType,
+        String declaringClass
+    ) throws NoSuchFieldException {
+        Field field = lookupType.getField(name);
+        int modifiers = field.getModifiers();
+        if (!Modifier.isPublic(modifiers)
+            || !Modifier.isStatic(modifiers)
+            || !Modifier.isFinal(modifiers)
+            || field.getType() != fieldType
+            || !declaringClass.equals(field.getDeclaringClass().getName())) {
+            throw failure("Changed Dynamic Trees field " + lookupType.getName() + "." + name, null);
+        }
+        return field;
+    }
+
+    private static void requireSuperclass(Class<?> type, String expected) {
+        Class<?> superclass = type.getSuperclass();
+        if (superclass == null || !expected.equals(superclass.getName())) {
+            throw failure(
+                "Changed Dynamic Trees superclass for " + type.getName() + ": "
+                    + (superclass == null ? "<none>" : superclass.getName()),
+                null
+            );
+        }
+    }
+
+    private static Object invoke(Method method, Object receiver, Object... arguments)
+        throws ReflectiveOperationException {
+        try {
+            return method.invoke(receiver, arguments);
+        } catch (InvocationTargetException error) {
+            Throwable cause = error.getCause();
+            if (cause instanceof ReflectiveOperationException reflective) throw reflective;
+            throw failure("Profile API invocation failed: " + method, cause);
+        }
+    }
+
+    private static boolean hasAnyTargetResource(ClassLoader loader) {
+        for (EntryHash expected : EXPECTED_ENTRIES) {
+            if (!expected.path().endsWith(".class")) continue;
+            if (loader.getResource(expected.path()) != null) return true;
+        }
+        return false;
+    }
+
+    private static ClassLoader canonicalLoader() {
+        ClassLoader loader = LegacyPlantAdapterProfile.class.getClassLoader();
+        if (loader == null) throw failure("Legacy plant runtime has no canonical game loader", null);
+        return loader;
+    }
+
+    private static Path requirePath(Object value, String description) {
+        if (value instanceof Path path) return path;
+        throw failure("Invalid " + description + ": " + value, null);
+    }
+
+    private static String requireString(Object value, String description) {
+        if (value instanceof String text && !text.isEmpty()) return text;
+        throw failure("Invalid " + description + ": " + value, null);
+    }
+
+    private static String sha256(Path path) throws IOException {
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException impossible) {
+            throw failure("SHA-256 is unavailable", impossible);
+        }
+        try (InputStream input = Files.newInputStream(path)) {
+            byte[] buffer = new byte[16 * 1024];
+            int read;
+            while ((read = input.read(buffer)) >= 0) {
+                if (read != 0) digest.update(buffer, 0, read);
+            }
+        }
+        return HexFormat.of().formatHex(digest.digest());
+    }
+
+    private static LinkageError failure(String message, Throwable cause) {
+        LinkageError error = new LinkageError(message);
+        if (cause != null) error.initCause(cause);
+        return error;
+    }
+
+    private enum State {
+        UNKNOWN,
+        ABSENT,
+        PRESENT,
+        FAILED
+    }
+
+    private record EntryHash(String path, String sha256) {
+        private EntryHash {
+            Objects.requireNonNull(path, "path");
+            Objects.requireNonNull(sha256, "sha256");
+        }
+    }
+
+    private record LoadingProfile(String moduleName) {
+    }
+
+    public static final class GameProfile {
+        private final Class<?> dynamicSaplingBlockClass;
+        private final Class<?> seedClass;
+        private final Method saplingGetSpecies;
+        private final Method seedGetSpecies;
+        private final Method speciesGetSapling;
+        private final Method configurationGet;
+        private final Field mushroom;
+        private final Field alternateMushroom;
+        private final Field alternateMushroomChance;
+        private final Method contextLevel;
+        private final Method contextPos;
+        private final Method contextRandom;
+        private final Method contextRadius;
+
+        private GameProfile(
+            Class<?> dynamicSaplingBlockClass,
+            Class<?> seedClass,
+            Method saplingGetSpecies,
+            Method seedGetSpecies,
+            Method speciesGetSapling,
+            Method configurationGet,
+            Field mushroom,
+            Field alternateMushroom,
+            Field alternateMushroomChance,
+            Method contextLevel,
+            Method contextPos,
+            Method contextRandom,
+            Method contextRadius
+        ) {
+            this.dynamicSaplingBlockClass = dynamicSaplingBlockClass;
+            this.seedClass = seedClass;
+            this.saplingGetSpecies = saplingGetSpecies;
+            this.seedGetSpecies = seedGetSpecies;
+            this.speciesGetSapling = speciesGetSapling;
+            this.configurationGet = configurationGet;
+            this.mushroom = mushroom;
+            this.alternateMushroom = alternateMushroom;
+            this.alternateMushroomChance = alternateMushroomChance;
+            this.contextLevel = contextLevel;
+            this.contextPos = contextPos;
+            this.contextRandom = contextRandom;
+            this.contextRadius = contextRadius;
+        }
+
+        public Class<?> dynamicSaplingBlockClass() { return dynamicSaplingBlockClass; }
+        public Class<?> seedClass() { return seedClass; }
+        public Method saplingGetSpecies() { return saplingGetSpecies; }
+        public Method seedGetSpecies() { return seedGetSpecies; }
+        public Method speciesGetSapling() { return speciesGetSapling; }
+        public Method configurationGet() { return configurationGet; }
+        public Field mushroom() { return mushroom; }
+        public Field alternateMushroom() { return alternateMushroom; }
+        public Field alternateMushroomChance() { return alternateMushroomChance; }
+        public Method contextLevel() { return contextLevel; }
+        public Method contextPos() { return contextPos; }
+        public Method contextRandom() { return contextRandom; }
+        public Method contextRadius() { return contextRadius; }
+    }
+}

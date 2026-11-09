@@ -78,6 +78,7 @@ jobs:
           ) -join ","
           $toolchainOption = "-Dorg.gradle.java.installations.paths=$toolchainPaths"
           $env:GRADLE_OPTS = "$($env:GRADLE_OPTS) $toolchainOption".Trim()
+          $env:MODPORTER_BENCHMARK_JAVA21_HOME = $env:JAVA_HOME_21_X64
           ./mod-build.ps1 build shadowJar --no-daemon --console=plain `
             '-Dorg.gradle.jvmargs=-Xmx4g' `
             '-Pkotlin.compiler.execution.strategy=in-process'

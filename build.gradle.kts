@@ -179,14 +179,14 @@ tasks.processResources {
     filesMatching("modporter-version.properties") {
         expand("version" to project.version.toString())
     }
+    from("LICENSE") { into("META-INF/modporter") }
+    from("NOTICE") { into("META-INF/modporter") }
+    from("third_party") { into("META-INF/modporter/third-party") }
 }
 
 tasks.withType<Jar>().configureEach {
     isPreserveFileTimestamps = false
     isReproducibleFileOrder = true
-    from("LICENSE") { into("META-INF/modporter") }
-    from("NOTICE") { into("META-INF/modporter") }
-    from("third_party") { into("META-INF/modporter/third-party") }
     manifest {
         attributes(
             "Main-Class" to "com.modporter.cli.MainKt",

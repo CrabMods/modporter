@@ -43,6 +43,7 @@ import com.github.javaparser.ast.type.TypeParameter
 import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter
 import com.modporter.core.pipeline.Change
 import com.modporter.core.pipeline.Confidence
+import com.modporter.core.transforms.shared.LegacyPlantRuntimeResources
 import com.modporter.mapping.TargetMembers
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -97,16 +98,10 @@ internal object LegacyPlantablesRuntimeMigration {
         "net.minecraftforge.common.PlantType",
         "net.neoforged.neoforge.common.PlantType"
     )
-    private val canonicalRuntimeTypes = setOf(
-        "$COMPAT_PACKAGE.PlantType",
-        "$COMPAT_PACKAGE.IPlantable",
-        "$COMPAT_PACKAGE.LegacyPlantSustainer",
-        "$COMPAT_PACKAGE.LegacyPlantPlacement",
-        "$COMPAT_PACKAGE.LegacyPlantableAdapter",
-        "$COMPAT_PACKAGE.LegacySoilAdapter",
-        "$COMPAT_PACKAGE.LegacyPlantPlacementAdapter",
-        "$COMPAT_PACKAGE.LegacyPlantables"
-    )
+    private val canonicalRuntimeTypes = LegacyPlantRuntimeResources.JAVA_NAMES
+        .mapTo(linkedSetOf()) { name ->
+            "$COMPAT_PACKAGE.${name.replace('/', '.')}"
+        }
     private val canonicalRuntimeHeritage = setOf(
         "$COMPAT_PACKAGE.IPlantable",
         "$COMPAT_PACKAGE.LegacyPlantSustainer",
@@ -1216,31 +1211,10 @@ internal object LegacyPlantablesRuntimeMigration {
         ).joinToString("") { "%02x".format(it) }
 
     private fun canonicalRuntimeTemplates(): Map<String, String> =
-        listOf(
-            "PlantType",
-            "IPlantable",
-            "LegacyPlantSustainer",
-            "LegacyPlantPlacement",
-            "LegacyPlantableAdapter",
-            "LegacySoilAdapter",
-            "LegacyPlantPlacementAdapter",
-            "LegacyPlantables"
-        ).associateWith { name ->
-            checkNotNull(javaClass.getResource("/compat/$name.java.template")) {
-                "Missing canonical legacy plant runtime source $name"
-            }.readText()
-        }
+        LegacyPlantRuntimeResources.javaTemplates()
 
-    private fun canonicalSourceHash(templates: Map<String, String>): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        for ((name, content) in templates.toSortedMap()) {
-            digest.update(name.toByteArray(Charsets.UTF_8))
-            digest.update(0.toByte())
-            digest.update(content.replace("\r\n", "\n").toByteArray(Charsets.UTF_8))
-            digest.update(0.toByte())
-        }
-        return digest.digest().joinToString("") { "%02x".format(it) }
-    }
+    private fun canonicalSourceHash(templates: Map<String, String>): String =
+        LegacyPlantRuntimeResources.canonicalSourceHashText(templates)
 
     private fun canonicalRuntimeJarHash(): String {
         val value = checkNotNull(

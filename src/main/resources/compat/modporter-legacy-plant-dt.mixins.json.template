@@ -1,0 +1,13 @@
+{
+  "required": true,
+  "minVersion": "0.8.7",
+  "package": "@PACKAGE@.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "plugin": "@PACKAGE@.LegacyPlantMixinPlugin",
+  "mixins": [
+    "LegacyPlantPluginSentinel"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

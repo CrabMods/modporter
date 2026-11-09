@@ -806,7 +806,7 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
-            val commonApiChanges = migrateCommonNeoForge121Apis(projectDir, dryRun)
+            val commonApiChanges = migrateCommonNeoForge121Apis(projectDir, dryRun, errors)
             changes.addAll(commonApiChanges)
             if (!dryRun) {
                 changes.addAll(HolderLookupProviderPropagationMigration().migrate(projectDir, dryRun = false))

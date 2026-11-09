@@ -1,4 +1,4 @@
-# Third-party JVM notices
+# Third-party notices
 
 This inventory covers the JVM code and native libraries merged into the
 ModPorter fat JAR. It is based on the runtime dependencies declared for
@@ -9,6 +9,22 @@ The package must be checked again if the resolved runtime graph changes.
 The files in `jvm/` preserve the license choices, copyright notices, and
 upstream NOTICE text needed by the bundled components. ModPorter's
 Apache-2.0 license does not replace any of these terms.
+
+## Minecraft Forge compatibility source
+
+The distribution contains three modified Forge-derived legacy-plant source
+templates under LGPL-2.1-only. Their pinned Forge 1.20.1-47.1.33 provenance,
+full upstream license, exact LGPL file scope, and separate Apache-2.0 ModPorter
+helper scope are recorded in `minecraftforge/README.md` and
+`minecraftforge/LICENSE.txt`.
+
+## Dynamic Trees compatibility source
+
+The Dynamic Trees-derived legacy post-rot compatibility consumer is under MIT.
+Its pinned `DynamicTrees-1.20.1:1.3.0-BETA13` binary and source artifacts,
+matching Git tag commit, exact adapted-source hash, older source copyright, and
+full MIT text are recorded in `dynamictrees/README.md` and
+`dynamictrees/LICENSE`.
 
 ## Selected alternatives
 

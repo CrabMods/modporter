@@ -1,0 +1,64 @@
+/*
+ * Copyright (c) 2026 ModPorter contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package @PACKAGE@;
+
+import java.util.List;
+import java.util.Set;
+import org.objectweb.asm.tree.ClassNode;
+import org.spongepowered.asm.mixin.extensibility.IMixinConfigPlugin;
+import org.spongepowered.asm.mixin.extensibility.IMixinInfo;
+
+/** Fail-closed mixin selector for the exact reviewed Dynamic Trees profile. */
+public final class LegacyPlantMixinPlugin implements IMixinConfigPlugin {
+    private static final String SENTINEL = "@PACKAGE@.mixin.LegacyPlantPluginSentinel";
+    private static final String CONSUMER = "LegacyPlantMushroomRotMixin";
+
+    private boolean dynamicTreesPresent;
+
+    @Override
+    public void onLoad(String mixinPackage) {
+        // LinkageError deliberately escapes config selection for a wrong or partial profile.
+        dynamicTreesPresent = LegacyPlantAdapterProfile.validateLoadingProfile();
+    }
+
+    @Override
+    public String getRefMapperConfig() {
+        return null;
+    }
+
+    @Override
+    public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
+        if (SENTINEL.equals(mixinClassName)) return false;
+        return dynamicTreesPresent;
+    }
+
+    @Override
+    public void acceptTargets(Set<String> myTargets, Set<String> otherTargets) {
+    }
+
+    @Override
+    public List<String> getMixins() {
+        return dynamicTreesPresent ? List.of(CONSUMER) : List.of();
+    }
+
+    @Override
+    public void preApply(
+        String targetClassName,
+        ClassNode targetClass,
+        String mixinClassName,
+        IMixinInfo mixinInfo
+    ) {
+    }
+
+    @Override
+    public void postApply(
+        String targetClassName,
+        ClassNode targetClass,
+        String mixinClassName,
+        IMixinInfo mixinInfo
+    ) {
+    }
+}

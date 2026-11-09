@@ -24,7 +24,11 @@ import kotlin.io.path.*
 // Rules are `internal fun StructuralRefactorPass.<name>` extensions; a rule is followed by the helpers it uses.
 // Entry points called from processFiles: migrateCommonNeoForge121Apis, migrateLegacyRarityEnumExtensions, migrateLegacyRecipeBookCategoryEnumExtensions, migrateLegacyRecipeBookTypeEnumExtensions, migrateCustomRecipeBookCategoryFinders, migrateLegacyMobCategoryEnumExtensions, migrateLegacyPathTypeCreateConstants, migrateLegacyImageButtonConstructors, migrateLegacyStateSwitchingButtonTextures, migrateCuriosClientApi, migrateLegacyGrassColorModifierEnumExtensions, migrateDeferredRegisterListenerReferences, registerMissingDeferredRegisterFields.
 
-internal fun StructuralRefactorPass.migrateCommonNeoForge121Apis(projectDir: Path, dryRun: Boolean): List<Change> {
+internal fun StructuralRefactorPass.migrateCommonNeoForge121Apis(
+    projectDir: Path,
+    dryRun: Boolean,
+    errorSink: MutableCollection<String>? = null
+): List<Change> {
     val changes = mutableListOf<Change>()
     val srcDir = projectDir.resolve("src/main/java")
     if (!srcDir.exists()) return changes
@@ -192,6 +196,8 @@ internal fun StructuralRefactorPass.migrateCommonNeoForge121Apis(projectDir: Pat
     val cachedRenderBoundsType = cachedRenderBoundsFamilies.singleOrNull()
 
     javaFiles.forEach { javaFile ->
+        val fileChangeStart = changes.size
+        try {
             val original = javaFile.readText()
             var text = original
 
@@ -980,6 +986,13 @@ internal fun StructuralRefactorPass.migrateCommonNeoForge121Apis(projectDir: Pat
             if (text != original && !dryRun) {
                 javaFile.writeText(text)
             }
+        } catch (e: Exception) {
+            // The source write is deferred until every rewrite succeeds; discard its staged receipts too.
+            changes.subList(fileChangeStart, changes.size).clear()
+            if (errorSink == null) throw e
+            val relativeFile = projectDir.relativize(javaFile).toString().replace('\\', '/')
+            errorSink.add("Common NeoForge 1.21 API migration error in $relativeFile: ${e.message}")
+        }
     }
 
     if (!dryRun) {

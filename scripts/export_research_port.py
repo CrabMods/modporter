@@ -21,7 +21,7 @@ import tarfile
 import tempfile
 import zipfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Mapping, Sequence
 from urllib.parse import urlsplit
 
@@ -39,6 +39,97 @@ PROVENANCE_FILE = "MODPORTER-PROVENANCE.json"
 NOTICE_FILE = "MODPORTER-NOTICE"
 SUPPORT_LICENSE_FILE = "MODPORTER-SUPPORT-LICENSE"
 SUPPORT_NOTICE_FILE = "MODPORTER-SUPPORT-NOTICE"
+
+RUNTIME_COMPONENT_ROOT = ".modporter/legacy-plant-compat"
+RUNTIME_COMPONENT_REQUEST = ".modporter/legacy-plant-compat.required"
+RUNTIME_COMPONENT_RESOURCES = f"{RUNTIME_COMPONENT_ROOT}/src/main/resources"
+RUNTIME_COMPONENT_MANIFEST_RESOURCE = (
+    "META-INF/modporter/legacy-plant-compat/provenance.json"
+)
+RUNTIME_COMPONENT_MANIFEST = (
+    f"{RUNTIME_COMPONENT_RESOURCES}/{RUNTIME_COMPONENT_MANIFEST_RESOURCE}"
+)
+RUNTIME_COMPONENT_BUILD = f"{RUNTIME_COMPONENT_ROOT}/build.gradle"
+RUNTIME_COMPONENT_ID = "com.modporter.compat:legacy-plant-compat"
+RUNTIME_COMPONENT_PACKAGING_VERSION = "1.0.2"
+RUNTIME_COMPONENT_FORGE_RELEASE = "1.20.1-47.1.33"
+RUNTIME_COMPONENT_FORGE_COMMIT = "30f255d76c4c2e915414a24e6d8aed42f429817e"
+RUNTIME_COMPONENT_MATERIAL_ROLES: Mapping[str, str] = {
+    "META-INF/modporter/LICENSE": (
+        "Apache-2.0 license for ModPorter helper sources"
+    ),
+    "META-INF/modporter/NOTICE": "ModPorter distribution notice",
+    "META-INF/modporter/third-party/minecraftforge/LICENSE.txt": (
+        "LGPL-2.1-only license for Forge-derived sources"
+    ),
+    "META-INF/modporter/third-party/minecraftforge/README.md": (
+        "Minecraft Forge component notice and pinned provenance"
+    ),
+    "META-INF/modporter/third-party/dynamictrees/LICENSE": (
+        "MIT license for Dynamic Trees-derived sources"
+    ),
+    "META-INF/modporter/third-party/dynamictrees/README.md": (
+        "Dynamic Trees component notice and pinned provenance"
+    ),
+    "META-INF/modporter/legacy-plant-compat/build.gradle.recipe": (
+        "Reproducible Gradle build recipe without an expected output hash"
+    ),
+    "META-INF/modporter/legacy-plant-compat/BUILD.md": (
+        "Minimal source and resource reconstruction instructions"
+    ),
+}
+RUNTIME_COMPONENT_MIXIN_CONFIG = "modporter-legacy-plant-dt.mixins.json"
+RUNTIME_COMPONENT_RUNTIME_RESOURCE_ROLES: Mapping[str, str] = {
+    RUNTIME_COMPONENT_MIXIN_CONFIG: (
+        "Mixin configuration for the reviewed Dynamic Trees compatibility consumer"
+    )
+}
+RUNTIME_COMPONENT_LICENSES = {"Apache-2.0", "LGPL-2.1-only", "MIT"}
+RUNTIME_COMPONENT_FORGE_SOURCE_NAMES = {
+    "PlantType",
+    "IPlantable",
+    "LegacyPlantables",
+}
+RUNTIME_COMPONENT_DYNAMIC_TREES_SOURCE_NAMES = {"LegacyPlantMushroomRotCompat"}
+RUNTIME_COMPONENT_MIXIN_SOURCE_NAMES = {
+    "mixin/LegacyPlantMushroomRotMixin",
+    "mixin/LegacyPlantPluginSentinel",
+}
+RUNTIME_COMPONENT_REQUIRED_SOURCE_NAMES = RUNTIME_COMPONENT_FORGE_SOURCE_NAMES | {
+    "LegacyPlantSustainer",
+    "LegacyPlantPlacement",
+    "LegacyPlantableAdapter",
+    "LegacySoilAdapter",
+    "LegacyPlantPlacementAdapter",
+    "LegacyPlantAdapterProfile",
+    "ReviewedExternalPlantAdapters",
+    "LegacyPlantMixinPlugin",
+    "LegacyPlantMushroomRotCompat",
+    *RUNTIME_COMPONENT_MIXIN_SOURCE_NAMES,
+}
+RUNTIME_COMPONENT_DYNAMIC_TREES_COORDINATE = (
+    "com.ferreusveritas.dynamictrees:DynamicTrees-1.20.1:1.3.0-BETA13"
+)
+RUNTIME_COMPONENT_DYNAMIC_TREES_TAG = "1.3.0-BETA13"
+RUNTIME_COMPONENT_DYNAMIC_TREES_COMMIT = "9b43a9261e11dbd7d84b7e37272cbbd9dcf23277"
+RUNTIME_COMPONENT_DYNAMIC_TREES_BINARY_SHA256 = (
+    "76f00472f12983d76ec6c88e319e6eb837fb2f49f64d92da1b296c3f01f3ca46"
+)
+RUNTIME_COMPONENT_DYNAMIC_TREES_SOURCES_SHA256 = (
+    "490a4023d765fd6bcc9b919025543380ceb862b131fb54227ac84c969f94f3af"
+)
+RUNTIME_COMPONENT_DYNAMIC_TREES_POM_SHA256 = (
+    "cad503ea7270788211c70f5417965f760c3ab1d34aac4cffdc808e2ef7d6e999"
+)
+RUNTIME_COMPONENT_DYNAMIC_TREES_ADAPTED_SOURCE_SHA256 = (
+    "d0ad96cfb0f89c3d935234b3bef45b2fcc9ca4f5e93e898423e23ef825507d5c"
+)
+RUNTIME_COMPONENT_DYNAMIC_TREES_LICENSE_SHA256 = (
+    "7f29ddd022421f848d57e58f4e71486131eee9acd61a4cb70944141846b80ba0"
+)
+RUNTIME_COMPONENT_DYNAMIC_TREES_COPYRIGHT = (
+    "Copyright (c) 2016,2017 Ferreus Veritas"
+)
 
 BENCHMARK_PATH_PARTS = (
     "/com/modporter/generated/",
@@ -135,6 +226,54 @@ class ModMetadata:
     description: str
     display_name: str
     license_name: str
+
+
+@dataclass(frozen=True)
+class RuntimeComponent:
+    component: str
+    packaging_version: str
+    runtime_version: str
+    template_source_sha: str
+    forge_release: str
+    forge_commit: str
+    sources: tuple[Mapping[str, str], ...]
+    runtime_resources: tuple[Mapping[str, str], ...]
+    materials: tuple[Mapping[str, str], ...]
+    preserved_files: tuple[str, ...]
+
+    @property
+    def outer_resource_paths(self) -> tuple[str, ...]:
+        return (
+            RUNTIME_COMPONENT_MANIFEST_RESOURCE,
+            *(material["path"] for material in self.materials),
+        )
+
+    def publication_record(self) -> dict[str, object]:
+        scopes = {
+            license_name: sorted(
+                f"{RUNTIME_COMPONENT_ROOT}/{source['generatedPath']}"
+                for source in self.sources
+                if source["license"] == license_name
+            )
+            for license_name in sorted(RUNTIME_COMPONENT_LICENSES)
+        }
+        return {
+            "component": self.component,
+            "runtimeRoot": RUNTIME_COMPONENT_ROOT,
+            "manifestPath": RUNTIME_COMPONENT_MANIFEST,
+            "packagingVersion": self.packaging_version,
+            "runtimeVersion": self.runtime_version,
+            "templateSourceSha": self.template_source_sha,
+            "forgeRelease": self.forge_release,
+            "forgeCommit": self.forge_commit,
+            "licenseClassification": "per-file",
+            "licenseScopes": scopes,
+            "sources": [dict(source) for source in self.sources],
+            "runtimeResources": [
+                dict(resource) for resource in self.runtime_resources
+            ],
+            "materials": [dict(material) for material in self.materials],
+        }
 
 
 RunCommand = Callable[..., subprocess.CompletedProcess[str]]
@@ -620,6 +759,7 @@ def update_build_gradle(
     spec: PortSpec,
     candidate_version: str,
     include_support_license: bool,
+    component_resource_paths: Sequence[str] = (),
 ) -> str:
     for marker in spec.generated_build_markers:
         if marker not in text:
@@ -653,6 +793,17 @@ def update_build_gradle(
             f"    from('{SUPPORT_LICENSE_FILE}') {{ into 'META-INF' }}\n"
             f"    from('{SUPPORT_NOTICE_FILE}') {{ into 'META-INF' }}\n"
         )
+    component_lines = ""
+    if component_resource_paths:
+        includes = "\n".join(
+            f"        include('{relative}')"
+            for relative in component_resource_paths
+        )
+        component_lines = (
+            f"    from('{RUNTIME_COMPONENT_RESOURCES}') {{\n"
+            f"{includes}\n"
+            "    }\n"
+        )
     policy = f"""
 
 {POLICY_MARKER}
@@ -666,6 +817,7 @@ tasks.withType(org.gradle.api.tasks.bundling.Jar).configureEach {{
     from('{NOTICE_FILE}') {{ into 'META-INF' }}
     from('{PROVENANCE_FILE}') {{ into 'META-INF' }}
 {support_lines.rstrip()}
+{component_lines.rstrip()}
 }}
 """
     return text.rstrip() + policy
@@ -779,10 +931,550 @@ def generated_support_sources(out: Path) -> list[str]:
     return sorted(support)
 
 
+def _strict_json_object(pairs: Sequence[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ExportError(f"component manifest contains duplicate key {key!r}")
+        result[key] = value
+    return result
+
+
+def _component_relative_path(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ExportError(f"{label} must be a nonblank relative path")
+    if "\\" in value:
+        raise ExportError(f"{label} must use forward slashes")
+    if "\x00" in value or re.match(r"^[A-Za-z]:", value):
+        raise ExportError(f"{label} is not a safe relative path: {value!r}")
+    parsed = PurePosixPath(value)
+    normalized = parsed.as_posix()
+    if (
+        parsed.is_absolute()
+        or normalized != value
+        or any(part in {"", ".", ".."} for part in parsed.parts)
+    ):
+        raise ExportError(f"{label} is not a safe relative path: {value!r}")
+    return normalized
+
+
+def _reject_component_links(root: Path) -> None:
+    for current, directories, files in os.walk(root, topdown=True, followlinks=False):
+        current_path = Path(current)
+        for name in [*directories, *files]:
+            path = current_path / name
+            if path.is_symlink():
+                relative = path.relative_to(root).as_posix()
+                raise ExportError(
+                    f"runtime component must not contain symbolic links: {relative}"
+                )
+
+
+def _component_file(root: Path, relative: str, label: str) -> Path:
+    current = root
+    for part in PurePosixPath(relative).parts:
+        current = current / part
+        if current.is_symlink():
+            raise ExportError(f"{label} must not traverse a symbolic link: {relative}")
+    if not current.is_file():
+        raise ExportError(f"missing {label}: {relative}")
+    return current
+
+
+def _exact_object(
+    value: object,
+    expected_keys: set[str],
+    label: str,
+) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise ExportError(f"{label} must be a JSON object")
+    keys = set(value)
+    if keys != expected_keys:
+        missing = sorted(expected_keys - keys)
+        unknown = sorted(keys - expected_keys)
+        details: list[str] = []
+        if missing:
+            details.append("missing " + ", ".join(missing))
+        if unknown:
+            details.append("unknown " + ", ".join(unknown))
+        raise ExportError(f"{label} fields are invalid: {'; '.join(details)}")
+    return value
+
+
+def _manifest_string(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ExportError(f"{label} must be a nonblank string")
+    return value
+
+
+def _manifest_sha256(value: object, label: str) -> str:
+    text = _manifest_string(value, label)
+    if not re.fullmatch(r"[0-9a-f]{64}", text):
+        raise ExportError(f"{label} must be a lowercase SHA-256")
+    return text
+
+
+def _validate_component_source_content(
+    name: str,
+    license_name: str,
+    content: bytes,
+) -> None:
+    if content.startswith(b"\xef\xbb\xbf"):
+        raise ExportError(f"runtime source must be UTF-8 without BOM: {name}")
+    try:
+        decoded = content.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ExportError(f"runtime source is not UTF-8: {name}") from exc
+    if "\r" in decoded or not decoded.endswith("\n"):
+        raise ExportError(f"runtime source must use LF and end with a newline: {name}")
+    package_name = "com.modporter.compat.plant.v1"
+    if name in RUNTIME_COMPONENT_MIXIN_SOURCE_NAMES:
+        package_name += ".mixin"
+    if f"package {package_name};" not in decoded:
+        raise ExportError(f"runtime source package does not match its canonical path: {name}")
+    if license_name in {"LGPL-2.1-only", "MIT"}:
+        if f"SPDX-License-Identifier: {license_name}" not in decoded:
+            raise ExportError(f"runtime source is missing its {license_name} SPDX marker: {name}")
+    if name in RUNTIME_COMPONENT_DYNAMIC_TREES_SOURCE_NAMES:
+        required = (
+            RUNTIME_COMPONENT_DYNAMIC_TREES_COPYRIGHT,
+            f"Derived from Dynamic Trees {RUNTIME_COMPONENT_DYNAMIC_TREES_TAG}",
+            "MushroomRotGenFeature#postRot",
+        )
+        if any(marker not in decoded for marker in required):
+            raise ExportError(
+                "Dynamic Trees-derived runtime source lost copyright or provenance markers"
+            )
+    if name == "LegacyPlantMixinPlugin":
+        required = (
+            "com.modporter.compat.plant.v1.mixin.LegacyPlantPluginSentinel",
+            'CONSUMER = "LegacyPlantMushroomRotMixin"',
+        )
+        if any(marker not in decoded for marker in required):
+            raise ExportError("runtime mixin plugin lost its consumer or sentinel binding")
+
+
+def _validate_component_material_content(path: str, content: bytes) -> None:
+    if path == "META-INF/modporter/LICENSE":
+        if b"Apache License" not in content or b"Version 2.0" not in content:
+            raise ExportError("component Apache-2.0 license material is invalid")
+    elif path == "META-INF/modporter/third-party/minecraftforge/LICENSE.txt":
+        if (
+            b"GNU LESSER GENERAL PUBLIC LICENSE" not in content.upper()
+            or b"Version 2.1" not in content
+        ):
+            raise ExportError("component LGPL-2.1-only license material is invalid")
+    elif path == "META-INF/modporter/third-party/minecraftforge/README.md":
+        decoded = content.decode("utf-8", errors="strict")
+        if (
+            RUNTIME_COMPONENT_FORGE_RELEASE not in decoded
+            or RUNTIME_COMPONENT_FORGE_COMMIT not in decoded
+        ):
+            raise ExportError("component Forge notice does not bind the pinned release and commit")
+    elif path == "META-INF/modporter/third-party/dynamictrees/LICENSE":
+        if hashlib.sha256(content).hexdigest() != RUNTIME_COMPONENT_DYNAMIC_TREES_LICENSE_SHA256:
+            raise ExportError("component Dynamic Trees MIT license bytes are not canonical")
+        if b"MIT License" not in content or b"Permission is hereby granted" not in content:
+            raise ExportError("component Dynamic Trees MIT license material is invalid")
+    elif path == "META-INF/modporter/third-party/dynamictrees/README.md":
+        decoded = content.decode("utf-8", errors="strict")
+        required = (
+            RUNTIME_COMPONENT_DYNAMIC_TREES_COORDINATE,
+            RUNTIME_COMPONENT_DYNAMIC_TREES_TAG,
+            RUNTIME_COMPONENT_DYNAMIC_TREES_COMMIT,
+            RUNTIME_COMPONENT_DYNAMIC_TREES_BINARY_SHA256,
+            RUNTIME_COMPONENT_DYNAMIC_TREES_SOURCES_SHA256,
+            RUNTIME_COMPONENT_DYNAMIC_TREES_POM_SHA256,
+            RUNTIME_COMPONENT_DYNAMIC_TREES_ADAPTED_SOURCE_SHA256,
+            RUNTIME_COMPONENT_DYNAMIC_TREES_LICENSE_SHA256,
+        )
+        if any(marker not in decoded for marker in required):
+            raise ExportError("component Dynamic Trees notice has incomplete pinned provenance")
+    elif path == "META-INF/modporter/legacy-plant-compat/build.gradle.recipe":
+        decoded = content.decode("utf-8", errors="strict")
+        if (
+            "MixinConfigs" not in decoded
+            or RUNTIME_COMPONENT_MIXIN_CONFIG not in decoded
+        ):
+            raise ExportError("component build recipe does not register the mixin config")
+    elif not content.strip():
+        raise ExportError(f"component material is empty: {path}")
+
+
+def _validate_component_runtime_resource(path: str, content: bytes) -> None:
+    if content.startswith(b"\xef\xbb\xbf"):
+        raise ExportError(f"runtime component resource must be UTF-8 without BOM: {path}")
+    try:
+        decoded = content.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ExportError(f"runtime component resource is not UTF-8: {path}") from exc
+    if "\r" in decoded or not decoded.endswith("\n"):
+        raise ExportError(
+            f"runtime component resource must use LF and end with a newline: {path}"
+        )
+    try:
+        raw = json.loads(decoded, object_pairs_hook=_strict_json_object)
+    except ExportError:
+        raise
+    except json.JSONDecodeError as exc:
+        raise ExportError(f"runtime mixin configuration is invalid JSON: {exc}") from exc
+    config = _exact_object(
+        raw,
+        {
+            "required",
+            "minVersion",
+            "package",
+            "compatibilityLevel",
+            "plugin",
+            "mixins",
+            "injectors",
+        },
+        "runtime mixin configuration",
+    )
+    if config["required"] is not True:
+        raise ExportError("runtime mixin configuration must be required")
+    expected_strings = {
+        "minVersion": "0.8.7",
+        "package": "com.modporter.compat.plant.v1.mixin",
+        "compatibilityLevel": "JAVA_21",
+        "plugin": "com.modporter.compat.plant.v1.LegacyPlantMixinPlugin",
+    }
+    for key, expected in expected_strings.items():
+        if config[key] != expected:
+            raise ExportError(f"runtime mixin configuration has unexpected {key}")
+    if config["mixins"] != ["LegacyPlantPluginSentinel"]:
+        raise ExportError("runtime mixin configuration must contain only the fail-closed sentinel")
+    injectors = _exact_object(
+        config["injectors"], {"defaultRequire"}, "runtime mixin injectors"
+    )
+    if type(injectors["defaultRequire"]) is not int or injectors["defaultRequire"] != 1:
+        raise ExportError("runtime mixin configuration defaultRequire must be integer 1")
+
+
+def verify_runtime_component(out: Path) -> RuntimeComponent | None:
+    runtime_root = out.joinpath(*PurePosixPath(RUNTIME_COMPONENT_ROOT).parts)
+    request_paths = [
+        relative
+        for relative in relative_file_paths(out)
+        if relative == RUNTIME_COMPONENT_REQUEST
+        or relative.endswith(f"/{RUNTIME_COMPONENT_REQUEST}")
+    ]
+    if not runtime_root.exists():
+        if request_paths:
+            raise ExportError(
+                "legacy plant runtime was requested but the canonical component is missing: "
+                + ", ".join(request_paths)
+            )
+        return None
+    if runtime_root.is_symlink() or not runtime_root.is_dir():
+        raise ExportError("canonical runtime component root is not a regular directory")
+    _reject_component_links(runtime_root)
+
+    manifest_path = _component_file(
+        out, RUNTIME_COMPONENT_MANIFEST, "runtime component manifest"
+    )
+    manifest_bytes = manifest_path.read_bytes()
+    if manifest_bytes.startswith(b"\xef\xbb\xbf"):
+        raise ExportError("runtime component manifest must be UTF-8 without BOM")
+    try:
+        manifest_text = manifest_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ExportError("runtime component manifest is not UTF-8") from exc
+    if "\r" in manifest_text or not manifest_text.endswith("\n"):
+        raise ExportError("runtime component manifest must use LF and end with a newline")
+    try:
+        raw = json.loads(manifest_text, object_pairs_hook=_strict_json_object)
+    except ExportError:
+        raise
+    except json.JSONDecodeError as exc:
+        raise ExportError(f"runtime component manifest is invalid JSON: {exc}") from exc
+    manifest = _exact_object(
+        raw,
+        {
+            "schemaVersion",
+            "component",
+            "packagingVersion",
+            "runtimeVersion",
+            "templateSourceSha",
+            "forgeRelease",
+            "forgeCommit",
+            "licenseClassification",
+            "sources",
+            "runtimeResources",
+            "materials",
+        },
+        "runtime component manifest",
+    )
+    schema_version = manifest["schemaVersion"]
+    if type(schema_version) is not int or schema_version != 1:
+        raise ExportError("runtime component manifest schemaVersion must be integer 1")
+    component = _manifest_string(manifest["component"], "component")
+    packaging_version = _manifest_string(
+        manifest["packagingVersion"], "packagingVersion"
+    )
+    template_source_sha = _manifest_sha256(
+        manifest["templateSourceSha"], "templateSourceSha"
+    )
+    runtime_version = _manifest_string(manifest["runtimeVersion"], "runtimeVersion")
+    forge_release = _manifest_string(manifest["forgeRelease"], "forgeRelease")
+    forge_commit = _manifest_string(manifest["forgeCommit"], "forgeCommit")
+    classification = _manifest_string(
+        manifest["licenseClassification"], "licenseClassification"
+    )
+    if component != RUNTIME_COMPONENT_ID:
+        raise ExportError(f"unknown runtime component {component!r}")
+    if packaging_version != RUNTIME_COMPONENT_PACKAGING_VERSION:
+        raise ExportError(f"unsupported runtime packagingVersion {packaging_version!r}")
+    expected_runtime_version = f"{packaging_version}-{template_source_sha[:16]}"
+    if runtime_version != expected_runtime_version:
+        raise ExportError("runtimeVersion does not match packagingVersion/templateSourceSha")
+    if forge_release != RUNTIME_COMPONENT_FORGE_RELEASE:
+        raise ExportError(f"unexpected Forge release {forge_release!r}")
+    if forge_commit != RUNTIME_COMPONENT_FORGE_COMMIT:
+        raise ExportError(f"unexpected Forge commit {forge_commit!r}")
+    if classification != "per-file":
+        raise ExportError(f"unknown component license classification {classification!r}")
+
+    raw_sources = manifest["sources"]
+    if not isinstance(raw_sources, list) or not raw_sources:
+        raise ExportError("runtime component sources must be a nonempty array")
+    sources: list[Mapping[str, str]] = []
+    source_paths: set[str] = set()
+    embedded_paths: set[str] = set()
+    source_names: set[str] = set()
+    for index, raw_source in enumerate(raw_sources):
+        source = _exact_object(
+            raw_source,
+            {"name", "generatedPath", "embeddedPath", "sha256", "license", "origin"},
+            f"sources[{index}]",
+        )
+        name = _manifest_string(source["name"], f"sources[{index}].name")
+        simple_name: str
+        if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", name):
+            simple_name = name
+        elif (
+            re.fullmatch(r"mixin/[A-Za-z_$][A-Za-z0-9_$]*", name)
+            and name in RUNTIME_COMPONENT_MIXIN_SOURCE_NAMES
+        ):
+            simple_name = name.removeprefix("mixin/")
+        else:
+            raise ExportError(f"sources[{index}].name is not a canonical Java source name")
+        generated_path = _component_relative_path(
+            source["generatedPath"], f"sources[{index}].generatedPath"
+        )
+        embedded_path = _component_relative_path(
+            source["embeddedPath"], f"sources[{index}].embeddedPath"
+        )
+        expected_generated = (
+            f"src/main/java/com/modporter/compat/plant/v1/{name}.java"
+        )
+        expected_embedded = (
+            "META-INF/modporter/legacy-plant-compat/sources/"
+            f"com/modporter/compat/plant/v1/{name}.java"
+        )
+        if generated_path != expected_generated or embedded_path != expected_embedded:
+            raise ExportError(f"sources[{index}] uses a non-canonical source path")
+        if not generated_path.endswith(f"/{simple_name}.java"):
+            raise ExportError(f"sources[{index}] source name/path mismatch")
+        sha256 = _manifest_sha256(source["sha256"], f"sources[{index}].sha256")
+        license_name = _manifest_string(source["license"], f"sources[{index}].license")
+        origin = _manifest_string(source["origin"], f"sources[{index}].origin")
+        if license_name not in RUNTIME_COMPONENT_LICENSES:
+            raise ExportError(f"unknown runtime source license {license_name!r}")
+        if name in RUNTIME_COMPONENT_FORGE_SOURCE_NAMES:
+            expected_license, expected_origin = "LGPL-2.1-only", "MinecraftForge"
+        elif name in RUNTIME_COMPONENT_DYNAMIC_TREES_SOURCE_NAMES:
+            expected_license, expected_origin = "MIT", "DynamicTrees"
+        else:
+            expected_license, expected_origin = "Apache-2.0", "ModPorter"
+        if license_name != expected_license:
+            raise ExportError(
+                f"runtime source {name} must be classified as {expected_license}"
+            )
+        if origin != expected_origin:
+            raise ExportError(
+                f"sources[{index}] origin {origin!r} does not match {license_name}"
+            )
+        if name in source_names or generated_path in source_paths or embedded_path in embedded_paths:
+            raise ExportError("runtime component manifest contains duplicate source identity")
+        source_names.add(name)
+        source_paths.add(generated_path)
+        embedded_paths.add(embedded_path)
+        generated_file = _component_file(
+            runtime_root, generated_path, f"runtime source {generated_path}"
+        )
+        embedded_file = _component_file(
+            runtime_root / "src/main/resources",
+            embedded_path,
+            f"embedded runtime source {embedded_path}",
+        )
+        generated_content = generated_file.read_bytes()
+        if hashlib.sha256(generated_content).hexdigest() != sha256:
+            raise ExportError(f"runtime source hash mismatch: {generated_path}")
+        if embedded_file.read_bytes() != generated_content:
+            raise ExportError(f"embedded runtime source differs from generated source: {name}")
+        _validate_component_source_content(name, license_name, generated_content)
+        sources.append(
+            {
+                "name": name,
+                "generatedPath": generated_path,
+                "embeddedPath": embedded_path,
+                "sha256": sha256,
+                "license": license_name,
+                "origin": origin,
+            }
+        )
+
+    missing_required_sources = sorted(
+        RUNTIME_COMPONENT_REQUIRED_SOURCE_NAMES - source_names
+    )
+    if missing_required_sources:
+        raise ExportError(
+            "runtime component is missing required canonical sources: "
+            + ", ".join(missing_required_sources)
+        )
+
+    source_root = runtime_root / "src/main/java"
+    if not source_root.is_dir() or source_root.is_symlink():
+        raise ExportError("runtime component source root is missing or invalid")
+    actual_source_paths = {
+        f"src/main/java/{relative}" for relative in relative_file_paths(source_root)
+    }
+    if actual_source_paths != source_paths:
+        raise ExportError(
+            "runtime component source manifest is incomplete: "
+            f"expected {sorted(actual_source_paths)}, declared {sorted(source_paths)}"
+        )
+
+    resources_root = runtime_root / "src/main/resources"
+    raw_runtime_resources = manifest["runtimeResources"]
+    if not isinstance(raw_runtime_resources, list):
+        raise ExportError("runtime component runtimeResources must be an array")
+    runtime_resources: list[Mapping[str, str]] = []
+    runtime_resource_paths: set[str] = set()
+    for index, raw_resource in enumerate(raw_runtime_resources):
+        resource = _exact_object(
+            raw_resource,
+            {"path", "sha256", "role"},
+            f"runtimeResources[{index}]",
+        )
+        resource_path = _component_relative_path(
+            resource["path"], f"runtimeResources[{index}].path"
+        )
+        if resource_path in runtime_resource_paths:
+            raise ExportError("runtime component manifest contains duplicate runtime resource path")
+        runtime_resource_paths.add(resource_path)
+        expected_role = RUNTIME_COMPONENT_RUNTIME_RESOURCE_ROLES.get(resource_path)
+        if expected_role is None:
+            raise ExportError(f"unknown runtime component resource {resource_path!r}")
+        role = _manifest_string(resource["role"], f"runtimeResources[{index}].role")
+        if role != expected_role:
+            raise ExportError(f"runtime component resource role mismatch: {resource_path}")
+        sha256 = _manifest_sha256(
+            resource["sha256"], f"runtimeResources[{index}].sha256"
+        )
+        resource_file = _component_file(
+            resources_root, resource_path, f"runtime component resource {resource_path}"
+        )
+        content = resource_file.read_bytes()
+        if hashlib.sha256(content).hexdigest() != sha256:
+            raise ExportError(f"runtime component resource hash mismatch: {resource_path}")
+        _validate_component_runtime_resource(resource_path, content)
+        runtime_resources.append(
+            {"path": resource_path, "sha256": sha256, "role": role}
+        )
+    if runtime_resource_paths != set(RUNTIME_COMPONENT_RUNTIME_RESOURCE_ROLES):
+        raise ExportError(
+            "runtime component resource set is incomplete: "
+            f"expected {sorted(RUNTIME_COMPONENT_RUNTIME_RESOURCE_ROLES)}, "
+            f"declared {sorted(runtime_resource_paths)}"
+        )
+
+    raw_materials = manifest["materials"]
+    if not isinstance(raw_materials, list):
+        raise ExportError("runtime component materials must be an array")
+    materials: list[Mapping[str, str]] = []
+    material_paths: set[str] = set()
+    for index, raw_material in enumerate(raw_materials):
+        material = _exact_object(
+            raw_material,
+            {"path", "sha256", "role"},
+            f"materials[{index}]",
+        )
+        material_path = _component_relative_path(
+            material["path"], f"materials[{index}].path"
+        )
+        if material_path in material_paths:
+            raise ExportError("runtime component manifest contains duplicate material path")
+        material_paths.add(material_path)
+        expected_role = RUNTIME_COMPONENT_MATERIAL_ROLES.get(material_path)
+        if expected_role is None:
+            raise ExportError(f"unknown runtime component material {material_path!r}")
+        role = _manifest_string(material["role"], f"materials[{index}].role")
+        if role != expected_role:
+            raise ExportError(f"runtime component material role mismatch: {material_path}")
+        sha256 = _manifest_sha256(material["sha256"], f"materials[{index}].sha256")
+        material_file = _component_file(
+            resources_root, material_path, f"runtime component material {material_path}"
+        )
+        content = material_file.read_bytes()
+        if hashlib.sha256(content).hexdigest() != sha256:
+            raise ExportError(f"runtime component material hash mismatch: {material_path}")
+        try:
+            _validate_component_material_content(material_path, content)
+        except UnicodeDecodeError as exc:
+            raise ExportError(f"runtime component material is not UTF-8: {material_path}") from exc
+        materials.append({"path": material_path, "sha256": sha256, "role": role})
+    if material_paths != set(RUNTIME_COMPONENT_MATERIAL_ROLES):
+        raise ExportError(
+            "runtime component material set is incomplete: "
+            f"expected {sorted(RUNTIME_COMPONENT_MATERIAL_ROLES)}, declared {sorted(material_paths)}"
+        )
+
+    actual_resources = set(relative_file_paths(resources_root))
+    expected_resources = {
+        RUNTIME_COMPONENT_MANIFEST_RESOURCE,
+        *embedded_paths,
+        *runtime_resource_paths,
+        *material_paths,
+    }
+    if actual_resources != expected_resources:
+        raise ExportError(
+            "runtime component resource manifest is incomplete: "
+            f"expected {sorted(actual_resources)}, declared {sorted(expected_resources)}"
+        )
+    build_file = _component_file(
+        out, RUNTIME_COMPONENT_BUILD, "runtime component build.gradle"
+    )
+    try:
+        build_text = build_file.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ExportError("runtime component build.gradle is not UTF-8") from exc
+    if "MixinConfigs" not in build_text or RUNTIME_COMPONENT_MIXIN_CONFIG not in build_text:
+        raise ExportError("runtime component build.gradle does not register the mixin config")
+
+    preserved = {
+        f"{RUNTIME_COMPONENT_ROOT}/{relative}"
+        for relative in relative_file_paths(runtime_root)
+    }
+    return RuntimeComponent(
+        component=component,
+        packaging_version=packaging_version,
+        runtime_version=runtime_version,
+        template_source_sha=template_source_sha,
+        forge_release=forge_release,
+        forge_commit=forge_commit,
+        sources=tuple(sources),
+        runtime_resources=tuple(runtime_resources),
+        materials=tuple(materials),
+        preserved_files=tuple(sorted(preserved)),
+    )
+
 def notice_text(
     config: ExportConfig,
     tool: ToolBundle,
     support_sources: Sequence[str],
+    runtime_component: RuntimeComponent | None = None,
 ) -> str:
     support_statement = (
         f"Generated compatibility/support sources are listed in {PROVENANCE_FILE}. "
@@ -790,6 +1482,29 @@ def notice_text(
         if support_sources
         else "This generated tree contains no com.modporter.generated compatibility/support sources."
     )
+    if runtime_component is None:
+        component_statement = "This generated tree contains no canonical shared runtime component."
+    else:
+        scope_lines: list[str] = []
+        for license_name in sorted(RUNTIME_COMPONENT_LICENSES):
+            scope_lines.append(f"  {license_name}:")
+            scope_lines.extend(
+                "    " + f"{RUNTIME_COMPONENT_ROOT}/{source['generatedPath']}"
+                for source in runtime_component.sources
+                if source["license"] == license_name
+            )
+        component_statement = "\n".join(
+            [
+                "Canonical shared runtime component:",
+                f"  {runtime_component.component}",
+                f"  Runtime version: {runtime_component.runtime_version}",
+                f"  Component manifest: {RUNTIME_COMPONENT_MANIFEST}",
+                "  Per-file source license scopes:",
+                *scope_lines,
+                "  Component legal materials are preserved under "
+                f"{RUNTIME_COMPONENT_RESOURCES}/META-INF/modporter/.",
+            ]
+        )
     return f"""ModPorter Candidate Notice
 
 {config.display_name} (Unofficial Candidate)
@@ -817,6 +1532,8 @@ code or assets. This candidate is unofficial and is offered for community
 review; use and redistribution remain subject to the preserved upstream terms.
 
 {support_statement}
+
+{component_statement}
 """
 
 
@@ -825,6 +1542,7 @@ def provenance_data(
     tool: ToolBundle,
     source_state: GitState,
     support_sources: Sequence[str],
+    runtime_component: RuntimeComponent | None = None,
 ) -> dict[str, object]:
     return {
         "schemaVersion": 1,
@@ -847,6 +1565,7 @@ def provenance_data(
             "name": "ModPorter",
             "version": tool.version,
             "repository": TOOL_URL,
+            "license": "Apache-2.0",
             "jarFile": tool.jar_name,
             "jarSha256": tool.jar_sha256,
             "invocation": [
@@ -870,6 +1589,11 @@ def provenance_data(
         },
         "generatedSupportSources": list(support_sources),
         "supportLicense": SUPPORT_LICENSE_FILE if support_sources else None,
+        "runtimeComponents": (
+            [runtime_component.publication_record()]
+            if runtime_component is not None
+            else []
+        ),
     }
 
 
@@ -890,11 +1614,29 @@ def verify_policy_edit_scope(
     *,
     metadata_relative: str,
     support_sources: Sequence[str],
+    component_files: Sequence[str] = (),
 ) -> None:
     allowed_modified = {"build.gradle", metadata_relative}
     allowed_added = {NOTICE_FILE, PROVENANCE_FILE}
     if support_sources:
         allowed_added.update({SUPPORT_LICENSE_FILE, SUPPORT_NOTICE_FILE})
+
+    missing_component_files = sorted(
+        path for path in component_files if path not in before or path not in after
+    )
+    if missing_component_files:
+        raise ExportError(
+            "publication policy lost required runtime component files: "
+            + ", ".join(missing_component_files[:8])
+        )
+    changed_component_files = sorted(
+        path for path in component_files if before[path] != after[path]
+    )
+    if changed_component_files:
+        raise ExportError(
+            "publication policy changed runtime component files: "
+            + ", ".join(changed_component_files[:8])
+        )
 
     removed = sorted(set(before) - set(after))
     if removed:
@@ -973,6 +1715,7 @@ def apply_publication_policy(
 
     before = file_hashes(out)
     support_sources = generated_support_sources(out)
+    runtime_component = verify_runtime_component(out)
 
     metadata_text = metadata_path.read_text(encoding="utf-8")
     metadata_path.write_text(
@@ -992,12 +1735,17 @@ def apply_publication_policy(
             spec=spec,
             candidate_version=config.candidate_version,
             include_support_license=bool(support_sources),
+            component_resource_paths=(
+                runtime_component.outer_resource_paths
+                if runtime_component is not None
+                else ()
+            ),
         ),
         encoding="utf-8",
         newline="\n",
     )
     (out / NOTICE_FILE).write_text(
-        notice_text(config, tool, support_sources),
+        notice_text(config, tool, support_sources, runtime_component),
         encoding="utf-8",
         newline="\n",
     )
@@ -1010,7 +1758,9 @@ def apply_publication_policy(
         (out / SUPPORT_NOTICE_FILE).write_bytes(support_notice)
     write_portable_json(
         out / PROVENANCE_FILE,
-        provenance_data(config, tool, source_state, support_sources),
+        provenance_data(
+            config, tool, source_state, support_sources, runtime_component
+        ),
     )
 
     after = file_hashes(out)
@@ -1019,6 +1769,11 @@ def apply_publication_policy(
         after,
         metadata_relative=metadata_relative,
         support_sources=support_sources,
+        component_files=(
+            runtime_component.preserved_files
+            if runtime_component is not None
+            else ()
+        ),
     )
     if (out / "LICENSE").read_bytes() != source_license:
         raise ExportError("publication policy changed the upstream LICENSE")

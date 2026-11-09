@@ -1,0 +1,134 @@
+/*
+ * Copyright (c) 2016,2017 Ferreus Veritas
+ * SPDX-License-Identifier: MIT
+ *
+ * Derived from Dynamic Trees 1.3.0-BETA13
+ * MushroomRotGenFeature#postRot by Harley O'Connor.
+ * Modified by ModPorter contributors on 2026-11-10 for the shared NeoForge
+ * 1.21.1 legacy-plant compatibility runtime; see third_party/dynamictrees/README.md.
+ */
+
+package @PACKAGE@;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.util.RandomSource;
+import net.minecraft.world.level.LevelAccessor;
+import net.minecraft.world.level.LightLayer;
+import net.minecraft.world.level.block.Block;
+
+/** Reconstructs the reviewed Forge-era MushroomRotGenFeature post-rot consumer behavior. */
+public final class LegacyPlantMushroomRotCompat {
+    private LegacyPlantMushroomRotCompat() {
+    }
+
+    public static boolean postRot(Object configuration, Object context) {
+        LegacyPlantAdapterProfile.GameProfile profile =
+            LegacyPlantAdapterProfile.requireGameProfile();
+        if (profile == null) {
+            throw new LinkageError("Dynamic Trees mushroom-rot compatibility invoked while absent");
+        }
+
+        LevelAccessor level = requireType(
+            invoke(profile.contextLevel(), context),
+            LevelAccessor.class,
+            "PostRotContext.level()"
+        );
+        BlockPos pos = requireType(
+            invoke(profile.contextPos(), context),
+            BlockPos.class,
+            "PostRotContext.pos()"
+        );
+        Float alternateChance = requireType(
+            invoke(profile.configurationGet(), configuration, get(profile.alternateMushroomChance())),
+            Float.class,
+            "alternate_mushroom_chance"
+        );
+        RandomSource random = requireType(
+            invoke(profile.contextRandom(), context),
+            RandomSource.class,
+            "PostRotContext.random()"
+        );
+
+        // Preserve the old draw and configured-block selection before the radius short-circuit.
+        boolean usePrimary = alternateChance.floatValue() > random.nextFloat();
+        Field selectedProperty = usePrimary ? profile.mushroom() : profile.alternateMushroom();
+        Block mushroom = requireNullableType(
+            invoke(profile.configurationGet(), configuration, get(selectedProperty)),
+            Block.class,
+            usePrimary ? "mushroom" : "alternate_mushroom"
+        );
+
+        Integer radius = requireType(
+            invoke(profile.contextRadius(), context),
+            Integer.class,
+            "PostRotContext.radius()"
+        );
+        if (radius.intValue() <= 4) return false;
+        if (!LegacyPlantables.isPlantable(mushroom)) return false;
+        if (!LegacyPlantables.canSustainPlant(
+            level.getBlockState(pos),
+            level,
+            pos,
+            Direction.UP,
+            mushroom
+        )) {
+            return false;
+        }
+        if (level.getBrightness(LightLayer.SKY, pos) >= 4) return false;
+        level.setBlock(pos, mushroom.defaultBlockState(), 3);
+        return true;
+    }
+
+    private static Object get(Field field) {
+        try {
+            return field.get(null);
+        } catch (ReflectiveOperationException error) {
+            LinkageError wrapped = new LinkageError(
+                "Reviewed Dynamic Trees field is no longer readable: " + field
+            );
+            wrapped.initCause(error);
+            throw wrapped;
+        }
+    }
+
+    private static Object invoke(Method method, Object receiver, Object... arguments) {
+        try {
+            return method.invoke(receiver, arguments);
+        } catch (InvocationTargetException error) {
+            Throwable cause = error.getCause();
+            if (cause instanceof RuntimeException runtime) throw runtime;
+            if (cause instanceof Error fatal) throw fatal;
+            LinkageError wrapped = new LinkageError(
+                "Reviewed Dynamic Trees method threw a checked exception: " + method
+            );
+            wrapped.initCause(cause);
+            throw wrapped;
+        } catch (ReflectiveOperationException error) {
+            LinkageError wrapped = new LinkageError(
+                "Reviewed Dynamic Trees method is no longer invocable: " + method
+            );
+            wrapped.initCause(error);
+            throw wrapped;
+        }
+    }
+
+    private static <T> T requireNullableType(
+        Object value,
+        Class<T> type,
+        String description
+    ) {
+        if (value == null) return null;
+        return requireType(value, type, description);
+    }
+
+    private static <T> T requireType(Object value, Class<T> type, String description) {
+        if (type.isInstance(value)) return type.cast(value);
+        throw new LinkageError(
+            "Reviewed Dynamic Trees API returned invalid " + description + ": " + value
+        );
+    }
+}

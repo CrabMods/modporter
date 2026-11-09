@@ -1,0 +1,38 @@
+{
+  "schema": "modporter-differential-oracle-fixture-v1",
+  "description": "Unchanged Java 17 class bytes used only as the old-side algorithm and call-boundary oracle for MushroomRotGenFeature#postRot.",
+  "component": "com.ferreusveritas.dynamictrees:DynamicTrees-1.20.1:1.3.0-BETA13",
+  "oracleArtifact": {
+    "kind": "ModDevGradle transformed named binary selected by the public source graph",
+    "sha256": "b0eecc4dccc9e14f1738f2c77fa50fda2289a58dd4d2bf87aa4e4ba3f89281df",
+    "size": 3728591,
+    "sourceGraph": "logs/public-create-source-graph-current.json",
+    "sourceGraphArtifactIndex": 32,
+    "mappingVariant": "named"
+  },
+  "entry": {
+    "path": "com/ferreusveritas/dynamictrees/systems/genfeature/MushroomRotGenFeature.class",
+    "sha256": "7e59b6e0692b1469d99a3d11762046e72458d75d626988d7c46e4f878f97871b",
+    "size": 4932,
+    "classFileMajorVersion": 61
+  },
+  "upstream": {
+    "project": "Dynamic Trees",
+    "tag": "1.3.0-BETA13",
+    "commit": "9b43a9261e11dbd7d84b7e37272cbbd9dcf23277",
+    "author": "Harley O'Connor",
+    "license": "MIT",
+    "copyright": "Copyright (c) 2016,2017 Ferreus Veritas",
+    "licenseFile": "third_party/dynamictrees/LICENSE",
+    "primaryProvenance": "third_party/dynamictrees/README.md"
+  },
+  "scope": {
+    "preserved": [
+      "MushroomRotGenFeature.class"
+    ],
+    "excluded": [
+      "complete 3.7 MB transformed artifact"
+    ],
+    "execution": "isolated URLClassLoader with Java 17 minimal stubs compiled at JUnit runtime"
+  }
+}

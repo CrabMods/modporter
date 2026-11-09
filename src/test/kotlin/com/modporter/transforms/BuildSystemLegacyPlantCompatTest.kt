@@ -28,10 +28,13 @@ class BuildSystemLegacyPlantCompatTest {
 
     private fun install(kotlinDsl: Boolean) {
         val identity = CanonicalRuntimeIdentity.fromProductionResources()
-        val currentVersion = "1.0.1-${identity.sourceSha256.take(16)}"
-        val previousVersion = "1.0.0-${identity.sourceSha256.take(16)}"
+        val currentVersion = "1.0.2-${identity.sourceSha256.take(16)}"
+        val previousVersion = "1.0.0-bd2f764a86abe9dc"
         val previousJarSha256 =
             "f93da8ad5fea04a3e85934214a04f605fd6015276bdf36cb4421ca431e739ffa"
+        val previousGameLibraryVersion = "1.0.1-bd2f764a86abe9dc"
+        val previousGameLibraryJarSha256 =
+            "1866250e5c14060af68293db21947eb3fc43d5503ac66778323ee49e1e5a4e39"
         val extension = if (kotlinDsl) "gradle.kts" else "gradle"
         directory.resolve("build.$extension").writeText(
             if (kotlinDsl) {
@@ -98,6 +101,11 @@ class BuildSystemLegacyPlantCompatTest {
         assertTrue(auxiliaryBuild.contains("version = '$currentVersion'"))
         assertTrue(auxiliaryBuild.contains("'FMLModType': 'GAMELIBRARY'"))
         assertTrue(
+            auxiliaryBuild.contains(
+                "'MixinConfigs': 'modporter-legacy-plant-dt.mixins.json'"
+            )
+        )
+        assertTrue(
             BuildSystemLegacyPlantCompat.install(directory, dryRun = false).isEmpty()
         )
 
@@ -110,6 +118,41 @@ class BuildSystemLegacyPlantCompatTest {
         assertThrows(IllegalStateException::class.java) {
             BuildSystemLegacyPlantCompat.install(directory, dryRun = false)
         }
+
+        val unknownHashIdentity = owningBuild.replace(
+            identity.jarSha256,
+            "0".repeat(64)
+        )
+        require(unknownHashIdentity != owningBuild)
+        directory.resolve("build.$extension").writeText(unknownHashIdentity)
+        assertThrows(IllegalArgumentException::class.java) {
+            BuildSystemLegacyPlantCompat.install(directory, dryRun = false)
+        }
+
+        val previousGameLibraryIdentity = owningBuild
+            .replace(currentVersion, previousGameLibraryVersion)
+            .replace(identity.jarSha256, previousGameLibraryJarSha256)
+        directory.resolve("build.$extension").writeText(
+            previousGameLibraryIdentity.replace(
+                previousGameLibraryJarSha256,
+                "1".repeat(64)
+            )
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            BuildSystemLegacyPlantCompat.install(directory, dryRun = false)
+        }
+        directory.resolve("build.$extension").writeText(previousGameLibraryIdentity)
+        val upgradedGameLibrary = BuildSystemLegacyPlantCompat.install(
+            directory,
+            dryRun = false
+        )
+        assertTrue(upgradedGameLibrary.isNotEmpty())
+        val upgradedGameLibraryBuild = directory.resolve("build.$extension").readText()
+        assertEquals(3, upgradedGameLibraryBuild.windowed(currentVersion.length).count {
+            it == currentVersion
+        })
+        assertTrue(previousGameLibraryVersion !in upgradedGameLibraryBuild)
+        assertTrue(identity.jarSha256 in upgradedGameLibraryBuild)
 
         val previousIdentity = owningBuild
             .replace(currentVersion, previousVersion)

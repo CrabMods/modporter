@@ -3,6 +3,7 @@ package com.modporter.core.transforms.build
 import com.modporter.core.pipeline.Change
 import com.modporter.core.pipeline.Confidence
 import com.modporter.core.pipeline.GradleModLayout
+import com.modporter.core.transforms.shared.LegacyPlantRuntimeResources
 import java.nio.file.Path
 import java.security.MessageDigest
 import kotlin.io.path.exists
@@ -44,10 +45,44 @@ internal object BuildSystemLegacyPlantCompat {
     private const val JAR_VARIANT_MARKER = "modporterLegacyPlantCompatJarVariant"
     private const val DEV_RUNTIME_MARKER = "modporterLegacyPlantCompatDevRuntime"
     private const val METADATA_MARKER = "modporterLegacyPlantCompatMetadata"
-    private const val PACKAGING_VERSION = "1.0.1"
-    private const val PRE_GAME_LIBRARY_VERSION = "1.0.0-bd2f764a86abe9dc"
-    private const val PRE_GAME_LIBRARY_JAR_SHA256 =
-        "f93da8ad5fea04a3e85934214a04f605fd6015276bdf36cb4421ca431e739ffa"
+    private const val PACKAGING_VERSION = "1.0.2"
+    private const val FORGE_RELEASE = "1.20.1-47.1.33"
+    private const val FORGE_COMMIT = "30f255d76c4c2e915414a24e6d8aed42f429817e"
+    private const val COMPONENT_RESOURCE_ROOT =
+        "META-INF/modporter/legacy-plant-compat"
+    private const val PROVENANCE_PATH = "$COMPONENT_RESOURCE_ROOT/provenance.json"
+    private const val MIXIN_CONFIG_ROLE =
+        "Mixin configuration for the reviewed Dynamic Trees compatibility consumer"
+
+    private data class PackagingIdentity(
+        val version: String,
+        val jarSha256: String
+    )
+
+    private data class RuntimeMaterial(
+        val content: String,
+        val role: String
+    )
+
+    private val knownPackagingIdentities = listOf(
+        PackagingIdentity(
+            version = "1.0.0-bd2f764a86abe9dc",
+            jarSha256 =
+                "f93da8ad5fea04a3e85934214a04f605fd6015276bdf36cb4421ca431e739ffa"
+        ),
+        PackagingIdentity(
+            version = "1.0.1-bd2f764a86abe9dc",
+            jarSha256 =
+                "1866250e5c14060af68293db21947eb3fc43d5503ac66778323ee49e1e5a4e39"
+        )
+    )
+
+    private val forgeDerivedSources = setOf(
+        "PlantType",
+        "IPlantable",
+        "LegacyPlantables"
+    )
+    private val dynamicTreesDerivedSources = setOf("LegacyPlantMushroomRotCompat")
 
     /**
      * This manifest is shipped with ModPorter beside the canonical runtime sources. It is generated
@@ -77,8 +112,9 @@ internal object BuildSystemLegacyPlantCompat {
         }
         val request = requestCandidates.single()
 
-        val sourceTemplates = canonicalRuntimeSources()
-        val sourceSha256 = canonicalSourceHash(sourceTemplates)
+        val sourceTemplates = LegacyPlantRuntimeResources.javaTemplates()
+        val sourceSha256 =
+            LegacyPlantRuntimeResources.canonicalSourceHashText(sourceTemplates)
         val requestValues = request.readText().lineSequence()
             .filter { '=' in it }
             .associate { line ->
@@ -96,16 +132,33 @@ internal object BuildSystemLegacyPlantCompat {
 
         val runtimeVersion = "$PACKAGING_VERSION-${sourceSha256.take(16)}"
         val runtimeRoot = projectDir.resolve(RUNTIME_DIR)
-        val planned = linkedMapOf<Path, String>()
-        for ((name, template) in sourceTemplates) {
-            val content = template
+        val resourceRoot = runtimeRoot.resolve("src/main/resources")
+        val packagePath = PACKAGE.replace('.', '/')
+        val expandedSources = sourceTemplates.mapValues { (_, template) ->
+            template
                 .replace("@PACKAGE@", PACKAGE)
                 .replace("@RUNTIME_SOURCE_SHA256@", sourceSha256)
+                .replace("\r\n", "\n")
+                .replace('\r', '\n')
+        }
+        val runtimeResources = LegacyPlantRuntimeResources.expandedResources(sourceSha256)
+            .mapValues { (_, content) -> RuntimeMaterial(content, MIXIN_CONFIG_ROLE) }
+        val planned = linkedMapOf<Path, String>()
+        for ((name, content) in expandedSources.toSortedMap()) {
             planned[
                 runtimeRoot.resolve("src/main/java")
-                    .resolve(PACKAGE.replace('.', '/'))
+                    .resolve(packagePath)
                     .resolve("$name.java")
             ] = content
+            planned[
+                resourceRoot.resolve(COMPONENT_RESOURCE_ROOT)
+                    .resolve("sources")
+                    .resolve(packagePath)
+                    .resolve("$name.java")
+            ] = content
+        }
+        for ((path, resource) in runtimeResources.toSortedMap()) {
+            planned[resourceRoot.resolve(path)] = resource.content
         }
         val settings = uniqueExisting(
             projectDir,
@@ -122,8 +175,66 @@ internal object BuildSystemLegacyPlantCompat {
             ?: error("Legacy plant runtime requires one owning module build script")
         val owningBuild = buildFile.readText()
         val modDevVersion = detectModDevVersion(owningBuild)
+        val buildRecipe = reproducibleBuildGradle(runtimeVersion, modDevVersion)
+        val materials = linkedMapOf(
+            "META-INF/modporter/LICENSE" to RuntimeMaterial(
+                requiredResourceText("/META-INF/modporter/LICENSE"),
+                "Apache-2.0 license for ModPorter helper sources"
+            ),
+            "META-INF/modporter/NOTICE" to RuntimeMaterial(
+                requiredResourceText("/META-INF/modporter/NOTICE"),
+                "ModPorter distribution notice"
+            ),
+            "META-INF/modporter/third-party/minecraftforge/LICENSE.txt" to RuntimeMaterial(
+                requiredResourceText(
+                    "/META-INF/modporter/third-party/minecraftforge/LICENSE.txt"
+                ),
+                "LGPL-2.1-only license for Forge-derived sources"
+            ),
+            "META-INF/modporter/third-party/minecraftforge/README.md" to RuntimeMaterial(
+                requiredResourceText(
+                    "/META-INF/modporter/third-party/minecraftforge/README.md"
+                ),
+                "Minecraft Forge component notice and pinned provenance"
+            ),
+            "META-INF/modporter/third-party/dynamictrees/LICENSE" to RuntimeMaterial(
+                requiredResourceText(
+                    "/META-INF/modporter/third-party/dynamictrees/LICENSE"
+                ),
+                "MIT license for Dynamic Trees-derived sources"
+            ),
+            "META-INF/modporter/third-party/dynamictrees/README.md" to RuntimeMaterial(
+                requiredResourceText(
+                    "/META-INF/modporter/third-party/dynamictrees/README.md"
+                ),
+                "Dynamic Trees component notice and pinned provenance"
+            ),
+            "$COMPONENT_RESOURCE_ROOT/build.gradle.recipe" to RuntimeMaterial(
+                buildRecipe,
+                "Reproducible Gradle build recipe without an expected output hash"
+            ),
+            "$COMPONENT_RESOURCE_ROOT/BUILD.md" to RuntimeMaterial(
+                buildInstructions(runtimeVersion),
+                "Minimal source and resource reconstruction instructions"
+            )
+        )
+        for ((path, material) in materials) {
+            planned[resourceRoot.resolve(path)] = material.content
+        }
+        planned[resourceRoot.resolve(PROVENANCE_PATH)] = provenanceManifest(
+            runtimeVersion = runtimeVersion,
+            sourceSha256 = sourceSha256,
+            expandedSources = expandedSources,
+            runtimeResources = runtimeResources,
+            materials = materials
+        )
         planned[runtimeRoot.resolve("build.gradle")] =
-            auxiliaryBuildGradle(runtimeVersion, canonicalJarSha256, modDevVersion)
+            auxiliaryBuildGradle(
+                runtimeVersion,
+                canonicalJarSha256,
+                modDevVersion,
+                buildRecipe
+            )
         planned[buildFile] = patchOwningBuild(
             owningBuild,
             buildFile.fileName.toString().endsWith(".kts"),
@@ -386,42 +497,42 @@ internal object BuildSystemLegacyPlantCompat {
         require(original.lineSequence().count { METADATA_MARKER in it } == 1) {
             "Existing legacy plant runtime metadata marker is missing or duplicated"
         }
-        val currentVersionCount = occurrenceCount(original, runtimeVersion)
-        val previousVersionCount = occurrenceCount(original, PRE_GAME_LIBRARY_VERSION)
-        val currentHashCount = occurrenceCount(original, jarSha256)
-        val previousHashCount = occurrenceCount(
-            original,
-            PRE_GAME_LIBRARY_JAR_SHA256
-        )
-        return when {
-            currentVersionCount == 3 && previousVersionCount == 0 -> {
-                require(currentHashCount == 1) {
-                    "Existing legacy plant runtime packaging has a different JAR hash"
-                }
-                if (jarSha256 != PRE_GAME_LIBRARY_JAR_SHA256) {
-                    require(previousHashCount == 0) {
-                        "Existing legacy plant runtime packaging mixes old and current JAR hashes"
-                    }
-                }
-                original
-            }
-            previousVersionCount == 3 && currentVersionCount == 0 -> {
-                require(previousHashCount == 1) {
-                    "Known legacy plant packaging version has an unrecognized JAR hash"
-                }
-                if (jarSha256 != PRE_GAME_LIBRARY_JAR_SHA256) {
-                    require(currentHashCount == 0) {
-                        "Existing legacy plant runtime packaging mixes old and current JAR hashes"
-                    }
-                }
-                original
-                    .replace(PRE_GAME_LIBRARY_VERSION, runtimeVersion)
-                    .replace(PRE_GAME_LIBRARY_JAR_SHA256, jarSha256)
-            }
-            else -> error(
-                "Existing legacy plant runtime packaging has an unknown or mixed version"
-            )
+        val currentIdentity = PackagingIdentity(runtimeVersion, jarSha256)
+        val acceptedIdentities = listOf(currentIdentity) + knownPackagingIdentities
+        val matchingVersions = acceptedIdentities.filter {
+            occurrenceCount(original, it.version) == 3
         }
+        if (matchingVersions.size != 1) {
+            error("Existing legacy plant runtime packaging has an unknown or mixed version")
+        }
+        val installedIdentity = matchingVersions.single()
+        require(occurrenceCount(original, installedIdentity.jarSha256) == 1) {
+            "Known legacy plant packaging version has an unrecognized JAR hash"
+        }
+        acceptedIdentities
+            .map { it.version }
+            .distinct()
+            .filter { it != installedIdentity.version }
+            .forEach { version ->
+                require(occurrenceCount(original, version) == 0) {
+                    "Existing legacy plant runtime packaging mixes known versions"
+                }
+            }
+        acceptedIdentities
+            .map { it.jarSha256 }
+            .distinct()
+            .filter { it != installedIdentity.jarSha256 }
+            .forEach { hash ->
+                require(occurrenceCount(original, hash) == 0) {
+                    "Existing legacy plant runtime packaging mixes known JAR hashes"
+                }
+            }
+        if (installedIdentity == currentIdentity) {
+            return original
+        }
+        return original
+            .replace(installedIdentity.version, runtimeVersion)
+            .replace(installedIdentity.jarSha256, jarSha256)
     }
 
     private fun occurrenceCount(content: String, value: String): Int =
@@ -497,6 +608,23 @@ internal object BuildSystemLegacyPlantCompat {
     private fun auxiliaryBuildGradle(
         runtimeVersion: String,
         jarSha256: String,
+        modDevVersion: String,
+        buildRecipe: String
+    ): String = buildRecipe.trimEnd() + """
+
+        tasks.named('jar', Jar).configure {
+            doLast {
+                def digest = java.security.MessageDigest.getInstance('SHA-256')
+                    .digest(archiveFile.get().asFile.bytes).encodeHex().toString()
+                if (digest != '$jarSha256') {
+                    throw new GradleException('Canonical legacy plant runtime JAR hash changed: ' + digest)
+                }
+            }
+        }
+    """.trimIndent() + "\n"
+
+    private fun reproducibleBuildGradle(
+        runtimeVersion: String,
         modDevVersion: String
     ): String = """
         plugins {
@@ -538,18 +666,136 @@ internal object BuildSystemLegacyPlantCompat {
             manifest {
                 attributes(
                     'Automatic-Module-Name': '$PACKAGE',
-                    'FMLModType': 'GAMELIBRARY'
+                    'FMLModType': 'GAMELIBRARY',
+                    'MixinConfigs': 'modporter-legacy-plant-dt.mixins.json'
                 )
-            }
-            doLast {
-                def digest = java.security.MessageDigest.getInstance('SHA-256')
-                    .digest(archiveFile.get().asFile.bytes).encodeHex().toString()
-                if (digest != '$jarSha256') {
-                    throw new GradleException('Canonical legacy plant runtime JAR hash changed: ' + digest)
-                }
             }
         }
     """.trimIndent() + "\n"
+
+    private fun buildInstructions(runtimeVersion: String): String = """
+        # Rebuilding the shared legacy-plant runtime
+
+        This archive contains every expanded Java source, every runtime resource, and every
+        required legal material used to build `$GROUP:$ARTIFACT:$runtimeVersion`.
+
+        1. Create an empty Gradle project.
+        2. Copy each provenance `sources[].embeddedPath` entry to its matching
+           `sources[].generatedPath` entry.
+        3. Keep every `sources[].embeddedPath`, every `runtimeResources[].path`, every
+           `materials[].path`, and `provenance.json` beneath `src/main/resources/` at
+           the same archive path.
+        4. Also save the embedded `build.gradle.recipe` as the project `build.gradle`.
+        5. Run `gradle --no-daemon --no-build-cache clean jar` with JDK 21.
+
+        The recipe pins ModDevGradle and NeoForge, disables archive timestamps,
+        and uses reproducible archive ordering. It intentionally contains no
+        expected output JAR hash because embedding that hash would be circular.
+    """.trimIndent() + "\n"
+
+    private fun provenanceManifest(
+        runtimeVersion: String,
+        sourceSha256: String,
+        expandedSources: Map<String, String>,
+        runtimeResources: Map<String, RuntimeMaterial>,
+        materials: Map<String, RuntimeMaterial>
+    ): String {
+        val packagePath = PACKAGE.replace('.', '/')
+        val sourceEntries = expandedSources.toSortedMap().map { (name, content) ->
+            val (license, origin) = when (name) {
+                in forgeDerivedSources -> "LGPL-2.1-only" to "MinecraftForge"
+                in dynamicTreesDerivedSources -> "MIT" to "DynamicTrees"
+                else -> "Apache-2.0" to "ModPorter"
+            }
+            val generatedPath = "src/main/java/$packagePath/$name.java"
+            val embeddedPath =
+                "$COMPONENT_RESOURCE_ROOT/sources/$packagePath/$name.java"
+            """
+                {
+                  "name": ${jsonString(name)},
+                  "generatedPath": ${jsonString(generatedPath)},
+                  "embeddedPath": ${jsonString(embeddedPath)},
+                  "sha256": ${jsonString(sha256(content))},
+                  "license": ${jsonString(license)},
+                  "origin": ${jsonString(origin)}
+                }
+            """.trimIndent()
+        }.joinToString(",\n")
+        val runtimeResourceEntries = runtimeResources.toSortedMap()
+            .map { (path, resource) ->
+                """
+                    {
+                      "path": ${jsonString(path)},
+                      "sha256": ${jsonString(sha256(resource.content))},
+                      "role": ${jsonString(resource.role)}
+                    }
+                """.trimIndent()
+            }.joinToString(",\n")
+        val materialEntries = materials.toSortedMap().map { (path, material) ->
+            """
+                {
+                  "path": ${jsonString(path)},
+                  "sha256": ${jsonString(sha256(material.content))},
+                  "role": ${jsonString(material.role)}
+                }
+            """.trimIndent()
+        }.joinToString(",\n")
+        return """
+            {
+              "schemaVersion": 1,
+              "component": ${jsonString("$GROUP:$ARTIFACT")},
+              "packagingVersion": ${jsonString(PACKAGING_VERSION)},
+              "runtimeVersion": ${jsonString(runtimeVersion)},
+              "templateSourceSha": ${jsonString(sourceSha256)},
+              "forgeRelease": ${jsonString(FORGE_RELEASE)},
+              "forgeCommit": ${jsonString(FORGE_COMMIT)},
+              "licenseClassification": "per-file",
+              "sources": [
+            ${sourceEntries.prependIndent("    ")}
+              ],
+              "runtimeResources": [
+            ${runtimeResourceEntries.prependIndent("    ")}
+              ],
+              "materials": [
+            ${materialEntries.prependIndent("    ")}
+              ]
+            }
+        """.trimIndent() + "\n"
+    }
+
+    private fun requiredResourceText(path: String): String = checkNotNull(
+        javaClass.getResource(path)
+    ) {
+        "Missing required legacy plant runtime material $path"
+    }.readText()
+
+    private fun sha256(content: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(content.toByteArray(Charsets.UTF_8))
+        .joinToString("") { "%02x".format(it) }
+
+    private fun jsonString(value: String): String = buildString {
+        append('"')
+        for (character in value) {
+            when (character) {
+                '"' -> append("\\\"")
+                '\\' -> append("\\\\")
+                '\b' -> append("\\b")
+                '\u000C' -> append("\\f")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                else -> {
+                    if (character.code < 0x20) {
+                        append("\\u")
+                        append(character.code.toString(16).padStart(4, '0'))
+                    } else {
+                        append(character)
+                    }
+                }
+            }
+        }
+        append('"')
+    }
 
     private fun detectModDevVersion(owningBuild: String): String {
         val version = Regex(
@@ -562,35 +808,6 @@ internal object BuildSystemLegacyPlantCompat {
             "Unsafe ModDevGradle plugin version literal"
         }
         return version
-    }
-
-    private fun canonicalRuntimeSources(): Map<String, String> {
-        val names = listOf(
-            "PlantType",
-            "IPlantable",
-            "LegacyPlantSustainer",
-            "LegacyPlantPlacement",
-            "LegacyPlantableAdapter",
-            "LegacySoilAdapter",
-            "LegacyPlantPlacementAdapter",
-            "LegacyPlantables"
-        )
-        return names.associateWith { name ->
-            checkNotNull(javaClass.getResource("/compat/$name.java.template")) {
-                "Missing canonical legacy plant runtime source $name"
-            }.readText()
-        }
-    }
-
-    private fun canonicalSourceHash(sources: Map<String, String>): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        for ((name, content) in sources.toSortedMap()) {
-            digest.update(name.toByteArray(Charsets.UTF_8))
-            digest.update(0.toByte())
-            digest.update(content.replace("\r\n", "\n").toByteArray(Charsets.UTF_8))
-            digest.update(0.toByte())
-        }
-        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     private fun uniqueExisting(root: Path, vararg names: String): Path? {

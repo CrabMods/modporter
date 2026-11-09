@@ -1,0 +1,36 @@
+/*
+ * Copyright (c) 2026 ModPorter contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package @PACKAGE@.mixin;
+
+import @PACKAGE@.LegacyPlantMushroomRotCompat;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Pseudo;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Coerce;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+
+@Pseudo
+@Mixin(
+    targets = "com.dtteam.dynamictrees.systems.genfeature.MushroomRotGenFeature",
+    remap = false
+)
+public abstract class LegacyPlantMushroomRotMixin {
+    @Inject(
+        method = "postRot(Lcom/dtteam/dynamictrees/systems/genfeature/GenFeatureConfiguration;"
+            + "Lcom/dtteam/dynamictrees/systems/genfeature/context/PostRotContext;)Z",
+        at = @At("HEAD"),
+        cancellable = true,
+        require = 1
+    )
+    private void modporter$restoreLegacyPostRot(
+        @Coerce Object configuration,
+        @Coerce Object context,
+        CallbackInfoReturnable<Boolean> callback
+    ) {
+        callback.setReturnValue(LegacyPlantMushroomRotCompat.postRot(configuration, context));
+    }
+}
