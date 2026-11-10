@@ -1560,6 +1560,106 @@ class RealModBenchmarkTest {
     }
 
     @Test
+    fun `native capability client world validation stages sealed probe contract`(
+        @TempDir tempDir: Path
+    ) {
+        tempDir.resolve("gradle.properties").writeText("mod_id=resmod\n")
+        tempDir.resolve("build.gradle").writeText(
+            """
+            neoForge {
+                runs {
+                    clientWorld {
+                        client()
+                    }
+                }
+            }
+            """.trimIndent()
+        )
+        val harnessPackage = "com.modporter.generated.resmod.benchmark"
+        val compatPackage = "com.modporter.generated.resmod.compat"
+        val nativeSource = LegacyCapabilityNativeRuntimeHarnessSource.source(
+            harnessPackage,
+            compatPackage
+        )
+        val sourceHash = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(nativeSource.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        val request = LegacyCapabilityNativeRuntimeRequest(
+            validationSessionId = "22222222-2222-2222-2222-222222222222",
+            evidenceDir = tempDir.resolve("evidence"),
+            receiptPath = tempDir.resolve(LegacyCapabilityNativeRuntimeHarnessSource.RECEIPT_FILE_NAME),
+            tracePath = tempDir.resolve(LegacyCapabilityNativeRuntimeHarnessSource.TRACE_FILE_NAME),
+            wrapperReceiptPath = tempDir.resolve("wrapper-receipt.json"),
+            convertedModDir = tempDir,
+            runtimeDirectory = tempDir.resolve("run"),
+            compatPackage = compatPackage,
+            harnessPackage = harnessPackage,
+            harnessSourceSha256 = sourceHash,
+            mixinConfigResource = "modporter-legacy-capability-query.mixins.json",
+            mixinConfigSha256 = "a".repeat(64)
+        )
+
+        val issues = stageClientWorldHarness(tempDir, nativeCapabilityRequest = request)
+        val sourceDir = tempDir.resolve("src/main/java/com/modporter/generated/resmod/benchmark")
+        val nativeHarness = sourceDir.resolve(LegacyCapabilityNativeRuntimeHarnessSource.FILE_NAME)
+        val build = tempDir.resolve("build.gradle").readText()
+        val generic = sourceDir.resolve(StrictSpawnValidationContract.GENERIC_HARNESS_FILE).readText()
+
+        assertTrue(issues.isEmpty(), "Expected native capability staging to succeed: $issues")
+        assertEquals(nativeSource, nativeHarness.readText())
+        assertEquals(sourceHash, sha256File(nativeHarness))
+        for (property in listOf(
+            "modporter.capabilityProbe.enabled",
+            "modporter.capabilityProbe.completed",
+            "modporter.capabilityProbe.passed",
+            "modporter.capabilityProbe.profileId",
+            "modporter.capabilityProbe.validationSessionId",
+            "modporter.capabilityProbe.evidenceDir",
+            "modporter.capabilityProbe.receipt",
+            "modporter.capabilityProbe.trace",
+            "modporter.capabilityProbe.mixinConfigResource",
+            "modporter.capabilityProbe.mixinConfigSha256"
+        )) {
+            assertTrue(build.contains("systemProperty '$property'"), "Missing $property in:\n$build")
+        }
+        assertTrue(generic.contains("Waiting for native capability receipt before client exit"), generic)
+        assertTrue(generic.contains("Native retained-capability runtime probe completed without PASS"), generic)
+        assertTrue(stageClientWorldHarness(tempDir, nativeCapabilityRequest = request).isEmpty())
+        assertEquals(build, tempDir.resolve("build.gradle").readText(), "restaging must preserve exact bytes")
+
+        val wrongPackage = request.copy(harnessPackage = "com.modporter.generated.other.benchmark")
+        val mismatch = stageClientWorldHarness(tempDir, nativeCapabilityRequest = wrongPackage)
+        assertTrue(
+            mismatch.any { it.contains("Native capability harness package differs") },
+            mismatch.joinToString("; ")
+        )
+    }
+
+    @Test
+    fun `native capability runtime policy requires exact pass seal and clean exit`(@TempDir tempDir: Path) {
+        val policy = RuntimeLogPolicy.clientWorld(
+            failOnWarnings = true,
+            progressGraceSeconds = 75,
+            requireNativeCapabilityReceipt = true
+        )
+        val log = tempDir.resolve("native-capability.log")
+        val label = "native retained-capability receipt sealed"
+
+        assertTrue(!policy.terminateAfterReady)
+        assertTrue(policy.requireZeroExit)
+        log.writeText(
+            "[ModPorterCapabilityProbe] Receipt sealed path=receipt.json " +
+                "sha256=bad traceSha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb status=PASS\n"
+        )
+        assertTrue(label in policy.missingReadyChecks(log))
+        log.writeText(
+            "[ModPorterCapabilityProbe] Receipt sealed path=receipt.json " +
+                "sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa traceSha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb status=PASS\n"
+        )
+        assertTrue(label !in policy.missingReadyChecks(log))
+    }
+
+    @Test
     fun `benchmark client world harness reaches a kotlin dsl module build`(@TempDir tempDir: Path) {
         tempDir.resolve("gradle.properties").writeText("mod_id=resmod\n")
         tempDir.resolve("build.gradle.kts").writeText(
@@ -2270,6 +2370,16 @@ class RealModBenchmarkTest {
                 structureIssues.addAll(preparation.issues)
                 strictReviewRequest = preparation.request
             }
+            var nativeCapabilityRequest: LegacyCapabilityNativeRuntimeRequest? = null
+            if (options.runClientWorld) {
+                val nativePreparation = LegacyCapabilityNativeRuntimeValidation.prepare(
+                    projectDir = modDir,
+                    strictReviewRequest = strictReviewRequest,
+                    harnessPackage = benchmarkHarnessPackage(modDir)
+                )
+                structureIssues.addAll(nativePreparation.issues)
+                nativeCapabilityRequest = nativePreparation.request
+            }
             var compile = CheckResult.notRun("MODPORTER_BENCHMARK_COMPILE=false")
             if (structureIssues.isEmpty() && options.compile) {
                 structureIssues.addAll(stageBenchmarkDependencies(case, artifactRoot, modDir))
@@ -2434,7 +2544,11 @@ class RealModBenchmarkTest {
                 if (clientSmokeWorldFixture.result.status == CheckStatus.FAIL || clientSmokeWorldFixture.path == null) {
                     runClientWorld = CheckResult(CheckStatus.FAIL, "Client smoke world fixture failed: ${clientSmokeWorldFixture.result.note}")
                 } else {
-                    val harnessIssues = stageClientWorldHarness(modDir, strictReviewRequest)
+                    val harnessIssues = stageClientWorldHarness(
+                        modDir,
+                        strictReviewRequest,
+                        nativeCapabilityRequest
+                    )
                     if (harnessIssues.isNotEmpty()) {
                         runClientWorld = CheckResult(CheckStatus.FAIL, harnessIssues.joinToString("; "))
                     } else {
@@ -2464,7 +2578,8 @@ class RealModBenchmarkTest {
                                         options.logClean,
                                         options.progressGraceSeconds,
                                         strictReviewRequest != null,
-                                        strictReviewRequest?.stationMapRequired == true
+                                        strictReviewRequest?.stationMapRequired == true,
+                                        nativeCapabilityRequest != null
                                     ),
                                     prepared.path,
                                     strictReviewRequest
@@ -2482,6 +2597,14 @@ class RealModBenchmarkTest {
                 runtimeNote = runClientWorld.note,
                 runtimeLog = reportsDir.resolve("${case.id}-runClientWorld.log")
             )
+            val nativeCapabilityValidation = nativeCapabilityRequest?.let { request ->
+                LegacyCapabilityNativeRuntimeValidation.verify(
+                    request = request,
+                    runtimePassed = runClientWorld.status == CheckStatus.PASS,
+                    runtimeNote = runClientWorld.note,
+                    runtimeLog = reportsDir.resolve("${case.id}-runClientWorld.log")
+                )
+            } ?: LegacyCapabilityNativeValidation.notEvaluated()
             val failedChecks = mutableListOf<String>()
             failedChecks.addAll(structureIssues)
             if (compile.status == CheckStatus.FAIL) failedChecks.add("compileJava failed: ${compile.note}")
@@ -2511,6 +2634,12 @@ class RealModBenchmarkTest {
                         "MEDIUM/LOW change(s)"
                 )
             }
+            if (nativeCapabilityValidation.state == "FAILED") {
+                failedChecks.add(
+                    "Native capability runtime gate failed: " +
+                        nativeCapabilityValidation.issues.joinToString("; ")
+                )
+            }
 
             val allowedRuntimeIssues = listOf(runServer, runGameTestServer, runClient, runClientWorld)
                 .mapNotNull { it.allowedRuntimeIssueNote() }
@@ -2534,7 +2663,8 @@ class RealModBenchmarkTest {
                 runGameTestServer = runGameTestServer,
                 runClient = runClient,
                 runClientWorld = runClientWorld,
-                strictReviewValidation = strictReviewValidation
+                strictReviewValidation = strictReviewValidation,
+                nativeCapabilityValidation = nativeCapabilityValidation
             )
         } finally {
             terminateScopedJavaProcesses(outputDir)
@@ -4203,7 +4333,8 @@ class RealModBenchmarkTest {
 
     private fun stageClientWorldHarness(
         projectDir: Path,
-        strictReviewRequest: StrictReviewRuntimeRequest? = null
+        strictReviewRequest: StrictReviewRuntimeRequest? = null,
+        nativeCapabilityRequest: LegacyCapabilityNativeRuntimeRequest? = null
     ): List<String> {
         val issues = mutableListOf<String>()
         val harnessPackage = benchmarkHarnessPackage(projectDir)
@@ -4218,6 +4349,30 @@ class RealModBenchmarkTest {
             if (strictReviewRequest.stationMapRequired) {
                 sourceDir.resolve(StrictSpawnValidationContract.STATION_HARNESS_FILE)
                     .writeText(CreateStationMapRuntimeHarnessSource.source(harnessPackage, modId))
+            }
+        }
+        if (nativeCapabilityRequest != null) {
+            if (nativeCapabilityRequest.harnessPackage != harnessPackage) {
+                issues.add(
+                    "Native capability harness package differs from benchmark package: " +
+                        "${nativeCapabilityRequest.harnessPackage} != $harnessPackage"
+                )
+            } else {
+                val nativeSource = LegacyCapabilityNativeRuntimeHarnessSource.source(
+                    harnessPackage,
+                    nativeCapabilityRequest.compatPackage
+                )
+                val nativeHarness = sourceDir.resolve(
+                    LegacyCapabilityNativeRuntimeHarnessSource.FILE_NAME
+                )
+                nativeHarness.writeText(nativeSource)
+                val stagedHash = sha256File(nativeHarness)
+                if (stagedHash != nativeCapabilityRequest.harnessSourceSha256) {
+                    issues.add(
+                        "Native capability harness source hash changed while staging: " +
+                            "$stagedHash != ${nativeCapabilityRequest.harnessSourceSha256}"
+                    )
+                }
             }
         }
 
@@ -4291,6 +4446,53 @@ class RealModBenchmarkTest {
                         )
                     )
                 }
+            }
+            if (nativeCapabilityRequest != null) {
+                add(systemProperty("modporter.capabilityProbe.enabled", "true"))
+                add(systemProperty("modporter.capabilityProbe.completed", "false"))
+                add(systemProperty("modporter.capabilityProbe.passed", "false"))
+                add(
+                    systemProperty(
+                        "modporter.capabilityProbe.profileId",
+                        LegacyCapabilityNativeRuntimeHarnessSource.PROFILE_ID
+                    )
+                )
+                add(
+                    systemProperty(
+                        "modporter.capabilityProbe.validationSessionId",
+                        nativeCapabilityRequest.validationSessionId
+                    )
+                )
+                add(
+                    systemProperty(
+                        "modporter.capabilityProbe.evidenceDir",
+                        nativeCapabilityRequest.evidenceDir.toString()
+                    )
+                )
+                add(
+                    systemProperty(
+                        "modporter.capabilityProbe.receipt",
+                        nativeCapabilityRequest.receiptPath.toString()
+                    )
+                )
+                add(
+                    systemProperty(
+                        "modporter.capabilityProbe.trace",
+                        nativeCapabilityRequest.tracePath.toString()
+                    )
+                )
+                add(
+                    systemProperty(
+                        "modporter.capabilityProbe.mixinConfigResource",
+                        nativeCapabilityRequest.mixinConfigResource
+                    )
+                )
+                add(
+                    systemProperty(
+                        "modporter.capabilityProbe.mixinConfigSha256",
+                        nativeCapabilityRequest.mixinConfigSha256
+                    )
+                )
             }
         }
         val previous = buildFile.readText()
@@ -6410,6 +6612,7 @@ class RealModBenchmarkTest {
             "manualInterventionRequired" to
                 (unresolvedReviewSignalCount() + (result?.totalSkipped ?: 0) + (result?.totalErrors ?: 0) > 0),
             "strictReviewValidation" to strictReviewValidation.toTelemetryMap(),
+            "nativeCapabilityValidation" to nativeCapabilityValidation.toTelemetryMap(),
             "allowedRuntimeIssueClasses" to allowedRuntimeIssueClasses(),
             "passes" to passRows,
             "checks" to linkedMapOf(
@@ -6683,7 +6886,9 @@ class RealModBenchmarkTest {
                 validatedCount = 0,
                 unresolvedCount = 0,
                 state = "NOT_EVALUATED"
-            )
+            ),
+        val nativeCapabilityValidation: LegacyCapabilityNativeValidation =
+            LegacyCapabilityNativeValidation.notEvaluated()
     )
 
     data class DataGenerationOutcome(
@@ -6805,7 +7010,8 @@ class RealModBenchmarkTest {
                 failOnWarnings: Boolean,
                 progressGraceSeconds: Long,
                 requireStrictSpawnReceipt: Boolean = false,
-                requireClientWorldCoordinator: Boolean = false
+                requireClientWorldCoordinator: Boolean = false,
+                requireNativeCapabilityReceipt: Boolean = false
             ): RuntimeLogPolicy =
                 RuntimeLogPolicy(
                     readyChecks = clientStartChecks + listOf(
@@ -6835,11 +7041,29 @@ class RealModBenchmarkTest {
                         )
                     } else {
                         emptyList()
+                    } + if (requireNativeCapabilityReceipt) {
+                        listOf(
+                            RuntimeMarkerCheck(
+                                "native retained-capability receipt sealed",
+                                listOf(
+                                    Regex(
+                                        """\[ModPorterCapabilityProbe] Receipt sealed path=.* """ +
+                                            """sha256=[0-9a-f]{64} traceSha256=[0-9a-f]{64} status=PASS"""
+                                    )
+                                )
+                            )
+                        )
+                    } else {
+                        emptyList()
                     },
                     terminateAfterReady =
-                        !requireStrictSpawnReceipt && !requireClientWorldCoordinator,
+                        !requireStrictSpawnReceipt &&
+                            !requireClientWorldCoordinator &&
+                            !requireNativeCapabilityReceipt,
                     requireZeroExit =
-                        requireStrictSpawnReceipt || requireClientWorldCoordinator,
+                        requireStrictSpawnReceipt ||
+                            requireClientWorldCoordinator ||
+                            requireNativeCapabilityReceipt,
                     failOnWarnings = failOnWarnings,
                     progressChecks = clientStartChecks,
                     progressLabel = "client start",
@@ -7226,6 +7450,20 @@ class RealModBenchmarkTest {
                             System.out.println("[ModPorterBenchmark] Waiting for strict spawn receipt before client exit");
                         }
                         return;
+                    }
+                    if (Boolean.getBoolean("modporter.capabilityProbe.enabled")) {
+                        if (!Boolean.getBoolean("modporter.capabilityProbe.completed")) {
+                            if (!strictSpawnWaitLogged) {
+                                strictSpawnWaitLogged = true;
+                                System.out.println("[ModPorterBenchmark] Waiting for native capability receipt before client exit");
+                            }
+                            return;
+                        }
+                        if (!Boolean.getBoolean("modporter.capabilityProbe.passed")) {
+                            throw new IllegalStateException(
+                                "Native retained-capability runtime probe completed without PASS"
+                            );
+                        }
                     }
                     minecraft.stop();
                 }

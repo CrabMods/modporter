@@ -371,6 +371,72 @@ def verify_data_generation(row, run_id, reports_root, run_root):
     return dict(path=str(receipt_path), sha256=sha(receipt_path))
 
 
+NATIVE_CAPABILITY_PROFILE = "legacy-block-entity-capability-native-v1"
+NATIVE_CAPABILITY_EVIDENCE_FIELDS = (
+    "receiptPath", "receiptSha256", "tracePath", "traceSha256",
+    "wrapperReceiptPath", "wrapperReceiptSha256", "runtimeLogSha256",
+)
+
+
+def verify_native_capability(row, reports_root):
+    validation = row["nativeCapabilityValidation"]
+    state = validation["state"]
+    require(validation["issues"] == [],
+            f"Native capability validation has issues: {row['id']}")
+    if state == "NOT_EVALUATED":
+        require(row["id"] != "create",
+                "Create native retained-capability validation was not evaluated")
+        require(validation["profileId"] is None and all(
+                    validation[field] is None for field in NATIVE_CAPABILITY_EVIDENCE_FIELDS),
+                f"Unevaluated native capability gate exposes evidence: {row['id']}")
+        return []
+    require(state == "VALIDATED",
+            f"Native capability validation did not pass: {row['id']} state={state}")
+    require(validation["profileId"] == NATIVE_CAPABILITY_PROFILE,
+            f"Native capability profile differs: {row['id']}")
+
+    reports_root = Path(reports_root).resolve()
+    evidence = []
+    resolved = {}
+    for path_key, hash_key in (
+        ("receiptPath", "receiptSha256"),
+        ("tracePath", "traceSha256"),
+        ("wrapperReceiptPath", "wrapperReceiptSha256"),
+    ):
+        path = Path(validation[path_key]).resolve()
+        require(path.is_relative_to(reports_root),
+                f"Native capability evidence is outside selected run: {path}")
+        require(path.is_file() and not path.is_symlink(),
+                f"Missing or linked native capability evidence: {path}")
+        require(sha(path) == validation[hash_key],
+                f"Native capability evidence hash changed: {path}")
+        resolved[path_key] = path
+        evidence.append(file_record(path))
+
+    receipt = json.loads(resolved["receiptPath"].read_text(encoding="utf-8"))
+    trace = json.loads(resolved["tracePath"].read_text(encoding="utf-8"))
+    require(receipt["artifactSchema"] == NATIVE_CAPABILITY_PROFILE + ".receipt" and
+            receipt["profileId"] == NATIVE_CAPABILITY_PROFILE and
+            receipt["status"] == "PASS",
+            f"Native capability receipt identity differs: {row['id']}")
+    require(trace["artifactSchema"] == NATIVE_CAPABILITY_PROFILE + ".trace" and
+            trace["profileId"] == NATIVE_CAPABILITY_PROFILE and
+            trace["status"] == "PASS",
+            f"Native capability trace identity differs: {row['id']}")
+    require(Path(receipt["tracePath"]).resolve() == resolved["tracePath"],
+            f"Native capability receipt points to another trace: {row['id']}")
+    require(receipt["traceSha256"] == validation["traceSha256"],
+            f"Native capability trace binding differs: {row['id']}")
+
+    client_log = (reports_root / f"{row['id']}-runClientWorld.log").resolve()
+    require(client_log.is_file() and not client_log.is_symlink(),
+            f"Missing native capability runtime log: {client_log}")
+    require(sha(client_log) == validation["runtimeLogSha256"],
+            f"Native capability runtime log changed: {row['id']}")
+    evidence.append(file_record(client_log))
+    return evidence
+
+
 def tree_manifest(root, ignored_parts=frozenset()):
     root = Path(root).resolve()
     require(root.is_dir(), f"Bound tree directory is missing: {root}")
@@ -513,12 +579,14 @@ def main():
     require(totals["rawReviewSignalCount"] == totals["validatedReviewSignalCount"], "Unvalidated raw review signals")
     require([row["id"] for row in telemetry["outcomes"]] == expected, "Outcome order differs")
     native_receipts = []
+    native_capability_receipts = []
     data_generation_receipts = []
     gametest_evidence = []
     for row in telemetry["outcomes"]:
         require(row["status"] == "PASS", f"Target failed: {row['id']}")
         require(row["required"] is True, f"Target is not required: {row['id']}")
         require(row["manualInterventionRequired"] is False, f"Manual intervention: {row['id']}")
+        native_capability_receipts.extend(verify_native_capability(row, reports_root))
         for counter in ("errors", "skippedTransforms", "low", "unresolvedReviewSignalCount"):
             require(row[counter] == 0, f"Unresolved {counter}: {row['id']}")
         for check in ("compileJava", "runServer", "runGameTestServer", "runClient", "runClientWorld"):
@@ -594,6 +662,7 @@ def main():
                       )
                   ),
                   nativeReceipts=native_receipts,
+                  nativeCapabilityReceipts=native_capability_receipts,
                   dataGenerationReceipts=data_generation_receipts,
                   gameTestEvidence=gametest_evidence,
                   originalInput=original_input,

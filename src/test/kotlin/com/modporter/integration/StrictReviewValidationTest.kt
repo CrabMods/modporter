@@ -182,6 +182,15 @@ class StrictReviewValidationTest {
         val fixture = fixture(tempDir)
         val request = fixture.runtimeRequest(tempDir.resolve("reports"))
         val before = request.productBindings
+        assertTrue(
+            before.keys.containsAll(
+                setOf(
+                    "validator.nativeCapabilitySource.sha256",
+                    "validator.nativeCapabilityHarnessGenerator.sha256"
+                )
+            ),
+            "Native capability validator and generator must be immutable strict-review inputs"
+        )
         val receipt = fixture.sealDataGenerationEvidence(
             reportsDir = tempDir.resolve("reports"),
             runId = "strict-create-test"
@@ -338,10 +347,18 @@ class StrictReviewValidationTest {
             .writeText("package com.example; final class ModPorterClientWorldHarness {}\n")
         val strictHarness = harnessRoot.resolve(StrictSpawnValidationContract.GENERATED_HARNESS_FILE)
         strictHarness.writeText("package com.example; final class ModPorterStrictSpawnHarness {}\n")
+        val nativeHarness = harnessRoot.resolve(StrictSpawnValidationContract.NATIVE_CAPABILITY_HARNESS_FILE)
+        nativeHarness.writeText("package com.example; final class ModPorterLegacyCapabilityNativeHarness {}\n")
         val sealed = StrictReviewValidationRegistry.sealRuntimeManifest(request)
         assertTrue(sealed.issues.isEmpty(), sealed.issues.joinToString("; "))
+        assertTrue(
+            sealed.request!!.bindings.containsKey("runtime.nativeCapabilityHarness.sha256"),
+            "Native capability harness must be bound when present at sealing"
+        )
 
-        strictHarness.writeText("package com.example; final class ModPorterStrictSpawnHarness { int drift; }\n")
+        nativeHarness.writeText(
+            "package com.example; final class ModPorterLegacyCapabilityNativeHarness { int drift; }\n"
+        )
         val summary = StrictReviewValidationRegistry.verifyFinal(
             admission = admission,
             request = sealed.request,
@@ -352,7 +369,13 @@ class StrictReviewValidationTest {
 
         assertEquals("FAILED", summary.state)
         assertEquals(1, summary.unresolvedCount)
-        assertTrue(summary.issues.any { it.contains("Staged runtime harness changed") })
+        assertTrue(
+            summary.issues.any {
+                it.contains("Staged runtime harness changed") &&
+                    it.contains("runtime.nativeCapabilityHarness.sha256")
+            },
+            summary.issues.joinToString("; ")
+        )
     }
 
     @Test

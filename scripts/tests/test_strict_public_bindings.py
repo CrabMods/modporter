@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from verify_strict_acceptance import frozen_code
+from verify_strict_acceptance import frozen_code, sha, verify_native_capability
 
 
 class StrictPublicBindingsTest(unittest.TestCase):
@@ -64,6 +64,62 @@ class StrictPublicBindingsTest(unittest.TestCase):
                 payload.write_bytes(b"changed private tool")
                 with self.assertRaisesRegex(AssertionError, "Selected private code drifted"):
                     frozen_code(root)
+
+    def native_capability_row(self, reports, state="VALIDATED"):
+        receipt = reports / "native-receipt.json"
+        trace = reports / "native-trace.json"
+        wrapper = reports / "wrapper.json"
+        runtime_log = reports / "create-runClientWorld.log"
+        trace.write_text(
+            '{"artifactSchema":"legacy-block-entity-capability-native-v1.trace",'
+            '"profileId":"legacy-block-entity-capability-native-v1","status":"PASS"}\n',
+            encoding="utf-8",
+        )
+        receipt.write_text(
+            '{"artifactSchema":"legacy-block-entity-capability-native-v1.receipt",'
+            '"profileId":"legacy-block-entity-capability-native-v1","status":"PASS",'
+            f'"tracePath":{__import__("json").dumps(str(trace))},'
+            f'"traceSha256":"{sha(trace)}"}}\n',
+            encoding="utf-8",
+        )
+        wrapper.write_text("{}\n", encoding="utf-8")
+        runtime_log.write_text("native PASS\n", encoding="utf-8")
+        return {
+            "id": "create",
+            "nativeCapabilityValidation": {
+                "state": state,
+                "issues": [],
+                "profileId": "legacy-block-entity-capability-native-v1" if state == "VALIDATED" else None,
+                "receiptPath": str(receipt) if state == "VALIDATED" else None,
+                "receiptSha256": sha(receipt) if state == "VALIDATED" else None,
+                "tracePath": str(trace) if state == "VALIDATED" else None,
+                "traceSha256": sha(trace) if state == "VALIDATED" else None,
+                "wrapperReceiptPath": str(wrapper) if state == "VALIDATED" else None,
+                "wrapperReceiptSha256": sha(wrapper) if state == "VALIDATED" else None,
+                "runtimeLogSha256": sha(runtime_log) if state == "VALIDATED" else None,
+            },
+        }
+
+    def test_native_capability_evidence_is_bound_by_full_verifier(self):
+        with tempfile.TemporaryDirectory() as directory:
+            reports = Path(directory) / "reports"
+            reports.mkdir()
+            row = self.native_capability_row(reports)
+            evidence = verify_native_capability(row, reports)
+            self.assertEqual(len(evidence), 4)
+            Path(row["nativeCapabilityValidation"]["tracePath"]).write_text(
+                "changed\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(AssertionError, "evidence hash changed"):
+                verify_native_capability(row, reports)
+
+    def test_create_cannot_skip_native_capability_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            reports = Path(directory) / "reports"
+            reports.mkdir()
+            row = self.native_capability_row(reports, state="NOT_EVALUATED")
+            with self.assertRaisesRegex(AssertionError, "was not evaluated"):
+                verify_native_capability(row, reports)
 
 
 if __name__ == "__main__":

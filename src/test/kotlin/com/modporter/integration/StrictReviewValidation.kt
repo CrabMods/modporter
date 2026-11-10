@@ -48,6 +48,8 @@ internal object StrictSpawnValidationContract {
     const val GENERATED_HARNESS_FILE = "ModPorterStrictSpawnHarness.java"
     const val GENERIC_HARNESS_FILE = "ModPorterClientWorldHarness.java"
     const val STATION_HARNESS_FILE = "ModPorterStrictStationMapHarness.java"
+    const val NATIVE_CAPABILITY_HARNESS_FILE =
+        LegacyCapabilityNativeRuntimeHarnessSource.FILE_NAME
     const val COMPLETION_MARKER = "[ModPorterStrictSpawn] Receipt sealed:"
     const val MINECRAFT_VERSION = "1.21.1"
     const val NEOFORGE_VERSION = "21.1.230"
@@ -190,6 +192,10 @@ internal object StrictReviewValidationRegistry {
         Path.of("src/test/kotlin/com/modporter/integration/CreateStationMapRuntimeValidation.kt")
     private val stationHarnessGeneratorRelativePath =
         Path.of("src/test/kotlin/com/modporter/integration/CreateStationMapRuntimeHarnessSource.kt")
+    private val nativeCapabilityValidatorRelativePath =
+        Path.of("src/test/kotlin/com/modporter/integration/LegacyCapabilityNativeRuntimeValidation.kt")
+    private val nativeCapabilityHarnessGeneratorRelativePath =
+        Path.of("src/test/kotlin/com/modporter/integration/LegacyCapabilityNativeRuntimeHarnessSource.kt")
     private val runtimeToolRelativePaths = listOf(
         Path.of("scripts/Invoke-ModporterRuntimeSession.ps1"),
         Path.of("scripts/runtime_process_inventory.ps1"),
@@ -538,6 +544,10 @@ internal object StrictReviewValidationRegistry {
             } else {
                 null
             }
+            val nativeCapabilityHarness = findOptionalUniqueNamedFile(
+                sourceRoot,
+                StrictSpawnValidationContract.NATIVE_CAPABILITY_HARNESS_FILE
+            )
             val runtimeBuildFiles = buildFiles(profile.convertedBuildRoot, profile.convertedModDir)
             check(runtimeBuildFiles.isNotEmpty()) { "No runtime build file exists after harness staging" }
 
@@ -547,6 +557,9 @@ internal object StrictReviewValidationRegistry {
                 put("runtime.strictHarness.sha256", sha256(strictHarness))
                 stationHarness?.let {
                     put("runtime.stationHarness.sha256", sha256(it))
+                }
+                nativeCapabilityHarness?.let {
+                    put("runtime.nativeCapabilityHarness.sha256", sha256(it))
                 }
                 put("runtime.buildFiles.sha256", sha256Files(profile.convertedBuildRoot, runtimeBuildFiles))
                 put(
@@ -1203,6 +1216,10 @@ internal object StrictReviewValidationRegistry {
                 sha256(profile.repositoryRoot.resolve(stationValidatorSourceRelativePath)),
             "validator.stationHarnessGenerator.sha256" to
                 sha256(profile.repositoryRoot.resolve(stationHarnessGeneratorRelativePath)),
+            "validator.nativeCapabilitySource.sha256" to
+                sha256(profile.repositoryRoot.resolve(nativeCapabilityValidatorRelativePath)),
+            "validator.nativeCapabilityHarnessGenerator.sha256" to
+                sha256(profile.repositoryRoot.resolve(nativeCapabilityHarnessGeneratorRelativePath)),
             "validator.runtimeTools.sha256" to sha256Files(
                 profile.repositoryRoot,
                 runtimeToolRelativePaths.map(profile.repositoryRoot::resolve)
@@ -1217,7 +1234,8 @@ internal object StrictReviewValidationRegistry {
                 setOf(
                     StrictSpawnValidationContract.GENERIC_HARNESS_FILE,
                     StrictSpawnValidationContract.GENERATED_HARNESS_FILE,
-                    StrictSpawnValidationContract.STATION_HARNESS_FILE
+                    StrictSpawnValidationContract.STATION_HARNESS_FILE,
+                    StrictSpawnValidationContract.NATIVE_CAPABILITY_HARNESS_FILE
                 )
             ),
             "generated.accessTransformer.sha256" to sha256(profile.accessTransformer),
@@ -1247,6 +1265,10 @@ internal object StrictReviewValidationRegistry {
                 profile.repositoryRoot.resolve(stationValidatorSourceRelativePath),
             "validator.stationHarnessGenerator.sha256" to
                 profile.repositoryRoot.resolve(stationHarnessGeneratorRelativePath),
+            "validator.nativeCapabilitySource.sha256" to
+                profile.repositoryRoot.resolve(nativeCapabilityValidatorRelativePath),
+            "validator.nativeCapabilityHarnessGenerator.sha256" to
+                profile.repositoryRoot.resolve(nativeCapabilityHarnessGeneratorRelativePath),
             "input.packageEntity.sha256" to profile.inputPackageEntity,
             "generated.packageEntity.sha256" to profile.generatedPackageEntity,
             "generated.accessTransformer.sha256" to profile.accessTransformer,
@@ -1274,7 +1296,8 @@ internal object StrictReviewValidationRegistry {
                 setOf(
                     StrictSpawnValidationContract.GENERIC_HARNESS_FILE,
                     StrictSpawnValidationContract.GENERATED_HARNESS_FILE,
-                    StrictSpawnValidationContract.STATION_HARNESS_FILE
+                    StrictSpawnValidationContract.STATION_HARNESS_FILE,
+                    StrictSpawnValidationContract.NATIVE_CAPABILITY_HARNESS_FILE
                 )
             ),
             "generated.resourcesTree.sha256" to
@@ -1322,6 +1345,24 @@ internal object StrictReviewValidationRegistry {
                             StrictSpawnValidationContract.STATION_HARNESS_FILE
                         )
                     )
+                }
+                if (request.bindings.containsKey("runtime.nativeCapabilityHarness.sha256")) {
+                    put(
+                        "runtime.nativeCapabilityHarness.sha256",
+                        findUniqueNamedFile(
+                            profile.convertedModDir.resolve("src/main/java"),
+                            StrictSpawnValidationContract.NATIVE_CAPABILITY_HARNESS_FILE
+                        )
+                    )
+                } else {
+                    check(
+                        findOptionalUniqueNamedFile(
+                            profile.convertedModDir.resolve("src/main/java"),
+                            StrictSpawnValidationContract.NATIVE_CAPABILITY_HARNESS_FILE
+                        ) == null
+                    ) {
+                        "Unexpected native capability harness appeared after manifest sealing"
+                    }
                 }
             }
         }.getOrElse {
@@ -1966,6 +2007,19 @@ internal object StrictReviewValidationRegistry {
             .map { it.toAbsolutePath().normalize() }
             .distinct()
             .sortedBy { it.toString().replace('\\', '/') }
+
+    private fun findOptionalUniqueNamedFile(root: Path, fileName: String): Path? {
+        if (!root.isDirectory(LinkOption.NOFOLLOW_LINKS)) return null
+        val matches = Files.walk(root).use { stream ->
+            stream.filter {
+                it.isRegularFile(LinkOption.NOFOLLOW_LINKS) && it.fileName.toString() == fileName
+            }.toList()
+        }
+        check(matches.size <= 1) {
+            "Expected at most one $fileName below $root, observed ${matches.size}: ${matches.take(4)}"
+        }
+        return matches.singleOrNull()?.toAbsolutePath()?.normalize()
+    }
 
     private fun findUniqueNamedFile(root: Path, fileName: String): Path {
         check(root.isDirectory(LinkOption.NOFOLLOW_LINKS)) { "Source root is missing: $root" }
