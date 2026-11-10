@@ -4,4 +4,5 @@
 004-held-log-game-test-shutdown-command.ktfrag
 005-java-executable.ktfrag
 006-jar-contains-entry-named.ktfrag
+006a-runtime-process-fixtures.ktfrag
 007-runtime-log-policy.ktfrag

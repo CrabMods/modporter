@@ -3,7 +3,6 @@ package com.modporter.core.transforms.structural
 import com.github.javaparser.ast.Node
 import com.github.javaparser.ast.body.ConstructorDeclaration
 import com.github.javaparser.ast.body.MethodDeclaration
-import com.github.javaparser.ast.body.TypeDeclaration
 import com.github.javaparser.ast.expr.BinaryExpr
 import com.github.javaparser.ast.expr.LambdaExpr
 import com.github.javaparser.ast.expr.MethodCallExpr
@@ -259,17 +258,7 @@ internal fun StructuralRefactorPass.collectExactItemStackNbtMethodsNeedingHolder
             } + position.column - 1
 
         for (method in javaProjectTypeIndex.unit(javaFile).findAll(MethodDeclaration::class.java)) {
-            var ownerNode: com.github.javaparser.ast.Node? = method.parentNode.orElse(null)
-            var ownerDeclaration: TypeDeclaration<*>? = null
-            while (ownerNode != null) {
-                if (ownerNode is ObjectCreationExpr) break
-                if (ownerNode is TypeDeclaration<*>) {
-                    ownerDeclaration = ownerNode
-                    break
-                }
-                ownerNode = ownerNode.parentNode.orElse(null)
-            }
-            val owner = ownerDeclaration ?: continue
+            val owner = exactEnclosingNamedClass(method) ?: continue
             val ownerQualified = owner.fullyQualifiedName.orElse(null) ?: continue
             if (method.parameters.any { parameter ->
                     javaProjectTypeIndex.declaredType(parameter.type, method) ==
@@ -783,9 +772,11 @@ internal fun StructuralRefactorPass.collectExactItemStackNbtMethodsNeedingHolder
     fun key(candidate: Candidate): CandidateKey = CandidateKey(
         candidate.ownerQualified,
         candidate.methodName,
-        candidate.parameterTypes ?: candidate.declaration.parameters.map { parameter ->
-            "unresolved:${normalizeJavaTypeForContract(parameter.typeAsString)}"
-        }
+        javaProjectTypeIndex.erasedDeclarationParameterTypes(candidate.declaration)
+            ?: candidate.declaration.parameters.map { parameter ->
+                "unresolved:${normalizeJavaTypeForContract(parameter.typeAsString)}" +
+                    if (parameter.isVarArgs) "[]" else ""
+            }
     )
 
     fun exactCandidateMap(values: List<Candidate>): Map<CandidateKey, Candidate> {
@@ -1123,13 +1114,11 @@ internal fun StructuralRefactorPass.collectExactItemStackNbtMethodsNeedingHolder
         }
         if (!indexedOverrideFamilies.add(familyKey)) return@forEach
         val members = family.map { member ->
-            val parameterTypes = member.method.parameters.map { parameter ->
-                javaProjectTypeIndex.declaredType(parameter.type, member.method)
-                    ?: throw IllegalStateException(
-                        "Cannot resolve exact override-family parameter type for " +
-                            "${member.owner}.${member.method.nameAsString}"
-                    )
-            }
+            val parameterTypes = javaProjectTypeIndex.erasedDeclarationParameterTypes(member.method)
+                ?: throw IllegalStateException(
+                    "Cannot resolve exact override-family parameter type for " +
+                        "${member.owner}.${member.method.nameAsString}"
+                )
             CandidateKey(
                 member.owner,
                 member.method.nameAsString,

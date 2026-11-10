@@ -7,6 +7,7 @@ import com.github.javaparser.ast.Node
 import com.github.javaparser.ast.body.CallableDeclaration
 import com.github.javaparser.ast.body.AnnotationDeclaration
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
+import com.github.javaparser.ast.body.EnumConstantDeclaration
 import com.github.javaparser.ast.body.EnumDeclaration
 import com.github.javaparser.ast.body.FieldDeclaration
 import com.github.javaparser.ast.body.MethodDeclaration
@@ -50,12 +51,15 @@ import java.nio.file.Path
 import kotlin.io.path.readText
 
 internal fun exactEnclosingNamedClass(node: Node): TypeDeclaration<*>? {
+    var child: Node? = null
     var cursor: Node? = node
     while (cursor != null) {
         when (cursor) {
             is ObjectCreationExpr -> if (cursor.anonymousClassBody.isPresent) return null
+            is EnumConstantDeclaration -> if (cursor.classBody.any { it === child }) return null
             is TypeDeclaration<*> -> return cursor
         }
+        child = cursor
         cursor = cursor.parentNode.orElse(null)
     }
     return null
@@ -88,6 +92,11 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         data class Resolved(val qualifiedName: String) : MemberTypeLookup
         data object Absent : MemberTypeLookup
         data object Unknown : MemberTypeLookup
+    }
+
+    private enum class DeclarationErasureScope {
+        CALLABLE,
+        OWNER_HEADER
     }
 
     private sealed interface DirectSuperLookup {
@@ -190,6 +199,18 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         val raw = parseType(type.asString()).copy(arguments = emptyList())
         val resolved = resolveLexicalType(raw, use, ownerInfo, emptyMap()) ?: return null
         return resolved.name.takeIf { resolved.arrayDepth == 0 }
+    }
+
+    fun erasedDeclarationParameterTypes(callable: CallableDeclaration<*>): List<String>? {
+        val owner = exactEnclosingNamedClass(callable) ?: return null
+        val ownerInfo = typeInfo(owner)
+            ?: throw IllegalStateException("Cannot index callable owner '${owner.nameAsString}'")
+        val erased = mutableListOf<String>()
+        callable.parameters.forEach { parameter ->
+            val resolved = eraseDeclarationType(parameterTypeRef(parameter), callable, ownerInfo) ?: return null
+            erased += resolved.name + "[]".repeat(resolved.arrayDepth)
+        }
+        return erased
     }
 
     fun declaredTypeWithArguments(type: Type, use: Node): Pair<String, List<String>>? {
@@ -1499,6 +1520,59 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             resolveDirectSuperType(argument, owner, substitutions, resolvingBounds) ?: return null
         }
         return TypeRef(qualifiedName, arguments, raw.arrayDepth)
+    }
+
+    private fun eraseDeclarationType(
+        raw: TypeRef,
+        callable: CallableDeclaration<*>,
+        owner: TypeInfo,
+        scope: DeclarationErasureScope = DeclarationErasureScope.CALLABLE,
+        resolvingTypeVariables: MutableSet<String> = mutableSetOf()
+    ): TypeRef? {
+        val callableParameter = callable.typeParameters
+            .takeIf { scope == DeclarationErasureScope.CALLABLE }
+            ?.singleOrNull { it.nameAsString == raw.name }
+        if (callableParameter != null) {
+            val key = "callable:${System.identityHashCode(callable)}:${raw.name}"
+            if (!resolvingTypeVariables.add(key)) return null
+            val bound = callableParameter.typeBound.firstOrNull()
+                ?.let { parseType(it.asString()) }
+                ?: TypeRef("java.lang.Object")
+            val resolved = eraseDeclarationType(
+                bound,
+                callable,
+                owner,
+                DeclarationErasureScope.CALLABLE,
+                resolvingTypeVariables
+            )
+            resolvingTypeVariables.remove(key)
+            return resolved?.copy(
+                arguments = emptyList(),
+                arrayDepth = resolved.arrayDepth + raw.arrayDepth
+            )
+        }
+        if (raw.name in owner.typeParameters) {
+            val key = "owner:${owner.qualifiedName}:${raw.name}"
+            if (!resolvingTypeVariables.add(key)) return null
+            val bound = owner.typeParameterBounds[raw.name] ?: TypeRef("java.lang.Object")
+            val resolved = eraseDeclarationType(
+                bound,
+                callable,
+                owner,
+                DeclarationErasureScope.OWNER_HEADER,
+                resolvingTypeVariables
+            )
+            resolvingTypeVariables.remove(key)
+            return resolved?.copy(
+                arguments = emptyList(),
+                arrayDepth = resolved.arrayDepth + raw.arrayDepth
+            )
+        }
+        val qualified = when (scope) {
+            DeclarationErasureScope.CALLABLE -> qualify(raw.name, owner)
+            DeclarationErasureScope.OWNER_HEADER -> qualifyDirectSuper(raw.name, owner)
+        } ?: return null
+        return TypeRef(qualified, arrayDepth = raw.arrayDepth)
     }
 
     private fun resolveLexicalType(

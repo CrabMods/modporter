@@ -919,7 +919,8 @@
         timeoutSeconds: Long,
         runtimeLogPolicy: RuntimeLogPolicy,
         inputSourceDir: Path?,
-        requiresScopedJavaCleanup: Boolean
+        requiresScopedJavaCleanup: Boolean,
+        initialOwnedDescendants: List<OwnedProcessIdentity> = emptyList()
     ): CheckResult {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds)
         var ready = false
@@ -929,7 +930,7 @@
         var terminateRequestedAt: Long? = null
         var runtimeControlError: String? = null
         var scopedCleanup = emptyList<Long>()
-        var ownedDescendants = emptyList<OwnedProcessIdentity>()
+        var ownedDescendants = initialOwnedDescendants.distinctBy { it.pid to it.startedAt }
 
         while (System.nanoTime() < deadline) {
             val now = System.nanoTime()
@@ -1129,22 +1130,33 @@
             "[Render thread/INFO] [mojang/Library]: OpenAL initialized on device Test",
             "[Render thread/INFO] [minecraft/SoundEngine]: Sound engine started"
         )
+        val started = tempDir.resolve("client-world-fixture.started").toString()
+        val release = tempDir.resolve("client-world-fixture.release").toString()
         val isWindows = System.getProperty("os.name").lowercase().contains("win")
         return if (isWindows) {
             val script = tempDir.resolve("stall-client-world.ps1")
+            val escapedStarted = started.replace("'", "''")
+            val escapedRelease = release.replace("'", "''")
             script.writeText(
-                lines.joinToString(System.lineSeparator()) { "Write-Output '$it'" } +
+                "[System.IO.File]::WriteAllText('$escapedStarted', 'started')" + System.lineSeparator() +
+                    "while (-not (Test-Path -LiteralPath '$escapedRelease')) { Start-Sleep -Milliseconds 50 }" +
                     System.lineSeparator() +
-                    "Start-Sleep -Seconds 20" +
-                    System.lineSeparator()
+                    lines.joinToString(System.lineSeparator()) {
+                        "[Console]::Out.WriteLine('$it'); [Console]::Out.Flush()"
+                    } + System.lineSeparator() +
+                    "Start-Sleep -Seconds 120" + System.lineSeparator()
             )
             listOf("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script.toString())
         } else {
             val script = tempDir.resolve("stall-client-world.sh")
+            val escapedStarted = started.replace("'", "'\"'\"'")
+            val escapedRelease = release.replace("'", "'\"'\"'")
             script.writeText(
                 "#!/bin/sh\n" +
+                    "printf '%s\\n' started > '$escapedStarted'\n" +
+                    "while [ ! -f '$escapedRelease' ]; do sleep 0.05; done\n" +
                     lines.joinToString("\n") { "printf '%s\\n' '$it'" } +
-                    "\nsleep 20\n"
+                    "\nsleep 120\n"
             )
             listOf("sh", script.toString())
         }
@@ -1155,22 +1167,33 @@
             "[06:14:13] [Server thread/INFO] [net.minecraft.gametest.framework.GameTestServer/]: All 36 required tests passed :)",
             "[06:14:13] [Server thread/INFO] [minecraft/MinecraftServer]: Stopping server"
         )
+        val started = tempDir.resolve("gametest-shutdown-fixture.started").toString()
+        val release = tempDir.resolve("gametest-shutdown-fixture.release").toString()
         val isWindows = System.getProperty("os.name").lowercase().contains("win")
         return if (isWindows) {
             val script = tempDir.resolve("stall-gametest-shutdown.ps1")
+            val escapedStarted = started.replace("'", "''")
+            val escapedRelease = release.replace("'", "''")
             script.writeText(
-                lines.joinToString(System.lineSeparator()) { "Write-Output '$it'" } +
+                "[System.IO.File]::WriteAllText('$escapedStarted', 'started')" + System.lineSeparator() +
+                    "while (-not (Test-Path -LiteralPath '$escapedRelease')) { Start-Sleep -Milliseconds 50 }" +
                     System.lineSeparator() +
-                    "Start-Sleep -Seconds 20" +
-                    System.lineSeparator()
+                    lines.joinToString(System.lineSeparator()) {
+                        "[Console]::Out.WriteLine('$it'); [Console]::Out.Flush()"
+                    } + System.lineSeparator() +
+                    "Start-Sleep -Seconds 120" + System.lineSeparator()
             )
             listOf("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script.toString())
         } else {
             val script = tempDir.resolve("stall-gametest-shutdown.sh")
+            val escapedStarted = started.replace("'", "'\"'\"'")
+            val escapedRelease = release.replace("'", "'\"'\"'")
             script.writeText(
                 "#!/bin/sh\n" +
+                    "printf '%s\\n' started > '$escapedStarted'\n" +
+                    "while [ ! -f '$escapedRelease' ]; do sleep 0.05; done\n" +
                     lines.joinToString("\n") { "printf '%s\\n' '$it'" } +
-                    "\nsleep 20\n"
+                    "\nsleep 120\n"
             )
             listOf("sh", script.toString())
         }

@@ -156,17 +156,24 @@ class RealModBenchmarkTest {
     @Test
     fun `runtime progress gate terminates stalled client world without full timeout`(@TempDir tempDir: Path) {
         val logFile = tempDir.resolve("client-world.log")
+        val fixtureStarted = tempDir.resolve("client-world-fixture.started")
+        val fixtureRelease = tempDir.resolve("client-world-fixture.release")
         val outerTimeoutSeconds = 20L
-        val started = System.nanoTime()
+        val setupDeadline = runtimeFixtureSetupDeadline()
 
-        val result = runRuntimeProcess(
-            stalledClientWorldCommand(tempDir),
-            tempDir,
-            logFile,
+        val fixtureRun = runPreparedRuntimeFixture(
+            command = stalledClientWorldCommand(tempDir),
+            workingDir = tempDir,
+            logFile = logFile,
             timeoutSeconds = outerTimeoutSeconds,
             runtimeLogPolicy = RuntimeLogPolicy.clientWorld(failOnWarnings = false, progressGraceSeconds = 1),
-            requiresScopedJavaCleanup = false
+            setupDeadline = setupDeadline,
+            startedMarker = fixtureStarted,
+            releaseMarker = fixtureRelease,
+            resetMarkers = listOf(fixtureStarted, fixtureRelease)
         )
+        val result = fixtureRun.result
+        val started = fixtureRun.startedAtNanos
 
         val elapsedSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started)
         assertTrue(result.status == CheckStatus.FAIL, "Expected stalled client-world gate to fail")
@@ -183,17 +190,24 @@ class RealModBenchmarkTest {
     @Test
     fun `gametest runtime gate terminates after required tests pass and shutdown starts`(@TempDir tempDir: Path) {
         val logFile = tempDir.resolve("gametest-shutdown.log")
+        val fixtureStarted = tempDir.resolve("gametest-shutdown-fixture.started")
+        val fixtureRelease = tempDir.resolve("gametest-shutdown-fixture.release")
         val outerTimeoutSeconds = 20L
-        val started = System.nanoTime()
+        val setupDeadline = runtimeFixtureSetupDeadline()
 
-        val result = runRuntimeProcess(
-            stalledGameTestShutdownCommand(tempDir),
-            tempDir,
-            logFile,
+        val fixtureRun = runPreparedRuntimeFixture(
+            command = stalledGameTestShutdownCommand(tempDir),
+            workingDir = tempDir,
+            logFile = logFile,
             timeoutSeconds = outerTimeoutSeconds,
             runtimeLogPolicy = RuntimeLogPolicy.gameTestServer(failOnWarnings = false),
-            requiresScopedJavaCleanup = false
+            setupDeadline = setupDeadline,
+            startedMarker = fixtureStarted,
+            releaseMarker = fixtureRelease,
+            resetMarkers = listOf(fixtureStarted, fixtureRelease)
         )
+        val result = fixtureRun.result
+        val started = fixtureRun.startedAtNanos
 
         val elapsedSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started)
         assertTrue(result.status == CheckStatus.PASS, "Expected completed GameTest shutdown gate to pass: ${result.note}")
@@ -206,18 +220,29 @@ class RealModBenchmarkTest {
     @Test
     fun `gametest runtime gate releases captured owned descendant after parent exits`(@TempDir tempDir: Path) {
         val logFile = tempDir.resolve("gametest-held-log.log")
+        val fixtureStarted = tempDir.resolve("gametest-held-log-fixture.started")
+        val fixtureRelease = tempDir.resolve("gametest-held-log-fixture.release")
+        val childReady = tempDir.resolve("gametest-held-log-child.ready")
         val descendantPidFile = tempDir.resolve("gametest-held-log-descendant.pid")
         val outerTimeoutSeconds = 20L
-        val started = System.nanoTime()
+        val setupDeadline = runtimeFixtureSetupDeadline()
 
-        val result = runRuntimeProcess(
-            heldLogGameTestShutdownCommand(tempDir, logFile),
-            tempDir,
-            logFile,
+        val fixtureRun = runPreparedRuntimeFixture(
+            command = heldLogGameTestShutdownCommand(tempDir, logFile),
+            workingDir = tempDir,
+            logFile = logFile,
             timeoutSeconds = outerTimeoutSeconds,
             runtimeLogPolicy = RuntimeLogPolicy.gameTestServer(failOnWarnings = false),
-            requiresScopedJavaCleanup = false
-        )
+            setupDeadline = setupDeadline,
+            startedMarker = fixtureStarted,
+            releaseMarker = fixtureRelease,
+            resetMarkers = listOf(fixtureStarted, fixtureRelease, childReady, descendantPidFile)
+        ) { process ->
+            awaitRuntimeFixtureMarker(process, childReady, setupDeadline, "held-log child handle")
+            captureRuntimeFixtureDescendant(process, descendantPidFile, setupDeadline)
+        }
+        val result = fixtureRun.result
+        val started = fixtureRun.startedAtNanos
 
         val elapsedSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started)
         assertTrue(result.status == CheckStatus.PASS, "Expected held-log GameTest shutdown gate to pass: ${result.note}")
@@ -3236,7 +3261,8 @@ class RealModBenchmarkTest {
         timeoutSeconds: Long,
         runtimeLogPolicy: RuntimeLogPolicy,
         inputSourceDir: Path?,
-        requiresScopedJavaCleanup: Boolean
+        requiresScopedJavaCleanup: Boolean,
+        initialOwnedDescendants: List<OwnedProcessIdentity> = emptyList()
     ): CheckResult {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds)
         var ready = false
@@ -3246,7 +3272,7 @@ class RealModBenchmarkTest {
         var terminateRequestedAt: Long? = null
         var runtimeControlError: String? = null
         var scopedCleanup = emptyList<Long>()
-        var ownedDescendants = emptyList<OwnedProcessIdentity>()
+        var ownedDescendants = initialOwnedDescendants.distinctBy { it.pid to it.startedAt }
 
         while (System.nanoTime() < deadline) {
             val now = System.nanoTime()
@@ -3446,22 +3472,33 @@ class RealModBenchmarkTest {
             "[Render thread/INFO] [mojang/Library]: OpenAL initialized on device Test",
             "[Render thread/INFO] [minecraft/SoundEngine]: Sound engine started"
         )
+        val started = tempDir.resolve("client-world-fixture.started").toString()
+        val release = tempDir.resolve("client-world-fixture.release").toString()
         val isWindows = System.getProperty("os.name").lowercase().contains("win")
         return if (isWindows) {
             val script = tempDir.resolve("stall-client-world.ps1")
+            val escapedStarted = started.replace("'", "''")
+            val escapedRelease = release.replace("'", "''")
             script.writeText(
-                lines.joinToString(System.lineSeparator()) { "Write-Output '$it'" } +
+                "[System.IO.File]::WriteAllText('$escapedStarted', 'started')" + System.lineSeparator() +
+                    "while (-not (Test-Path -LiteralPath '$escapedRelease')) { Start-Sleep -Milliseconds 50 }" +
                     System.lineSeparator() +
-                    "Start-Sleep -Seconds 20" +
-                    System.lineSeparator()
+                    lines.joinToString(System.lineSeparator()) {
+                        "[Console]::Out.WriteLine('$it'); [Console]::Out.Flush()"
+                    } + System.lineSeparator() +
+                    "Start-Sleep -Seconds 120" + System.lineSeparator()
             )
             listOf("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script.toString())
         } else {
             val script = tempDir.resolve("stall-client-world.sh")
+            val escapedStarted = started.replace("'", "'\"'\"'")
+            val escapedRelease = release.replace("'", "'\"'\"'")
             script.writeText(
                 "#!/bin/sh\n" +
+                    "printf '%s\\n' started > '$escapedStarted'\n" +
+                    "while [ ! -f '$escapedRelease' ]; do sleep 0.05; done\n" +
                     lines.joinToString("\n") { "printf '%s\\n' '$it'" } +
-                    "\nsleep 20\n"
+                    "\nsleep 120\n"
             )
             listOf("sh", script.toString())
         }
@@ -3472,22 +3509,33 @@ class RealModBenchmarkTest {
             "[06:14:13] [Server thread/INFO] [net.minecraft.gametest.framework.GameTestServer/]: All 36 required tests passed :)",
             "[06:14:13] [Server thread/INFO] [minecraft/MinecraftServer]: Stopping server"
         )
+        val started = tempDir.resolve("gametest-shutdown-fixture.started").toString()
+        val release = tempDir.resolve("gametest-shutdown-fixture.release").toString()
         val isWindows = System.getProperty("os.name").lowercase().contains("win")
         return if (isWindows) {
             val script = tempDir.resolve("stall-gametest-shutdown.ps1")
+            val escapedStarted = started.replace("'", "''")
+            val escapedRelease = release.replace("'", "''")
             script.writeText(
-                lines.joinToString(System.lineSeparator()) { "Write-Output '$it'" } +
+                "[System.IO.File]::WriteAllText('$escapedStarted', 'started')" + System.lineSeparator() +
+                    "while (-not (Test-Path -LiteralPath '$escapedRelease')) { Start-Sleep -Milliseconds 50 }" +
                     System.lineSeparator() +
-                    "Start-Sleep -Seconds 20" +
-                    System.lineSeparator()
+                    lines.joinToString(System.lineSeparator()) {
+                        "[Console]::Out.WriteLine('$it'); [Console]::Out.Flush()"
+                    } + System.lineSeparator() +
+                    "Start-Sleep -Seconds 120" + System.lineSeparator()
             )
             listOf("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script.toString())
         } else {
             val script = tempDir.resolve("stall-gametest-shutdown.sh")
+            val escapedStarted = started.replace("'", "'\"'\"'")
+            val escapedRelease = release.replace("'", "'\"'\"'")
             script.writeText(
                 "#!/bin/sh\n" +
+                    "printf '%s\\n' started > '$escapedStarted'\n" +
+                    "while [ ! -f '$escapedRelease' ]; do sleep 0.05; done\n" +
                     lines.joinToString("\n") { "printf '%s\\n' '$it'" } +
-                    "\nsleep 20\n"
+                    "\nsleep 120\n"
             )
             listOf("sh", script.toString())
         }
@@ -3498,10 +3546,13 @@ class RealModBenchmarkTest {
             "[06:14:13] [Server thread/INFO] [net.minecraft.gametest.framework.GameTestServer/]: All 36 required tests passed :)"
         val shutdownLine =
             "[06:14:15] [Server thread/INFO] [minecraft/MinecraftServer]: Stopping server"
+        val fixtureStarted = tempDir.resolve("gametest-held-log-fixture.started")
+        val fixtureRelease = tempDir.resolve("gametest-held-log-fixture.release")
+        val childReady = tempDir.resolve("gametest-held-log-child.ready")
+        val descendantPid = tempDir.resolve("gametest-held-log-descendant.pid")
         val isWindows = System.getProperty("os.name").lowercase().contains("win")
         return if (isWindows) {
             val childScript = tempDir.resolve("hold-gametest-log.ps1")
-            val childReady = tempDir.resolve("gametest-held-log-child.ready")
             val escapedLog = logFile.toString().replace("'", "''")
             val escapedReady = childReady.toString().replace("'", "''")
             childScript.writeText(
@@ -3513,8 +3564,8 @@ class RealModBenchmarkTest {
                     [System.IO.FileShare]::ReadWrite
                 )
                 try {
-                    Set-Content -LiteralPath '$escapedReady' -Value 'ready'
-                    Start-Sleep -Seconds 20
+                    [System.IO.File]::WriteAllText('$escapedReady', 'ready')
+                    Start-Sleep -Seconds 120
                 } finally {
                     ${'$'}stream.Dispose()
                 }
@@ -3523,48 +3574,49 @@ class RealModBenchmarkTest {
 
             val parentScript = tempDir.resolve("held-log-gametest-shutdown.ps1")
             val escapedChildScript = childScript.toString().replace("'", "''")
-            val escapedPid = tempDir.resolve("gametest-held-log-descendant.pid").toString().replace("'", "''")
+            val escapedPid = descendantPid.toString().replace("'", "''")
+            val escapedStarted = fixtureStarted.toString().replace("'", "''")
+            val escapedRelease = fixtureRelease.toString().replace("'", "''")
             parentScript.writeText(
                 """
                 ${'$'}child = Start-Process -FilePath powershell.exe `
                     -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','$escapedChildScript') `
                     -WindowStyle Hidden -PassThru
-                Set-Content -LiteralPath '$escapedPid' -Value ${'$'}child.Id
-                ${'$'}deadline = (Get-Date).AddSeconds(5)
-                while (-not (Test-Path -LiteralPath '$escapedReady') -and (Get-Date) -lt ${'$'}deadline) {
-                    Start-Sleep -Milliseconds 50
-                }
-                if (-not (Test-Path -LiteralPath '$escapedReady')) {
-                    throw 'held-log child did not acquire the runtime log'
-                }
-                Write-Output '$readyLine'
+                [System.IO.File]::WriteAllText('$escapedPid', [string]${'$'}child.Id)
+                [System.IO.File]::WriteAllText('$escapedStarted', 'started')
+                while (-not (Test-Path -LiteralPath '$escapedReady')) { Start-Sleep -Milliseconds 50 }
+                while (-not (Test-Path -LiteralPath '$escapedRelease')) { Start-Sleep -Milliseconds 50 }
+                [Console]::Out.WriteLine('$readyLine')
+                [Console]::Out.Flush()
                 Start-Sleep -Seconds 2
-                Write-Output '$shutdownLine'
+                [Console]::Out.WriteLine('$shutdownLine')
+                [Console]::Out.Flush()
                 """.trimIndent() + System.lineSeparator()
             )
             listOf("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", parentScript.toString())
         } else {
             val childScript = tempDir.resolve("hold-gametest-log.sh")
-            val childReady = tempDir.resolve("gametest-held-log-child.ready")
             val escapedLog = logFile.toString().replace("'", "'\"'\"'")
             val escapedReady = childReady.toString().replace("'", "'\"'\"'")
             childScript.writeText(
                 "#!/bin/sh\n" +
                     "exec 3<> '$escapedLog'\n" +
                     "printf '%s\\n' ready > '$escapedReady'\n" +
-                    "sleep 20\n"
+                    "sleep 120\n"
             )
             val parentScript = tempDir.resolve("held-log-gametest-shutdown.sh")
             val escapedChild = childScript.toString().replace("'", "'\"'\"'")
-            val escapedPid = tempDir.resolve("gametest-held-log-descendant.pid").toString().replace("'", "'\"'\"'")
+            val escapedPid = descendantPid.toString().replace("'", "'\"'\"'")
+            val escapedStarted = fixtureStarted.toString().replace("'", "'\"'\"'")
+            val escapedRelease = fixtureRelease.toString().replace("'", "'\"'\"'")
             parentScript.writeText(
                 "#!/bin/sh\n" +
                     "sh '$escapedChild' &\n" +
                     "child=\$!\n" +
                     "printf '%s\\n' \"\$child\" > '$escapedPid'\n" +
-                    "i=0\n" +
-                    "while [ ! -f '$escapedReady' ] && [ \"\$i\" -lt 100 ]; do sleep 0.05; i=\$((i + 1)); done\n" +
-                    "[ -f '$escapedReady' ] || exit 7\n" +
+                    "printf '%s\\n' started > '$escapedStarted'\n" +
+                    "while [ ! -f '$escapedReady' ]; do sleep 0.05; done\n" +
+                    "while [ ! -f '$escapedRelease' ]; do sleep 0.05; done\n" +
                     "printf '%s\\n' '$readyLine'\n" +
                     "sleep 2\n" +
                     "printf '%s\\n' '$shutdownLine'\n"
@@ -6923,6 +6975,98 @@ class RealModBenchmarkTest {
         val marker = "allowedRuntimeIssues="
         val index = note.indexOf(marker)
         return if (index >= 0) note.substring(index) else null
+    }
+
+    private data class RuntimeFixtureRun(
+        val result: CheckResult,
+        val startedAtNanos: Long
+    )
+
+    private fun runtimeFixtureSetupDeadline(): Long =
+        System.nanoTime() + TimeUnit.SECONDS.toNanos(60)
+
+    private fun runPreparedRuntimeFixture(
+        command: List<String>,
+        workingDir: Path,
+        logFile: Path,
+        timeoutSeconds: Long,
+        runtimeLogPolicy: RuntimeLogPolicy,
+        setupDeadline: Long,
+        startedMarker: Path,
+        releaseMarker: Path,
+        resetMarkers: List<Path>,
+        initialOwnedDescendants: (Process) -> List<OwnedProcessIdentity> = { emptyList() }
+    ): RuntimeFixtureRun {
+        resetMarkers.forEach { Files.deleteIfExists(it) }
+        logFile.parent?.createDirectories()
+        Files.deleteIfExists(logFile)
+        assertTrue(System.nanoTime() < setupDeadline, "Runtime fixture setup exceeded 60s before process start")
+        val processBuilder = ProcessBuilder(command)
+            .directory(workingDir.toFile())
+            .redirectErrorStream(true)
+            .redirectOutput(logFile.toFile())
+        configureJavaHome(processBuilder)
+
+        return BenchmarkOwnedProcesses.use(processBuilder) { process ->
+            awaitRuntimeFixtureMarker(process, startedMarker, setupDeadline, "fixture started")
+            assertTrue(logFile.exists(), "Runtime fixture did not create a new log: $logFile")
+            assertEquals(0L, Files.size(logFile), "Runtime fixture log must remain empty before release: $logFile")
+            val capturedDescendants = initialOwnedDescendants(process)
+            assertTrue(process.isAlive, "Runtime fixture parent exited before release: pid=${process.pid()}")
+            assertTrue(System.nanoTime() < setupDeadline, "Runtime fixture setup exceeded 60s before release")
+
+            val startedAtNanos = System.nanoTime()
+            releaseMarker.writeText("release\n")
+            val result = runStartedRuntimeProcess(
+                process = process,
+                workingDir = workingDir,
+                logFile = logFile,
+                timeoutSeconds = timeoutSeconds,
+                runtimeLogPolicy = runtimeLogPolicy,
+                inputSourceDir = null,
+                requiresScopedJavaCleanup = false,
+                initialOwnedDescendants = capturedDescendants
+            )
+            RuntimeFixtureRun(result, startedAtNanos)
+        }
+    }
+
+    private fun awaitRuntimeFixtureMarker(
+        process: Process,
+        marker: Path,
+        setupDeadline: Long,
+        label: String
+    ) {
+        while (System.nanoTime() < setupDeadline) {
+            assertTrue(process.isAlive, "Runtime fixture parent exited before $label: pid=${process.pid()}")
+            if (marker.exists()) return
+            Thread.sleep(50)
+        }
+        assertTrue(false, "Runtime fixture setup exceeded 60s waiting for $label: $marker")
+    }
+
+    private fun captureRuntimeFixtureDescendant(
+        process: Process,
+        pidFile: Path,
+        setupDeadline: Long
+    ): List<OwnedProcessIdentity> {
+        awaitRuntimeFixtureMarker(process, pidFile, setupDeadline, "held-log child pid")
+        val childPid = pidFile.readText().trim().toLongOrNull()
+            ?: throw AssertionError("Held-log child pid is invalid: $pidFile")
+        var captured = emptyList<OwnedProcessIdentity>()
+        while (System.nanoTime() < setupDeadline) {
+            assertTrue(process.isAlive, "Runtime fixture parent exited before child identity capture: pid=${process.pid()}")
+            val handle = ProcessHandle.of(childPid).orElse(null)
+            val startedAt = handle?.info()?.startInstant()?.orElse(null)
+            if (handle != null && handle.isAlive && startedAt != null) {
+                val identity = OwnedProcessIdentity(childPid, startedAt)
+                captured = captureOwnedDescendants(process, captured)
+                if (captured.any { it == identity }) return captured
+            }
+            Thread.sleep(50)
+        }
+        assertTrue(false, "Runtime fixture setup exceeded 60s proving held-log child identity: pid=$childPid")
+        return captured
     }
 
     data class RuntimeLogPolicy(

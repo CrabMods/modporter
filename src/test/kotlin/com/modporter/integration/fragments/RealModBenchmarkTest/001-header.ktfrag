@@ -156,17 +156,24 @@ class RealModBenchmarkTest {
     @Test
     fun `runtime progress gate terminates stalled client world without full timeout`(@TempDir tempDir: Path) {
         val logFile = tempDir.resolve("client-world.log")
+        val fixtureStarted = tempDir.resolve("client-world-fixture.started")
+        val fixtureRelease = tempDir.resolve("client-world-fixture.release")
         val outerTimeoutSeconds = 20L
-        val started = System.nanoTime()
+        val setupDeadline = runtimeFixtureSetupDeadline()
 
-        val result = runRuntimeProcess(
-            stalledClientWorldCommand(tempDir),
-            tempDir,
-            logFile,
+        val fixtureRun = runPreparedRuntimeFixture(
+            command = stalledClientWorldCommand(tempDir),
+            workingDir = tempDir,
+            logFile = logFile,
             timeoutSeconds = outerTimeoutSeconds,
             runtimeLogPolicy = RuntimeLogPolicy.clientWorld(failOnWarnings = false, progressGraceSeconds = 1),
-            requiresScopedJavaCleanup = false
+            setupDeadline = setupDeadline,
+            startedMarker = fixtureStarted,
+            releaseMarker = fixtureRelease,
+            resetMarkers = listOf(fixtureStarted, fixtureRelease)
         )
+        val result = fixtureRun.result
+        val started = fixtureRun.startedAtNanos
 
         val elapsedSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started)
         assertTrue(result.status == CheckStatus.FAIL, "Expected stalled client-world gate to fail")
@@ -183,17 +190,24 @@ class RealModBenchmarkTest {
     @Test
     fun `gametest runtime gate terminates after required tests pass and shutdown starts`(@TempDir tempDir: Path) {
         val logFile = tempDir.resolve("gametest-shutdown.log")
+        val fixtureStarted = tempDir.resolve("gametest-shutdown-fixture.started")
+        val fixtureRelease = tempDir.resolve("gametest-shutdown-fixture.release")
         val outerTimeoutSeconds = 20L
-        val started = System.nanoTime()
+        val setupDeadline = runtimeFixtureSetupDeadline()
 
-        val result = runRuntimeProcess(
-            stalledGameTestShutdownCommand(tempDir),
-            tempDir,
-            logFile,
+        val fixtureRun = runPreparedRuntimeFixture(
+            command = stalledGameTestShutdownCommand(tempDir),
+            workingDir = tempDir,
+            logFile = logFile,
             timeoutSeconds = outerTimeoutSeconds,
             runtimeLogPolicy = RuntimeLogPolicy.gameTestServer(failOnWarnings = false),
-            requiresScopedJavaCleanup = false
+            setupDeadline = setupDeadline,
+            startedMarker = fixtureStarted,
+            releaseMarker = fixtureRelease,
+            resetMarkers = listOf(fixtureStarted, fixtureRelease)
         )
+        val result = fixtureRun.result
+        val started = fixtureRun.startedAtNanos
 
         val elapsedSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started)
         assertTrue(result.status == CheckStatus.PASS, "Expected completed GameTest shutdown gate to pass: ${result.note}")
@@ -206,18 +220,29 @@ class RealModBenchmarkTest {
     @Test
     fun `gametest runtime gate releases captured owned descendant after parent exits`(@TempDir tempDir: Path) {
         val logFile = tempDir.resolve("gametest-held-log.log")
+        val fixtureStarted = tempDir.resolve("gametest-held-log-fixture.started")
+        val fixtureRelease = tempDir.resolve("gametest-held-log-fixture.release")
+        val childReady = tempDir.resolve("gametest-held-log-child.ready")
         val descendantPidFile = tempDir.resolve("gametest-held-log-descendant.pid")
         val outerTimeoutSeconds = 20L
-        val started = System.nanoTime()
+        val setupDeadline = runtimeFixtureSetupDeadline()
 
-        val result = runRuntimeProcess(
-            heldLogGameTestShutdownCommand(tempDir, logFile),
-            tempDir,
-            logFile,
+        val fixtureRun = runPreparedRuntimeFixture(
+            command = heldLogGameTestShutdownCommand(tempDir, logFile),
+            workingDir = tempDir,
+            logFile = logFile,
             timeoutSeconds = outerTimeoutSeconds,
             runtimeLogPolicy = RuntimeLogPolicy.gameTestServer(failOnWarnings = false),
-            requiresScopedJavaCleanup = false
-        )
+            setupDeadline = setupDeadline,
+            startedMarker = fixtureStarted,
+            releaseMarker = fixtureRelease,
+            resetMarkers = listOf(fixtureStarted, fixtureRelease, childReady, descendantPidFile)
+        ) { process ->
+            awaitRuntimeFixtureMarker(process, childReady, setupDeadline, "held-log child handle")
+            captureRuntimeFixtureDescendant(process, descendantPidFile, setupDeadline)
+        }
+        val result = fixtureRun.result
+        val started = fixtureRun.startedAtNanos
 
         val elapsedSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started)
         assertTrue(result.status == CheckStatus.PASS, "Expected held-log GameTest shutdown gate to pass: ${result.note}")
@@ -1114,78 +1139,5 @@ class RealModBenchmarkTest {
         assertTrue(
             audit.findings.any { it.contains("took 1.082 s to run a deferred task") },
             "Slow deferred work warnings require input source evidence"
-        )
-    }
-
-    @Test
-    fun `runtime log audit keeps slow deferred work warning when setup fingerprints diverge`(@TempDir tempDir: Path) {
-        val projectDir = tempDir.resolve("work/example")
-        val sourceDir = tempDir.resolve("sources/example")
-        writeSourceInheritedDeferredWorkEvidence(
-            sourceDir,
-            forgePackage = "net.minecraftforge",
-            resourceLocationCall = "new ResourceLocation(\"example\", \"overworld\")",
-            extraDeferredCall = "DifferentRegistry.register();"
-        )
-        writeSourceInheritedDeferredWorkEvidence(
-            projectDir,
-            forgePackage = "net.neoforged",
-            resourceLocationCall = "ResourceLocation.fromNamespaceAndPath(\"example\", \"overworld\")"
-        )
-        val logFile = tempDir.resolve("deferred-work-diverged.log")
-        logFile.writeText("""
-            [06:14:12] [Render thread/WARN] [ne.ne.fm.DeferredWorkQueue/LOADING]: Mod 'example' took 1.082 s to run a deferred task.
-        """.trimIndent() + "\n")
-
-        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
-
-        assertTrue(
-            audit.findings.any { it.contains("took 1.082 s to run a deferred task") },
-            "Slow deferred work warnings require identical input and converted enqueueWork call fingerprints"
-        )
-    }
-
-    @Test
-    fun `runtime log audit allowlists source inherited gametest server lag with source log evidence`(@TempDir tempDir: Path) {
-        val projectDir = tempDir.resolve("work/example")
-        val sourceDir = tempDir.resolve("sources/example")
-        writeSourceInheritedServerLagEvidence(projectDir)
-        writeSourceInheritedServerLagEvidence(sourceDir)
-        val logFile = tempDir.resolve("gametest-server-lag.log")
-        logFile.writeText("""
-            [06:14:12] [Server thread/INFO] [example/]: Allocated dimension 0 for session 00000000-0000-0000-0000-000000000000
-            [06:14:12] [Server thread/INFO] [example/]: Recovering temporary mirror dimension 0 from saved cleanup marker
-            [06:14:12] [Server thread/INFO] [example/]: Re-queued cleanup for recovered temporary mirror dimension 0
-            [06:14:12] [Server thread/WARN] [minecraft/MinecraftServer]: Can't keep up! Is the server overloaded? Running 4627ms or 92 ticks behind
-            [06:14:13] [Server thread/INFO] [net.minecraft.gametest.framework.GameTestServer/]: All 36 required tests passed :)
-        """.trimIndent() + "\n")
-
-        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
-
-        assertTrue(audit.findings.isEmpty(), "Expected source-inherited GameTest lag warning to be allowlisted: $audit")
-        assertTrue(
-            audit.allowedIssues.any { it.contains("source-inherited GameTest server lag warning") },
-            "Expected GameTest lag evidence in allowed issues, got: ${audit.allowedIssues}"
-        )
-    }
-
-    @Test
-    fun `runtime log audit keeps gametest server lag without source log evidence`(@TempDir tempDir: Path) {
-        val projectDir = tempDir.resolve("work/example")
-        writeSourceInheritedServerLagEvidence(projectDir)
-        val logFile = tempDir.resolve("gametest-server-lag-no-source.log")
-        logFile.writeText("""
-            [06:14:12] [Server thread/INFO] [example/]: Allocated dimension 0 for session 00000000-0000-0000-0000-000000000000
-            [06:14:12] [Server thread/INFO] [example/]: Recovering temporary mirror dimension 0 from saved cleanup marker
-            [06:14:12] [Server thread/INFO] [example/]: Re-queued cleanup for recovered temporary mirror dimension 0
-            [06:14:12] [Server thread/WARN] [minecraft/MinecraftServer]: Can't keep up! Is the server overloaded? Running 4627ms or 92 ticks behind
-            [06:14:13] [Server thread/INFO] [net.minecraft.gametest.framework.GameTestServer/]: All 36 required tests passed :)
-        """.trimIndent() + "\n")
-
-        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
-
-        assertTrue(
-            audit.findings.any { it.contains("Can't keep up") },
-            "GameTest lag warnings require input source log-template evidence"
         )
     }

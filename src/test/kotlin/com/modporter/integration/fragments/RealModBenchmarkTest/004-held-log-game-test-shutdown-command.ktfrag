@@ -4,10 +4,13 @@
             "[06:14:13] [Server thread/INFO] [net.minecraft.gametest.framework.GameTestServer/]: All 36 required tests passed :)"
         val shutdownLine =
             "[06:14:15] [Server thread/INFO] [minecraft/MinecraftServer]: Stopping server"
+        val fixtureStarted = tempDir.resolve("gametest-held-log-fixture.started")
+        val fixtureRelease = tempDir.resolve("gametest-held-log-fixture.release")
+        val childReady = tempDir.resolve("gametest-held-log-child.ready")
+        val descendantPid = tempDir.resolve("gametest-held-log-descendant.pid")
         val isWindows = System.getProperty("os.name").lowercase().contains("win")
         return if (isWindows) {
             val childScript = tempDir.resolve("hold-gametest-log.ps1")
-            val childReady = tempDir.resolve("gametest-held-log-child.ready")
             val escapedLog = logFile.toString().replace("'", "''")
             val escapedReady = childReady.toString().replace("'", "''")
             childScript.writeText(
@@ -19,8 +22,8 @@
                     [System.IO.FileShare]::ReadWrite
                 )
                 try {
-                    Set-Content -LiteralPath '$escapedReady' -Value 'ready'
-                    Start-Sleep -Seconds 20
+                    [System.IO.File]::WriteAllText('$escapedReady', 'ready')
+                    Start-Sleep -Seconds 120
                 } finally {
                     ${'$'}stream.Dispose()
                 }
@@ -29,48 +32,49 @@
 
             val parentScript = tempDir.resolve("held-log-gametest-shutdown.ps1")
             val escapedChildScript = childScript.toString().replace("'", "''")
-            val escapedPid = tempDir.resolve("gametest-held-log-descendant.pid").toString().replace("'", "''")
+            val escapedPid = descendantPid.toString().replace("'", "''")
+            val escapedStarted = fixtureStarted.toString().replace("'", "''")
+            val escapedRelease = fixtureRelease.toString().replace("'", "''")
             parentScript.writeText(
                 """
                 ${'$'}child = Start-Process -FilePath powershell.exe `
                     -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','$escapedChildScript') `
                     -WindowStyle Hidden -PassThru
-                Set-Content -LiteralPath '$escapedPid' -Value ${'$'}child.Id
-                ${'$'}deadline = (Get-Date).AddSeconds(5)
-                while (-not (Test-Path -LiteralPath '$escapedReady') -and (Get-Date) -lt ${'$'}deadline) {
-                    Start-Sleep -Milliseconds 50
-                }
-                if (-not (Test-Path -LiteralPath '$escapedReady')) {
-                    throw 'held-log child did not acquire the runtime log'
-                }
-                Write-Output '$readyLine'
+                [System.IO.File]::WriteAllText('$escapedPid', [string]${'$'}child.Id)
+                [System.IO.File]::WriteAllText('$escapedStarted', 'started')
+                while (-not (Test-Path -LiteralPath '$escapedReady')) { Start-Sleep -Milliseconds 50 }
+                while (-not (Test-Path -LiteralPath '$escapedRelease')) { Start-Sleep -Milliseconds 50 }
+                [Console]::Out.WriteLine('$readyLine')
+                [Console]::Out.Flush()
                 Start-Sleep -Seconds 2
-                Write-Output '$shutdownLine'
+                [Console]::Out.WriteLine('$shutdownLine')
+                [Console]::Out.Flush()
                 """.trimIndent() + System.lineSeparator()
             )
             listOf("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", parentScript.toString())
         } else {
             val childScript = tempDir.resolve("hold-gametest-log.sh")
-            val childReady = tempDir.resolve("gametest-held-log-child.ready")
             val escapedLog = logFile.toString().replace("'", "'\"'\"'")
             val escapedReady = childReady.toString().replace("'", "'\"'\"'")
             childScript.writeText(
                 "#!/bin/sh\n" +
                     "exec 3<> '$escapedLog'\n" +
                     "printf '%s\\n' ready > '$escapedReady'\n" +
-                    "sleep 20\n"
+                    "sleep 120\n"
             )
             val parentScript = tempDir.resolve("held-log-gametest-shutdown.sh")
             val escapedChild = childScript.toString().replace("'", "'\"'\"'")
-            val escapedPid = tempDir.resolve("gametest-held-log-descendant.pid").toString().replace("'", "'\"'\"'")
+            val escapedPid = descendantPid.toString().replace("'", "'\"'\"'")
+            val escapedStarted = fixtureStarted.toString().replace("'", "'\"'\"'")
+            val escapedRelease = fixtureRelease.toString().replace("'", "'\"'\"'")
             parentScript.writeText(
                 "#!/bin/sh\n" +
                     "sh '$escapedChild' &\n" +
                     "child=\$!\n" +
                     "printf '%s\\n' \"\$child\" > '$escapedPid'\n" +
-                    "i=0\n" +
-                    "while [ ! -f '$escapedReady' ] && [ \"\$i\" -lt 100 ]; do sleep 0.05; i=\$((i + 1)); done\n" +
-                    "[ -f '$escapedReady' ] || exit 7\n" +
+                    "printf '%s\\n' started > '$escapedStarted'\n" +
+                    "while [ ! -f '$escapedReady' ]; do sleep 0.05; done\n" +
+                    "while [ ! -f '$escapedRelease' ]; do sleep 0.05; done\n" +
                     "printf '%s\\n' '$readyLine'\n" +
                     "sleep 2\n" +
                     "printf '%s\\n' '$shutdownLine'\n"
