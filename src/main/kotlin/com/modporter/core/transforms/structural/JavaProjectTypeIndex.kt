@@ -315,21 +315,31 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
                 .forEach(::parseFile)
         }
 
-        val candidatesBySignature = typesByQualifiedName.values.flatMap { info ->
-            methods(info).mapNotNull { method ->
-                if (method.isStatic || method.nameAsString !in seedNames) return@mapNotNull null
-                val parameterTypes = method.parameters.map { parameter ->
-                    declaredType(parameter.type, method) ?: return@mapNotNull null
+        val candidateMethods = mutableListOf<Pair<ExactMethodSignature, ExactProjectMethod>>()
+        val visitedOwnerNames = linkedSetOf<String>()
+        while (true) {
+            val batch = typesByQualifiedName.entries
+                .filter { (qualifiedName, _) -> qualifiedName !in visitedOwnerNames }
+                .map { (qualifiedName, info) -> qualifiedName to info }
+            if (batch.isEmpty()) break
+            visitedOwnerNames += batch.map { (qualifiedName, _) -> qualifiedName }
+            batch.forEach { (_, info) ->
+                methods(info).forEach methodLoop@{ method ->
+                    if (method.isStatic || method.nameAsString !in seedNames) return@methodLoop
+                    val parameterTypes = method.parameters.map { parameter ->
+                        declaredType(parameter.type, method) ?: return@methodLoop
+                    }
+                    val signature = ExactMethodSignature(method.nameAsString, parameterTypes)
+                    if (signature !in seedsBySignature) return@methodLoop
+                    val file = unitsByFile.entries.singleOrNull { (_, unit) -> unit === info.unit }?.key
+                        ?: throw IllegalStateException(
+                            "Cannot locate source file for ${info.qualifiedName}.${method.nameAsString}"
+                        )
+                    candidateMethods += signature to ExactProjectMethod(info.qualifiedName, file, method)
                 }
-                val signature = ExactMethodSignature(method.nameAsString, parameterTypes)
-                if (signature !in seedsBySignature) return@mapNotNull null
-                val file = unitsByFile.entries.singleOrNull { (_, unit) -> unit === info.unit }?.key
-                    ?: throw IllegalStateException(
-                        "Cannot locate source file for ${info.qualifiedName}.${method.nameAsString}"
-                    )
-                signature to ExactProjectMethod(info.qualifiedName, file, method)
             }
-        }.groupBy({ it.first }, { it.second })
+        }
+        val candidatesBySignature = candidateMethods.groupBy({ it.first }, { it.second })
 
         val families = mutableListOf<List<ExactProjectMethod>>()
         candidatesBySignature.forEach { (signature, signatureCandidates) ->
@@ -2137,9 +2147,112 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
                 externalMethod("wait", "long", "int")
             )
         )
+        // Java 17 java.base: every public top-level type declared directly in java.lang.
         private val implicitJavaLangTypes = setOf(
-            "Boolean", "Byte", "Character", "Class", "Comparable", "Double", "Enum", "Float", "Integer", "Long",
-            "Number", "Object", "Runnable", "Short", "String", "Throwable", "Void"
+            "AbstractMethodError",
+            "Appendable",
+            "ArithmeticException",
+            "ArrayIndexOutOfBoundsException",
+            "ArrayStoreException",
+            "AssertionError",
+            "AutoCloseable",
+            "Boolean",
+            "BootstrapMethodError",
+            "Byte",
+            "CharSequence",
+            "Character",
+            "Class",
+            "ClassCastException",
+            "ClassCircularityError",
+            "ClassFormatError",
+            "ClassLoader",
+            "ClassNotFoundException",
+            "ClassValue",
+            "CloneNotSupportedException",
+            "Cloneable",
+            "Comparable",
+            "Compiler",
+            "Deprecated",
+            "Double",
+            "Enum",
+            "EnumConstantNotPresentException",
+            "Error",
+            "Exception",
+            "ExceptionInInitializerError",
+            "Float",
+            "FunctionalInterface",
+            "IllegalAccessError",
+            "IllegalAccessException",
+            "IllegalArgumentException",
+            "IllegalCallerException",
+            "IllegalMonitorStateException",
+            "IllegalStateException",
+            "IllegalThreadStateException",
+            "IncompatibleClassChangeError",
+            "IndexOutOfBoundsException",
+            "InheritableThreadLocal",
+            "InstantiationError",
+            "InstantiationException",
+            "Integer",
+            "InternalError",
+            "InterruptedException",
+            "Iterable",
+            "LayerInstantiationException",
+            "LinkageError",
+            "Long",
+            "Math",
+            "Module",
+            "ModuleLayer",
+            "NegativeArraySizeException",
+            "NoClassDefFoundError",
+            "NoSuchFieldError",
+            "NoSuchFieldException",
+            "NoSuchMethodError",
+            "NoSuchMethodException",
+            "NullPointerException",
+            "Number",
+            "NumberFormatException",
+            "Object",
+            "OutOfMemoryError",
+            "Override",
+            "Package",
+            "Process",
+            "ProcessBuilder",
+            "ProcessHandle",
+            "Readable",
+            "Record",
+            "ReflectiveOperationException",
+            "Runnable",
+            "Runtime",
+            "RuntimeException",
+            "RuntimePermission",
+            "SafeVarargs",
+            "SecurityException",
+            "SecurityManager",
+            "Short",
+            "StackOverflowError",
+            "StackTraceElement",
+            "StackWalker",
+            "StrictMath",
+            "String",
+            "StringBuffer",
+            "StringBuilder",
+            "StringIndexOutOfBoundsException",
+            "SuppressWarnings",
+            "System",
+            "Thread",
+            "ThreadDeath",
+            "ThreadGroup",
+            "ThreadLocal",
+            "Throwable",
+            "TypeNotPresentException",
+            "UnknownError",
+            "UnsatisfiedLinkError",
+            "UnsupportedClassVersionError",
+            "UnsupportedOperationException",
+            "VerifyError",
+            "VirtualMachineError",
+            "Void"
         ).associateWith { "java.lang.$it" }
         private val knownFields = mapOf(
             "net.minecraft.client.gui.screens.inventory.AbstractContainerScreen" to mapOf(

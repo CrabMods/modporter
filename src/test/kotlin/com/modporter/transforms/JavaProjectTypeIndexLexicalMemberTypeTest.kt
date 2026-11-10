@@ -6,6 +6,8 @@ import com.github.javaparser.ast.expr.ObjectCreationExpr
 import com.github.javaparser.ast.expr.MethodCallExpr
 import com.modporter.core.transforms.structural.JavaProjectTypeIndex
 import org.junit.jupiter.api.io.TempDir
+import java.lang.module.ModuleFinder
+import java.lang.reflect.Modifier
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.readText
@@ -330,6 +332,130 @@ class JavaProjectTypeIndexLexicalMemberTypeTest {
     }
 
     @Test
+    fun `implicit Java lang parents preserve exact Create type bindings`() {
+        val source = """
+            package sample;
+
+            import external.Codec;
+            import net.minecraft.nbt.CompoundTag;
+
+            class AssemblyException extends Exception {
+                static AssemblyException read(CompoundTag compound) {
+                    return null;
+                }
+            }
+
+            abstract class TrainMapRenderer implements AutoCloseable {
+                Codec codec(Codec value) {
+                    return value;
+                }
+            }
+
+            abstract class DyedBlockList implements Iterable<String> {
+                Codec iterable(Codec value) {
+                    return value;
+                }
+            }
+
+            abstract class TransportedItemStack implements Comparable<TransportedItemStack> {
+                Codec comparable(Codec value) {
+                    return value;
+                }
+            }
+        """.trimIndent()
+        val file = write("sample/CreateImplicitParents.java", source)
+        val index = JavaProjectTypeIndex.build(tempDir.resolve("src/main/java"))
+        val unit = index.unit(file)
+        val read = method(unit, "read")
+
+        assertEquals("net.minecraft.nbt.CompoundTag", index.declaredType(read.parameters.single().type, read))
+        listOf("codec", "iterable", "comparable").forEach { name ->
+            val declaration = method(unit, name)
+            assertEquals("external.Codec", index.declaredType(declaration.type, declaration), name)
+            assertEquals("external.Codec", index.declaredType(declaration.parameters.single().type, declaration), name)
+        }
+        assertTrue(index.isTypeAssignableTo("sample.AssemblyException", "java.lang.Exception"))
+        assertTrue(index.isTypeAssignableTo("sample.TrainMapRenderer", "java.lang.AutoCloseable"))
+        assertTrue(index.isTypeAssignableTo("sample.DyedBlockList", "java.lang.Iterable"))
+        assertTrue(index.isTypeAssignableTo("sample.TransportedItemStack", "java.lang.Comparable"))
+        assertEquals(source, file.readText())
+    }
+
+    @Test
+    fun `implicit Java lang catalogue covers the active Java 17 module`() {
+        assertEquals(17, Runtime.version().feature(), "The canonical test toolchain must stay on Java 17")
+        val implicitTypes = publicTopLevelJavaLangTypes()
+        assertEquals(104, implicitTypes.size, "Unexpected Java 17 java.base public java.lang surface")
+        val source = buildString {
+            appendLine("package sample;")
+            appendLine()
+            appendLine("interface JavaLangTypes {")
+            implicitTypes.forEachIndexed { index, type ->
+                appendLine("    $type type$index();")
+            }
+            appendLine("}")
+        }.trimEnd()
+        val file = write("sample/JavaLangTypes.java", source)
+        val index = JavaProjectTypeIndex.build(tempDir.resolve("src/main/java"))
+        val unit = index.unit(file)
+        val methods = unit.findAll(MethodDeclaration::class.java).associateBy { it.nameAsString }
+
+        implicitTypes.forEachIndexed { methodIndex, type ->
+            val declaration = methods.getValue("type$methodIndex")
+            assertEquals("java.lang.$type", index.declaredType(declaration.type, declaration), type)
+        }
+        assertEquals(source, file.readText())
+    }
+
+    @Test
+    fun `implicit Java lang binding preserves lexical import and project shadowing`() {
+        val projectException = """
+            package projectshadow;
+
+            class Exception {
+            }
+        """.trimIndent()
+        val projectChild = """
+            package projectshadow;
+
+            class Child extends Exception {
+            }
+        """.trimIndent()
+        val imported = """
+            package importshadow;
+
+            import external.Exception;
+
+            class Child extends Exception {
+            }
+        """.trimIndent()
+        val lexical = """
+            package lexicalshadow;
+
+            class Outer {
+                interface Iterable {
+                }
+
+                class Child implements Iterable {
+                }
+            }
+        """.trimIndent()
+        val projectExceptionFile = write("projectshadow/Exception.java", projectException)
+        val projectChildFile = write("projectshadow/Child.java", projectChild)
+        val importedFile = write("importshadow/Child.java", imported)
+        val lexicalFile = write("lexicalshadow/Outer.java", lexical)
+        val index = JavaProjectTypeIndex.build(tempDir.resolve("src/main/java"))
+
+        assertTrue(index.isTypeAssignableTo("projectshadow.Child", "projectshadow.Exception"))
+        assertTrue(index.isTypeAssignableTo("importshadow.Child", "external.Exception"))
+        assertTrue(index.isTypeAssignableTo("lexicalshadow.Outer.Child", "lexicalshadow.Outer.Iterable"))
+        assertEquals(projectException, projectExceptionFile.readText())
+        assertEquals(projectChild, projectChildFile.readText())
+        assertEquals(imported, importedFile.readText())
+        assertEquals(lexical, lexicalFile.readText())
+    }
+
+    @Test
     fun `implicit Runnable parent preserves exact imported field receiver lookup`() {
         val source = """
             package sample;
@@ -354,6 +480,31 @@ class JavaProjectTypeIndexLexicalMemberTypeTest {
 
         assertEquals("external.Codec", index.expressionType(serialize.scope.orElseThrow(), serialize))
         assertEquals(source, file.readText())
+    }
+
+    private fun publicTopLevelJavaLangTypes(): List<String> {
+        val reference = ModuleFinder.ofSystem().find("java.base").orElseThrow()
+        return reference.open().use { reader ->
+            val resources = reader.list()
+            try {
+                resources
+                    .filter { resource ->
+                        resource.startsWith("java/lang/") &&
+                            resource.endsWith(".class") &&
+                            '/' !in resource.removePrefix("java/lang/")
+                    }
+                    .map { resource -> resource.removePrefix("java/lang/").removeSuffix(".class") }
+                    .filter { simpleName -> '$' !in simpleName && simpleName != "package-info" }
+                    .filter { simpleName ->
+                        val type = Class.forName("java.lang.$simpleName", false, null)
+                        Modifier.isPublic(type.modifiers) && type.enclosingClass == null
+                    }
+                    .sorted()
+                    .toList()
+            } finally {
+                resources.close()
+            }
+        }
     }
 
     private fun method(unit: CompilationUnit, name: String): MethodDeclaration =
