@@ -369,9 +369,9 @@ internal object LegacyCapabilityNativeRuntimeValidation {
         requireInt(receipt, "scenarioCount", expectedScenarios.size, issues)
         requireInt(receipt, "failedCount", 0, issues)
         requireInt(receipt, "cleanupFailureCount", 0, issues)
-        requireInt(receipt, "serverNativeNotices", 3, issues)
-        requireInt(receipt, "serverLegacyNotices", 3, issues)
-        requireInt(receipt, "clientLegacyNotices", 3, issues)
+        requireInt(receipt, "serverNativeNotices", 4, issues)
+        requireInt(receipt, "serverLegacyNotices", 4, issues)
+        requireInt(receipt, "clientLegacyNotices", 4, issues)
         requireBoolean(receipt, "allScenariosPassed", true, issues)
         requireBoolean(receipt, "cleanupPassed", true, issues)
         requireArray(receipt, "requestedScenarios", expectedScenarios, issues, "receipt")
@@ -692,11 +692,21 @@ internal object LegacyCapabilityNativeRuntimeValidation {
             requireInt(
                 scenario,
                 "nativeNotices",
-                if (index < 3) 1 else 0,
+                when (index) {
+                    1 -> 2
+                    in 0..2 -> 1
+                    else -> 0
+                },
                 issues,
                 "scenario[$index]"
             )
-            requireInt(scenario, "legacyNotices", 1, issues, "scenario[$index]")
+            requireInt(
+                scenario,
+                "legacyNotices",
+                if (index == 1 || index == 4) 2 else 1,
+                issues,
+                "scenario[$index]"
+            )
         }
     }
 

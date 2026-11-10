@@ -168,6 +168,43 @@ class LegacyCapabilityNativeRuntimeValidationTest {
     }
 
     @Test
+    fun `old single notice chunk evidence is refused`(@TempDir root: Path) {
+        val oldEvidence = fixture(root.resolve("old-single-notice-chunks"))
+        oldEvidence.mutateTrace { trace ->
+            val scenarios = (trace.getValue("scenarios") as JsonArray).mapIndexed { index, element ->
+                val scenario = element.jsonObject
+                when (index) {
+                    1 -> JsonObject(
+                        scenario +
+                            ("nativeNotices" to JsonPrimitive(1)) +
+                            ("legacyNotices" to JsonPrimitive(1))
+                    )
+                    4 -> JsonObject(scenario + ("legacyNotices" to JsonPrimitive(1)))
+                    else -> scenario
+                }
+            }
+            JsonObject(trace + ("scenarios" to JsonArray(scenarios)))
+        }
+        oldEvidence.mutateReceipt { receipt ->
+            JsonObject(
+                receipt +
+                    ("serverNativeNotices" to JsonPrimitive(3)) +
+                    ("serverLegacyNotices" to JsonPrimitive(3)) +
+                    ("clientLegacyNotices" to JsonPrimitive(3))
+            )
+        }
+
+        val result = oldEvidence.verify()
+        assertEquals("FAILED", result.state)
+        assertIssue(result.issues, "serverNativeNotices")
+        assertIssue(result.issues, "serverLegacyNotices")
+        assertIssue(result.issues, "clientLegacyNotices")
+        assertIssue(result.issues, "scenario[1].nativeNotices")
+        assertIssue(result.issues, "scenario[1].legacyNotices")
+        assertIssue(result.issues, "scenario[4].legacyNotices")
+    }
+
+    @Test
     fun `wrapper process leakage and unbound log seal are refused`(@TempDir root: Path) {
         val wrapperLeak = fixture(root.resolve("wrapper"))
         wrapperLeak.mutateWrapper { wrapper ->
@@ -321,8 +358,15 @@ class LegacyCapabilityNativeRuntimeValidationTest {
                 put("ordinal", index)
                 put("startTick", (100 + index).toLong())
                 put("endTick", (100 + index).toLong())
-                put("nativeNotices", if (index < 3) 1 else 0)
-                put("legacyNotices", 1)
+                put(
+                    "nativeNotices",
+                    when (index) {
+                        1 -> 2
+                        in 0..2 -> 1
+                        else -> 0
+                    }
+                )
+                put("legacyNotices", if (index == 1 || index == 4) 2 else 1)
                 put("replacementIdentityPassed", true)
                 put("result", "PASS")
             }
@@ -364,9 +408,9 @@ class LegacyCapabilityNativeRuntimeValidationTest {
             put("allScenariosPassed", true)
             put("requestedScenarios", strings(expectedScenarios))
             put("observedScenarios", strings(expectedScenarios))
-            put("serverNativeNotices", 3)
-            put("serverLegacyNotices", 3)
-            put("clientLegacyNotices", 3)
+            put("serverNativeNotices", 4)
+            put("serverLegacyNotices", 4)
+            put("clientLegacyNotices", 4)
             put("cleanupPassed", true)
             put("tracePath", request.tracePath.toString())
             put("traceSha256", sha256(request.tracePath))

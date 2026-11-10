@@ -18,6 +18,7 @@ internal object LegacyCapabilityNativeRuntimeHarnessSource {
         import com.google.gson.JsonObject;
         import java.io.IOException;
         import java.io.InputStream;
+        import java.lang.ref.Reference;
         import java.nio.charset.StandardCharsets;
         import java.nio.file.AtomicMoveNotSupportedException;
         import java.nio.file.Files;
@@ -261,10 +262,42 @@ internal object LegacyCapabilityNativeRuntimeHarnessSource {
                     true
                 );
 
+                long chunkStart = level.getGameTime();
+                AtomicInteger directChunkLegacy = new AtomicInteger();
+                AtomicInteger directChunkNative = new AtomicInteger();
+                AtomicReference<LazyOptional<IItemHandler>> directChunkReplacement = new AtomicReference<>();
+                second.addListener(ignored -> {
+                    if (directChunkNative.get() != 1) {
+                        throw new AssertionError(
+                            "legacy direct chunk listener ran before native callback"
+                        );
+                    }
+                    directChunkLegacy.incrementAndGet();
+                    directChunkReplacement.set(retained(blockEntity));
+                });
+                invokeNativeInvalidation(
+                    "server direct chunk",
+                    level,
+                    selected,
+                    second,
+                    directChunkLegacy,
+                    directChunkNative,
+                    () -> level.invalidateCapabilities(new ChunkPos(selected))
+                );
+                LazyOptional<IItemHandler> beforeNested = directChunkReplacement.get();
+                assertPhase(
+                    "server direct chunk",
+                    blockEntity,
+                    second,
+                    beforeNested,
+                    directChunkLegacy.get(),
+                    directChunkNative.get()
+                );
+
                 AtomicInteger chunkLegacy = new AtomicInteger();
                 AtomicInteger chunkNative = new AtomicInteger();
                 AtomicReference<LazyOptional<IItemHandler>> chunkReplacement = new AtomicReference<>();
-                second.addListener(ignored -> {
+                beforeNested.addListener(ignored -> {
                     if (chunkNative.get() != 1) {
                         throw new AssertionError(
                             "nested legacy listener ran before native chunk callback"
@@ -273,12 +306,11 @@ internal object LegacyCapabilityNativeRuntimeHarnessSource {
                     chunkLegacy.incrementAndGet();
                     chunkReplacement.set(retained(blockEntity));
                 });
-                long chunkStart = level.getGameTime();
                 invokeNativeInvalidation(
                     "server nested chunk",
                     level,
                     selected,
-                    second,
+                    beforeNested,
                     chunkLegacy,
                     chunkNative,
                     () -> LegacyBlockEntityCapabilityQueries.runInvalidation(
@@ -291,7 +323,7 @@ internal object LegacyCapabilityNativeRuntimeHarnessSource {
                 assertPhase(
                     "server nested chunk",
                     blockEntity,
-                    second,
+                    beforeNested,
                     third,
                     chunkLegacy.get(),
                     chunkNative.get()
@@ -301,8 +333,8 @@ internal object LegacyCapabilityNativeRuntimeHarnessSource {
                     "server",
                     chunkStart,
                     level.getGameTime(),
-                    chunkNative.get(),
-                    chunkLegacy.get(),
+                    directChunkNative.get() + chunkNative.get(),
+                    directChunkLegacy.get() + chunkLegacy.get(),
                     true
                 );
 
@@ -373,10 +405,12 @@ internal object LegacyCapabilityNativeRuntimeHarnessSource {
                 );
 
                 serverNativeNotices =
-                    positionNative.get() + chunkNative.get() + exceptionalNative.get();
+                    positionNative.get() + directChunkNative.get()
+                        + chunkNative.get() + exceptionalNative.get();
                 serverLegacyNotices =
-                    positionLegacy.get() + chunkLegacy.get() + exceptionalLegacy.get();
-                if (serverNativeNotices != 3 || serverLegacyNotices != 3) {
+                    positionLegacy.get() + directChunkLegacy.get()
+                        + chunkLegacy.get() + exceptionalLegacy.get();
+                if (serverNativeNotices != 4 || serverLegacyNotices != 4) {
                     throw new AssertionError(
                         "server notice totals native=" + serverNativeNotices
                             + " legacy=" + serverLegacyNotices
@@ -427,13 +461,29 @@ internal object LegacyCapabilityNativeRuntimeHarnessSource {
                     true
                 );
 
+                long chunkStart = level.getGameTime();
+                AtomicInteger directChunkNotices = new AtomicInteger();
+                AtomicReference<LazyOptional<IItemHandler>> directChunkReplacement = new AtomicReference<>();
+                second.addListener(ignored -> {
+                    directChunkNotices.incrementAndGet();
+                    directChunkReplacement.set(retained(blockEntity));
+                });
+                level.invalidateCapabilities(new ChunkPos(pos));
+                LazyOptional<IItemHandler> beforeNested = directChunkReplacement.get();
+                assertLegacyPhase(
+                    "client direct chunk",
+                    blockEntity,
+                    second,
+                    beforeNested,
+                    directChunkNotices.get()
+                );
+
                 AtomicInteger chunkNotices = new AtomicInteger();
                 AtomicReference<LazyOptional<IItemHandler>> chunkReplacement = new AtomicReference<>();
-                second.addListener(ignored -> {
+                beforeNested.addListener(ignored -> {
                     chunkNotices.incrementAndGet();
                     chunkReplacement.set(retained(blockEntity));
                 });
-                long chunkStart = level.getGameTime();
                 LegacyBlockEntityCapabilityQueries.runInvalidation(
                     level,
                     pos,
@@ -443,7 +493,7 @@ internal object LegacyCapabilityNativeRuntimeHarnessSource {
                 assertLegacyPhase(
                     "client nested chunk",
                     blockEntity,
-                    second,
+                    beforeNested,
                     third,
                     chunkNotices.get()
                 );
@@ -453,7 +503,7 @@ internal object LegacyCapabilityNativeRuntimeHarnessSource {
                     chunkStart,
                     level.getGameTime(),
                     0,
-                    chunkNotices.get(),
+                    directChunkNotices.get() + chunkNotices.get(),
                     true
                 );
 
@@ -510,8 +560,9 @@ internal object LegacyCapabilityNativeRuntimeHarnessSource {
                 );
 
                 clientLegacyNotices =
-                    positionNotices.get() + chunkNotices.get() + exceptionalNotices.get();
-                if (clientLegacyNotices != 3) {
+                    positionNotices.get() + directChunkNotices.get()
+                        + chunkNotices.get() + exceptionalNotices.get();
+                if (clientLegacyNotices != 4) {
                     throw new AssertionError(
                         "client legacy notice total=" + clientLegacyNotices
                     );
@@ -566,6 +617,7 @@ internal object LegacyCapabilityNativeRuntimeHarnessSource {
                     invalidation.run();
                 } finally {
                     callFinished.set(true);
+                    Reference.reachabilityFence(cache);
                 }
             }
 
@@ -842,9 +894,9 @@ internal object LegacyCapabilityNativeRuntimeHarnessSource {
                         && clientScenarioPassed
                         && REQUESTED_SCENARIOS.size() == SCENARIOS.size()
                         && requested.equals(observed)
-                        && serverNativeNotices == 3
-                        && serverLegacyNotices == 3
-                        && clientLegacyNotices == 3;
+                        && serverNativeNotices == 4
+                        && serverLegacyNotices == 4
+                        && clientLegacyNotices == 4;
                 if (success && !semanticPass) {
                     throw new IllegalStateException(
                         "capability probe semantic trace is incomplete"
