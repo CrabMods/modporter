@@ -84,34 +84,34 @@ internal object LegacyBlockEntityCapabilityQueries {
     private val reviewedRetainedSourceProfiles = mapOf(
         "src/main/java/com/simibubi/create/content/fluids/FlowSource.java" to
             ReviewedRetainedSourceProfile(
-                setOf("4492e7cd9b715237e401b697fc718d111dd7f04b585a561cbef5bfb21f96691f")
+                setOf("273cf38dc11bfa48cd1f33931adb08720b20bb3fed64b4215afa68d62247d28d")
             ),
         "src/main/java/com/simibubi/create/content/fluids/tank/FluidTankBlockEntity.java" to
             ReviewedRetainedSourceProfile(
                 sourceDigests = setOf(
-                    "f8e3af0a50159ca05b4ae44e545570a794a58da8a0c8cabbc6e88f1872f2dd5f"
+                    "b9f7588f83df79f05d0f38af77e34db7dfc7407c652019d4d35e0f07c2d2014d"
                 ),
                 dependencyDigests = mapOf(
                     "src/main/java/com/simibubi/create/api/equipment/goggles/IHaveGoggleInformation.java" to
-                        setOf("2e373b54fab5899c4f16af37e31e81d5c4a2b8d8108b4555d3babd8a0d6a5e64")
+                        setOf("5bee65849fb6955e23006064e586ed528c320ad2cd4d0570bcac832d0c657053")
                 )
             ),
         "src/main/java/com/simibubi/create/content/kinetics/mechanicalArm/ArmInteractionPoint.java" to
             ReviewedRetainedSourceProfile(
-                setOf("f01325deb58b04d5a6bdc31e58681068be3c126363962fb76d6969c0b42ca09f")
+                setOf("4898572486cdcc925dd861744502f6343b4d8a61e5677702d3d29112cfc79030")
             ),
         "src/main/java/com/simibubi/create/content/logistics/chute/ChuteBlockEntity.java" to
             ReviewedRetainedSourceProfile(
-                setOf("3e6a1dfd7d2f93784b14deb2076da6448a1f0334f4b39380104847a74c652372")
+                setOf("73d71e1ccdfdb41bbceb8834aa88aaad7e1fe2851b1a03aa7b2b98bc5cdd274a")
             ),
         "src/main/java/com/simibubi/create/content/logistics/tunnel/BrassTunnelBlockEntity.java" to
             ReviewedRetainedSourceProfile(
-                setOf("ba73084f4380dbbe8756934cb040eb95805e3603b038ae81e9c68b4a0790a517")
+                setOf("3d4488256e745a5b1d91a98d7c50e29c8a22dbb02612cd87579efd4fdd825823")
             ),
         "src/main/java/com/simibubi/create/content/schematics/cannon/SchematicannonBlockEntity.java" to
             ReviewedRetainedSourceProfile(
                 setOf(
-                    "dc1ae7eebf9a08cfba58ec570bce705854d631fbb0df5c51e4a6f44e880cab9b",
+                    "a7f0ce4469a1e9b61c09c571070f67ced67bdfb946e174159665957c41af41be",
                     "efa8a9a3e21511d948811e021b93089185bf2421cbdbd4bbe3b10faa1eca9919"
                 )
             )
@@ -890,12 +890,14 @@ internal object LegacyBlockEntityCapabilityQueries {
                     it.nameAsString == "invalidate" &&
                     it.arguments.isEmpty()
             }
+            val relativePath = projectRelativePath(projectDir, parsed.file)
+            val sourceStageDigest = sha256(parsed.source)
             val retainedSourceEscape = outer == null &&
                 createRetainedSourceEscape(
                     call,
                     parsed,
                     keyProof,
-                    projectRelativePath(projectDir, parsed.file),
+                    relativePath,
                     reviewedProjectDigests
                 )
             if (outer == null &&
@@ -904,7 +906,12 @@ internal object LegacyBlockEntityCapabilityQueries {
             ) {
                 gates += "Legacy block entity capability query migration cannot prove " +
                     "LazyOptional lifecycle use at ${projectDir.relativize(parsed.file)}:" +
-                    call.range.map { it.begin.line }.orElse(1)
+                    call.range.map { it.begin.line }.orElse(1) +
+                    reviewedRetainedSourceProfileObservation(
+                        relativePath,
+                        sourceStageDigest,
+                        reviewedProjectDigests
+                    )
                 continue
             }
             val target = outer ?: call
@@ -1063,6 +1070,26 @@ internal object LegacyBlockEntityCapabilityQueries {
                     ownerHas("LinkedHashSet<LazyOptional<IItemHandler>> attachedInventories")
             }
             else -> false
+        }
+    }
+
+    private fun reviewedRetainedSourceProfileObservation(
+        relativePath: String,
+        sourceDigest: String,
+        projectDigests: Map<String, String>
+    ): String {
+        val normalizedPath = relativePath.replace('\\', '/')
+        val profile = reviewedRetainedSourceProfiles[normalizedPath] ?: return ""
+        return buildString {
+            append(" [sourceStageSha256=")
+            append(sourceDigest)
+            profile.dependencyDigests.keys.sorted().forEach { dependencyPath ->
+                append(", ")
+                append(dependencyPath)
+                append("=")
+                append(projectDigests[dependencyPath] ?: "missing")
+            }
+            append("]")
         }
     }
 

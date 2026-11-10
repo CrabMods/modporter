@@ -10,6 +10,7 @@ import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
 import com.github.javaparser.ast.body.EnumDeclaration
 import com.github.javaparser.ast.body.FieldDeclaration
 import com.github.javaparser.ast.body.MethodDeclaration
+import com.github.javaparser.ast.body.Parameter
 import com.github.javaparser.ast.body.RecordDeclaration
 import com.github.javaparser.ast.body.TypeDeclaration
 import com.github.javaparser.ast.body.VariableDeclarator
@@ -1042,6 +1043,15 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         return resolveType(parseType(component.typeAsString), info, substitutions(info, receiver))
     }
 
+    private fun parameterTypeRef(parameter: Parameter): TypeRef {
+        val declared = parseType(parameter.typeAsString)
+        return if (parameter.isVarArgs) {
+            declared.copy(arrayDepth = declared.arrayDepth + 1)
+        } else {
+            declared
+        }
+    }
+
     private fun resolveName(
         name: String,
         use: Node,
@@ -1061,7 +1071,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
                 throw IllegalStateException("Ambiguous callable parameter '$name' at $use")
             }
             parameters.singleOrNull()?.let { parameter ->
-                return resolveLexicalType(parseType(parameter.typeAsString), parameter, owner, substitutions)
+                return resolveLexicalType(parameterTypeRef(parameter), parameter, owner, substitutions)
             }
             val localCandidates = callable.findAll(VariableDeclarator::class.java).mapNotNull { variable ->
                 if (variable.nameAsString != name || !visibleBefore(variable, use)) return@mapNotNull null

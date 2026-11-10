@@ -7,6 +7,7 @@ import org.junit.jupiter.api.io.TempDir
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable
 import java.io.ByteArrayOutputStream
 import java.net.URLClassLoader
+import java.nio.file.Files
 import java.nio.file.Path
 import javax.tools.ToolProvider
 import kotlin.io.path.createDirectories
@@ -199,8 +200,22 @@ class LegacyBlockEntityCapabilityRetainedLifecycleTest {
     fun `reviewed retained profiles bind all six exact paths and external consumer`() {
         val dependencyPath =
             "src/main/java/com/simibubi/create/api/equipment/goggles/IHaveGoggleInformation.java"
-        val dependencyDigest = "2e373b54fab5899c4f16af37e31e81d5c4a2b8d8108b4555d3babd8a0d6a5e64"
+        val dependencyDigest = "5bee65849fb6955e23006064e586ed528c320ad2cd4d0570bcac832d0c657053"
         val reviewed = linkedMapOf(
+            "src/main/java/com/simibubi/create/content/fluids/FlowSource.java" to
+                "273cf38dc11bfa48cd1f33931adb08720b20bb3fed64b4215afa68d62247d28d",
+            "src/main/java/com/simibubi/create/content/fluids/tank/FluidTankBlockEntity.java" to
+                "b9f7588f83df79f05d0f38af77e34db7dfc7407c652019d4d35e0f07c2d2014d",
+            "src/main/java/com/simibubi/create/content/kinetics/mechanicalArm/ArmInteractionPoint.java" to
+                "4898572486cdcc925dd861744502f6343b4d8a61e5677702d3d29112cfc79030",
+            "src/main/java/com/simibubi/create/content/logistics/chute/ChuteBlockEntity.java" to
+                "73d71e1ccdfdb41bbceb8834aa88aaad7e1fe2851b1a03aa7b2b98bc5cdd274a",
+            "src/main/java/com/simibubi/create/content/logistics/tunnel/BrassTunnelBlockEntity.java" to
+                "3d4488256e745a5b1d91a98d7c50e29c8a22dbb02612cd87579efd4fdd825823",
+            "src/main/java/com/simibubi/create/content/schematics/cannon/SchematicannonBlockEntity.java" to
+                "a7f0ce4469a1e9b61c09c571070f67ced67bdfb946e174159665957c41af41be"
+        )
+        val supersededDirectStageDigests = linkedMapOf(
             "src/main/java/com/simibubi/create/content/fluids/FlowSource.java" to
                 "4492e7cd9b715237e401b697fc718d111dd7f04b585a561cbef5bfb21f96691f",
             "src/main/java/com/simibubi/create/content/fluids/tank/FluidTankBlockEntity.java" to
@@ -224,6 +239,17 @@ class LegacyBlockEntityCapabilityRetainedLifecycleTest {
                     projectDigests
                 ),
                 path
+            )
+        }
+
+        supersededDirectStageDigests.forEach { (path, digest) ->
+            assertFalse(
+                LegacyBlockEntityCapabilityQueries.reviewedRetainedSourceDigestProfile(
+                    path,
+                    digest,
+                    projectDigests
+                ),
+                "Superseded direct-stage digest remained admitted: $path"
             )
         }
 
@@ -254,6 +280,16 @@ class LegacyBlockEntityCapabilityRetainedLifecycleTest {
             LegacyBlockEntityCapabilityQueries.reviewedRetainedSourceDigestProfile(
                 tank.key,
                 tank.value,
+                projectDigests + (
+                    dependencyPath to
+                        "2e373b54fab5899c4f16af37e31e81d5c4a2b8d8108b4555d3babd8a0d6a5e64"
+                    )
+            )
+        )
+        assertFalse(
+            LegacyBlockEntityCapabilityQueries.reviewedRetainedSourceDigestProfile(
+                tank.key,
+                tank.value,
                 projectDigests + (dependencyPath to "0".repeat(64))
             )
         )
@@ -262,7 +298,10 @@ class LegacyBlockEntityCapabilityRetainedLifecycleTest {
     @Test
     @EnabledIfEnvironmentVariable(named = "MODPORTER_CREATE_PROFILE_REPLAY", matches = ".+")
     fun `configured Create tree admits exactly the six reviewed retained sites without mutation`() {
-        val project = Path.of(System.getenv("MODPORTER_CREATE_PROFILE_REPLAY")).toAbsolutePath().normalize()
+        val capture = Path.of(System.getenv("MODPORTER_CREATE_PROFILE_REPLAY"))
+            .toAbsolutePath()
+            .normalize()
+        val project = directory.resolve("create-profile-replay")
         val expectedSources = setOf(
             "src/main/java/com/simibubi/create/content/fluids/FlowSource.java",
             "src/main/java/com/simibubi/create/content/fluids/tank/FluidTankBlockEntity.java",
@@ -273,7 +312,15 @@ class LegacyBlockEntityCapabilityRetainedLifecycleTest {
         )
         val reviewedInputs = expectedSources +
             "src/main/java/com/simibubi/create/api/equipment/goggles/IHaveGoggleInformation.java"
-        val before = reviewedInputs.associateWith { relative -> project.resolve(relative).readText() }
+        val captureBefore = reviewedInputs.associateWith { relative -> capture.resolve(relative).readText() }
+        reviewedInputs.forEach { relative ->
+            val target = project.resolve(relative)
+            target.parent.createDirectories()
+            Files.copy(capture.resolve(relative), target)
+        }
+        writeCreateBlockEntityHierarchy(project)
+        val stagedBefore = reviewedInputs.associateWith { relative -> project.resolve(relative).readText() }
+        assertEquals(captureBefore, stagedBefore)
         val mixinConfig = project.resolve(
             "src/main/resources/modporter-legacy-capability-query.mixins.json"
         )
@@ -302,8 +349,9 @@ class LegacyBlockEntityCapabilityRetainedLifecycleTest {
             result.changes.joinToString("\n")
         )
         assertFalse(mixinConfig.exists(), mixinConfig.toString())
-        before.forEach { (relative, source) ->
-            assertEquals(source, project.resolve(relative).readText(), relative)
+        stagedBefore.forEach { (relative, source) ->
+            assertEquals(source, project.resolve(relative).readText(), "staged $relative")
+            assertEquals(captureBefore.getValue(relative), capture.resolve(relative).readText(), "capture $relative")
         }
     }
 
@@ -336,6 +384,10 @@ class LegacyBlockEntityCapabilityRetainedLifecycleTest {
             commentDrift.gates.any { it.contains("cannot prove LazyOptional lifecycle use") },
             commentDrift.gates.joinToString("\n")
         )
+        assertTrue(
+            commentDrift.gates.any { it.contains("sourceStageSha256=") },
+            commentDrift.gates.joinToString("\n")
+        )
 
         source.writeText(
             baseline.replace(
@@ -352,6 +404,10 @@ class LegacyBlockEntityCapabilityRetainedLifecycleTest {
         )
         assertTrue(
             stringDrift.gates.any { it.contains("cannot prove LazyOptional lifecycle use") },
+            stringDrift.gates.joinToString("\n")
+        )
+        assertTrue(
+            stringDrift.gates.any { it.contains("sourceStageSha256=") },
             stringDrift.gates.joinToString("\n")
         )
     }
@@ -910,6 +966,30 @@ class LegacyBlockEntityCapabilityRetainedLifecycleTest {
                 }
             }
             """
+        )
+    }
+
+    private fun writeCreateBlockEntityHierarchy(project: Path) {
+        val root = project.resolve("src/main/java/com/simibubi/create/foundation/blockEntity")
+            .createDirectories()
+        root.resolve("SmartBlockEntity.java").writeText(
+            """
+            package com.simibubi.create.foundation.blockEntity;
+            public abstract class SmartBlockEntity extends CachedRenderBBBlockEntity {}
+            """.trimIndent()
+        )
+        root.resolve("CachedRenderBBBlockEntity.java").writeText(
+            """
+            package com.simibubi.create.foundation.blockEntity;
+            public abstract class CachedRenderBBBlockEntity extends SyncedBlockEntity {}
+            """.trimIndent()
+        )
+        root.resolve("SyncedBlockEntity.java").writeText(
+            """
+            package com.simibubi.create.foundation.blockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            public abstract class SyncedBlockEntity extends BlockEntity {}
+            """.trimIndent()
         )
     }
 

@@ -66,7 +66,7 @@ internal class ExactExternalProviderCallMigration {
                 val caller = call.findAncestor(MethodDeclaration::class.java).orElseThrow {
                     IllegalStateException("Exact external provider call '$call' is not enclosed by a method")
                 }
-                if (exactDeclaredProviderExpression(caller, index) != null) return@calls
+                if (exactDeclaredProviderExpression(caller, call, index) != null) return@calls
                 val legacyBuffers = caller.parameters.withIndex().filter { (_, parameter) ->
                     index.declaredType(parameter.type, caller) == FRIENDLY_BYTE_BUF
                 }
@@ -112,7 +112,7 @@ internal class ExactExternalProviderCallMigration {
                 val caller = call.findAncestor(MethodDeclaration::class.java).orElseThrow {
                     IllegalStateException("Exact external provider call '$call' is not enclosed by a method")
                 }
-                var provider = exactDeclaredProviderExpression(caller, index)
+                var provider = exactDeclaredProviderExpression(caller, call, index)
                 if (provider == null) {
                     val family = index.exactProjectOverrideFamily(caller) ?: throw IllegalStateException(
                         "Exact external provider call '$call' in ${caller.nameAsString} has no declared provider " +
@@ -194,6 +194,7 @@ internal class ExactExternalProviderCallMigration {
 
     private fun exactDeclaredProviderExpression(
         caller: MethodDeclaration,
+        call: MethodCallExpr,
         index: JavaProjectTypeIndex
     ): String? {
         ExactExternalProviderContracts.providerExpression(caller, index)?.let { return it }
@@ -214,6 +215,7 @@ internal class ExactExternalProviderCallMigration {
         unique(typedParameters.mapNotNull { (type, name) ->
             name.takeIf { type in setOf(HOLDER_LOOKUP_PROVIDER, REGISTRY_ACCESS) }
         }, "direct")?.let { return it }
+        ExactReceiverProviderProvenance.providerExpression(call, caller, index)?.let { return it }
         return unique(typedParameters.mapNotNull { (type, name) ->
             "$name.registryAccess()".takeIf {
                 LEVEL_PROVIDER_TYPES.any { expected -> index.isTypeAssignableTo(type, expected) } ||

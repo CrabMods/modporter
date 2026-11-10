@@ -262,6 +262,54 @@ class ExactExternalProviderCallMigrationTest {
         assertTrue(file.readText() == original, file.readText())
     }
 
+    @Test
+    fun `external BlockEntity receiver provenance selects the producing world provider`() {
+        val file = write("sample/ZapperItem.java", """
+            package sample;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            class ZapperItem {
+                static void setBlockEntityData(Level world, BlockPos pos, CompoundTag data, Player player) {
+                    BlockEntity blockEntity = world.getBlockEntity(pos);
+                    blockEntity.load(data);
+                }
+            }
+        """.trimIndent())
+
+        ExactExternalProviderCallMigration().migrate(tempDir, dryRun = false)
+        val migrated = file.readText()
+
+        assertTrue(migrated.contains("blockEntity.loadAdditional(data, world.registryAccess());"), migrated)
+        assertTrue(!migrated.contains("player.registryAccess()"), migrated)
+    }
+
+    @Test
+    fun `reassigned BlockEntity receiver does not claim its original world provenance`() {
+        val file = write("sample/ZapperItem.java", """
+            package sample;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            class ZapperItem {
+                static void setBlockEntityData(Level world, Level other, BlockPos pos, CompoundTag data, Player player) {
+                    BlockEntity blockEntity = world.getBlockEntity(pos);
+                    blockEntity = other.getBlockEntity(pos);
+                    blockEntity.load(data);
+                }
+            }
+        """.trimIndent())
+        val original = file.readText()
+
+        assertFailsWith<IllegalStateException> {
+            ExactExternalProviderCallMigration().migrate(tempDir, dryRun = false)
+        }
+        assertTrue(file.readText() == original)
+    }
     private fun write(relative: String, source: String): Path {
         val file = tempDir.resolve("src/main/java").resolve(relative)
         file.parent.createDirectories()

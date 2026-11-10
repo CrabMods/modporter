@@ -111,6 +111,12 @@ internal class ExactProjectProviderCallMigration {
         val methods: Set<MethodDeclaration>
     )
 
+    private data class PendingRegistryBufferFamily(
+        val key: String,
+        val members: List<JavaProjectTypeIndex.ExactProjectMethod>,
+        val parameterIndex: Int
+    )
+
     fun migrate(projectDir: Path, dryRun: Boolean): List<Change> {
         val sourceRoot = projectDir.resolve("src/main/java")
         if (!Files.isDirectory(sourceRoot)) return emptyList()
@@ -146,9 +152,18 @@ internal class ExactProjectProviderCallMigration {
             ::ensureLexical,
             ::releaseUnit,
             index
-        )
+        ).toMutableSet()
 
         val seedTargets = collectProviderTargets(providerDeclarationFiles, ::unit, index)
+        promoteRegistryBufferProviderFamilies(
+            seedTargets,
+            files,
+            sources,
+            preChangedFiles,
+            ::unit,
+            ::ensureLexical,
+            index
+        )
         val seededFamilies = seedProviderDemandOverrideFamilies(
             seedTargets,
             files,
@@ -512,6 +527,86 @@ internal class ExactProjectProviderCallMigration {
         }
     }
 
+    private fun promoteRegistryBufferProviderFamilies(
+        targets: List<ProviderTarget>,
+        files: List<Path>,
+        sources: Map<Path, String>,
+        changedFiles: MutableSet<Path>,
+        unit: (Path) -> CompilationUnit,
+        ensureLexical: (Path) -> Unit,
+        index: JavaProjectTypeIndex
+    ) {
+        if (targets.isEmpty()) return
+        val targetsByName = targets.groupBy { it.key.name }
+        val pending = linkedMapOf<String, PendingRegistryBufferFamily>()
+        files.filter { file -> targetsByName.keys.any { sources.getValue(file).contains("$it(") } }
+            .forEach { file ->
+                unit(file).findAll(MethodCallExpr::class.java).forEach calls@{ call ->
+                    val receiverType = index.methodCallReceiverType(call) ?: return@calls
+                    val matches = mostSpecificTargets(targetsByName[call.nameAsString].orEmpty().filter { target ->
+                        target.legacyArity == call.arguments.size &&
+                            index.isTypeAssignableTo(receiverType, target.key.owner) &&
+                            index.argumentsMatchTypes(
+                                call,
+                                target.key.parameterTypes.filterIndexed { parameterIndex, _ ->
+                                    parameterIndex != target.providerIndex
+                                }
+                            )
+                    }, index)
+                    if (matches.isEmpty()) return@calls
+                    if (index.argumentsMatchProjectMethod(call, receiverType, call.arguments.size)) return@calls
+                    if (matches.any {
+                            index.argumentsMatchProjectMethod(call, it.key.owner, call.arguments.size)
+                        }
+                    ) return@calls
+                    if (matches.size > 1) {
+                        throw IllegalStateException(
+                            "Ambiguous project registry-buffer provider target '$call': ${matches.map { it.key }}"
+                        )
+                    }
+                    val caller = call.findAncestor(MethodDeclaration::class.java).orElse(null) ?: return@calls
+                    if (exactCallableProviderExpression(caller, call, index) != null) return@calls
+                    val buffers = caller.parameters.withIndex().filter { (_, parameter) ->
+                        index.declaredType(parameter.type, caller) == FRIENDLY_BYTE_BUF
+                    }
+                    if (buffers.size > 1) {
+                        throw IllegalStateException(
+                            "Ambiguous FriendlyByteBuf project provider boundaries in ${caller.nameAsString}"
+                        )
+                    }
+                    val buffer = buffers.singleOrNull() ?: return@calls
+                    val family = index.exactProjectOverrideFamily(caller) ?: throw IllegalStateException(
+                        "Cannot prove a closed project override family for FriendlyByteBuf provider boundary " +
+                            caller.nameAsString
+                    )
+                    val key = family.joinToString("|") { member ->
+                        "${member.owner}.${member.method.nameAsString}/${member.method.parameters.size}"
+                    }
+                    pending.getOrPut(key) {
+                        family.forEach { member ->
+                            val parameter = member.method.parameters.getOrNull(buffer.index)
+                                ?: throw IllegalStateException(
+                                    "Registry buffer override family $key has inconsistent arity"
+                                )
+                            if (index.declaredType(parameter.type, member.method) != FRIENDLY_BYTE_BUF) {
+                                throw IllegalStateException(
+                                    "Registry buffer override family $key is only partially legacy-compatible"
+                                )
+                            }
+                        }
+                        PendingRegistryBufferFamily(key, family, buffer.index)
+                    }
+                }
+            }
+        pending.values.forEach { family ->
+            family.members.forEach { member ->
+                ensureLexical(member.file)
+                unit(member.file).addImport(REGISTRY_FRIENDLY_BYTE_BUF)
+                member.method.parameters[family.parameterIndex].setType("RegistryFriendlyByteBuf")
+                changedFiles.add(member.file)
+            }
+        }
+    }
     private fun seedProviderDemandOverrideFamilies(
         targets: List<ProviderTarget>,
         files: List<Path>,
@@ -1301,7 +1396,11 @@ internal class ExactProjectProviderCallMigration {
         }
         val declaredProviders = method.parameters.filterNot { it === ignoredProvider }.mapNotNull { parameter ->
             val type = index.declaredType(parameter.type, method) ?: return@mapNotNull null
-            parameter.nameAsString.takeIf { type in setOf(HOLDER_LOOKUP_PROVIDER, REGISTRY_ACCESS) }
+            when (type) {
+                HOLDER_LOOKUP_PROVIDER, REGISTRY_ACCESS -> parameter.nameAsString
+                REGISTRY_FRIENDLY_BYTE_BUF -> "${parameter.nameAsString}.registryAccess()"
+                else -> null
+            }
         }.distinct()
         if (declaredProviders.size > 1) {
             throw IllegalStateException(
@@ -1309,6 +1408,9 @@ internal class ExactProjectProviderCallMigration {
             )
         }
         declaredProviders.singleOrNull()?.let { return it }
+        (use as? MethodCallExpr)?.let { call ->
+            ExactReceiverProviderProvenance.providerExpression(call, method, index)?.let { return it }
+        }
         val candidates = method.parameters.filterNot { it === ignoredProvider }.mapNotNull { parameter ->
             val type = index.declaredType(parameter.type, method) ?: return@mapNotNull null
             val name = parameter.nameAsString
@@ -1405,6 +1507,7 @@ internal class ExactProjectProviderCallMigration {
             val type = index.declaredType(variable.type, variable) ?: return@mapNotNull null
             val expression = when {
                 type in setOf(HOLDER_LOOKUP_PROVIDER, REGISTRY_ACCESS) -> variable.nameAsString
+                type == REGISTRY_FRIENDLY_BYTE_BUF -> "${variable.nameAsString}.registryAccess()"
                 LEVEL_PROVIDER_TYPES.any { expected -> index.isTypeAssignableTo(type, expected) } ||
                     ENTITY_PROVIDER_TYPES.any { expected -> index.isTypeAssignableTo(type, expected) } ->
                     "${variable.nameAsString}.registryAccess()"
@@ -1613,6 +1716,7 @@ internal class ExactProjectProviderCallMigration {
         index: JavaProjectTypeIndex
     ): String? = when {
         type in setOf(HOLDER_LOOKUP_PROVIDER, REGISTRY_ACCESS) -> expression
+        type == REGISTRY_FRIENDLY_BYTE_BUF -> "$expression.registryAccess()"
         type == INVENTORY -> "$expression.player.registryAccess()"
         LEVEL_PROVIDER_TYPES.any { expected -> index.isTypeAssignableTo(type, expected) } ||
             ENTITY_PROVIDER_TYPES.any { expected -> index.isTypeAssignableTo(type, expected) } ->
@@ -1657,6 +1761,8 @@ internal class ExactProjectProviderCallMigration {
         const val HOLDER_LOOKUP_PROVIDER = "net.minecraft.core.HolderLookup.Provider"
         const val COMPOUND_TAG = "net.minecraft.nbt.CompoundTag"
         const val REGISTRY_ACCESS = "net.minecraft.core.RegistryAccess"
+        const val FRIENDLY_BYTE_BUF = "net.minecraft.network.FriendlyByteBuf"
+        const val REGISTRY_FRIENDLY_BYTE_BUF = "net.minecraft.network.RegistryFriendlyByteBuf"
         const val INVENTORY = "net.minecraft.world.entity.player.Inventory"
         const val MINECRAFT = "net.minecraft.client.Minecraft"
         const val BLOCK_ENTITY = "net.minecraft.world.level.block.entity.BlockEntity"
@@ -1682,6 +1788,7 @@ internal class ExactProjectProviderCallMigration {
         val CALLABLE_PROVIDER_SOURCE_TYPES = LEVEL_PROVIDER_TYPES + ENTITY_PROVIDER_TYPES + setOf(
             HOLDER_LOOKUP_PROVIDER,
             REGISTRY_ACCESS,
+            REGISTRY_FRIENDLY_BYTE_BUF,
             INVENTORY,
             MINECRAFT
         ) + PONDER_SCENE_PROVIDER_TYPES

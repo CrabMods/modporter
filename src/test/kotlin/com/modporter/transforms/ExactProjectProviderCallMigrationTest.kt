@@ -2043,6 +2043,82 @@ class ExactProjectProviderCallMigrationTest {
         assertTrue(!migrated.contains("HolderLookup.Provider modporterRegistries"), migrated)
     }
 
+    @Test
+    fun `project providers use BlockEntity receiver provenance and closed registry buffer families`() {
+        write("sample/SyncedBlockEntity.java", """
+            package sample;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+            abstract class SyncedBlockEntity extends BlockEntity {
+                SyncedBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) { super(type, pos, state); }
+                public CompoundTag getUpdateTag(HolderLookup.Provider registries) { return new CompoundTag(); }
+                public void readClient(CompoundTag tag, HolderLookup.Provider registries) {}
+            }
+        """.trimIndent())
+        val smart = write("sample/SmartBlockEntity.java", """
+            package sample;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+            abstract class SmartBlockEntity extends SyncedBlockEntity {
+                SmartBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) { super(type, pos, state); }
+                public void sendToMenu(FriendlyByteBuf buffer) {
+                    buffer.writeNbt(getUpdateTag());
+                }
+            }
+        """.trimIndent())
+        write("sample/ToolboxBlockEntity.java", """
+            package sample;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+            class ToolboxBlockEntity extends SmartBlockEntity {
+                ToolboxBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) { super(type, pos, state); }
+            }
+        """.trimIndent())
+        val base = write("sample/MenuBase.java", """
+            package sample;
+            import net.minecraft.network.FriendlyByteBuf;
+            abstract class MenuBase<T> {
+                protected abstract T createOnClient(FriendlyByteBuf extraData);
+            }
+        """.trimIndent())
+        val menu = write("sample/ToolboxMenu.java", """
+            package sample;
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.client.multiplayer.ClientLevel;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            class ToolboxMenu extends MenuBase<ToolboxBlockEntity> {
+                protected ToolboxBlockEntity createOnClient(FriendlyByteBuf extraData) {
+                    CompoundTag readNbt = extraData.readNbt();
+                    ClientLevel world = Minecraft.getInstance().level;
+                    BlockEntity blockEntity = world.getBlockEntity(extraData.readBlockPos());
+                    if (blockEntity instanceof ToolboxBlockEntity toolbox) {
+                        toolbox.readClient(readNbt);
+                        return toolbox;
+                    }
+                    return null;
+                }
+            }
+        """.trimIndent())
+
+        ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
+        val migratedSmart = smart.readText()
+        val migratedMenu = menu.readText()
+
+        assertTrue(migratedSmart.contains("sendToMenu(RegistryFriendlyByteBuf buffer)"), migratedSmart)
+        assertTrue(migratedSmart.contains("getUpdateTag(buffer.registryAccess())"), migratedSmart)
+        assertTrue(migratedMenu.contains("toolbox.readClient(readNbt, world.registryAccess());"), migratedMenu)
+        assertTrue(migratedMenu.contains("createOnClient(FriendlyByteBuf extraData)"), migratedMenu)
+        assertTrue(base.readText().contains("createOnClient(FriendlyByteBuf extraData)"), base.readText())
+    }
     private fun write(relative: String, source: String): Path {
         val file = tempDir.resolve("src/main/java").resolve(relative)
         file.parent.createDirectories()
