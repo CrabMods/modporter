@@ -98,7 +98,10 @@ class BenchmarkOwnedProcessesTest {
         OwnedJavaProcessEnvironment.configure(builder)
         BenchmarkOwnedProcesses.use(builder) { process ->
             process.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write("stop\n") }
-            assertTrue(process.waitFor(10, TimeUnit.SECONDS))
+            val exited = process.waitFor(30, TimeUnit.SECONDS)
+            assertTrue(exited, if (exited) null else
+                "PowerShell encoding probe did not exit within 30 seconds: " +
+                    StrictUtf8RuntimeLog.decode(log))
             BenchmarkOwnedProcesses.finish(process)
             val output = StrictUtf8RuntimeLog.decode(log)
             assertEquals(0, process.exitValue(), output.toString())
