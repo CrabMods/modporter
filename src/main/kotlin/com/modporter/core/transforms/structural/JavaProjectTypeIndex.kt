@@ -306,6 +306,31 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
     fun isTypeAssignableTo(actualType: String, expectedType: String): Boolean =
         isAssignableTo(TypeRef(actualType), expectedType, mutableSetOf())
 
+    fun concreteClassMethodSuppressesInterfaceMethod(
+        receiverType: String,
+        implementation: MethodDeclaration,
+        contract: MethodDeclaration
+    ): Boolean {
+        if (!implementation.isPublic || implementation.isStatic || implementation.isAbstract ||
+            contract.isStatic || contract.isPrivate ||
+            implementation.nameAsString != contract.nameAsString
+        ) return false
+        val classOwner = exactEnclosingNamedClass(implementation) ?: return false
+        val interfaceOwner = exactEnclosingNamedClass(contract) as? ClassOrInterfaceDeclaration
+            ?: return false
+        if (!interfaceOwner.isInterface ||
+            (classOwner is ClassOrInterfaceDeclaration && classOwner.isInterface)
+        ) return false
+        val implementationSignature = erasedDeclarationParameterTypes(implementation) ?: return false
+        if (implementationSignature != erasedDeclarationParameterTypes(contract)) return false
+        val className = typeInfo(classOwner)?.qualifiedName ?: return false
+        val interfaceName = typeInfo(interfaceOwner)?.qualifiedName ?: return false
+        // JLS 8.4.8: a concrete superclass implementation prevents inheritance of
+        // the override-equivalent interface declaration for this receiver.
+        return isTypeAssignableTo(receiverType, className) &&
+            isTypeAssignableTo(receiverType, interfaceName)
+    }
+
     fun exactProjectOverrideFamily(
         seed: MethodDeclaration,
         rootVerifier: ((MethodDeclaration) -> Boolean)? = null

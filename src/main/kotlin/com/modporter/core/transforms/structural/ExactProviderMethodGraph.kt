@@ -870,6 +870,22 @@ internal fun StructuralRefactorPass.collectExactItemStackNbtMethodsNeedingHolder
         )
     }
 
+    val inheritedInterfaceImplementations = linkedSetOf<Pair<CandidateKey, CandidateKey>>()
+
+    fun isMoreSpecificProviderTarget(
+        receiverType: String,
+        preferred: Candidate,
+        other: Candidate
+    ): Boolean {
+        if (javaProjectTypeIndex.isTypeAssignableTo(preferred.ownerQualified, other.ownerQualified)) return true
+        if (!javaProjectTypeIndex.concreteClassMethodSuppressesInterfaceMethod(
+                receiverType, preferred.declaration, other.declaration
+            )
+        ) return false
+        inheritedInterfaceImplementations += key(preferred) to key(other)
+        return true
+    }
+
     fun exactCallsByCaller(
         candidateByKey: Map<CandidateKey, Candidate>
     ): Map<CandidateKey, Set<CandidateKey>> {
@@ -907,9 +923,10 @@ internal fun StructuralRefactorPass.collectExactItemStackNbtMethodsNeedingHolder
                     val mostSpecificMatches = matches.filterTo(linkedSetOf()) { target ->
                         matches.none { other ->
                             other != target &&
-                                javaProjectTypeIndex.isTypeAssignableTo(
-                                    other.ownerQualified,
-                                    target.ownerQualified
+                                isMoreSpecificProviderTarget(
+                                    receiverType,
+                                    candidateByKey.getValue(other),
+                                    candidateByKey.getValue(target)
                                 )
                         }
                     }
@@ -979,9 +996,10 @@ internal fun StructuralRefactorPass.collectExactItemStackNbtMethodsNeedingHolder
                     val mostSpecific = matches.filter { (_, target) ->
                         matches.none { (_, other) ->
                             other !== target &&
-                                javaProjectTypeIndex.isTypeAssignableTo(
-                                    other.ownerQualified,
-                                    target.ownerQualified
+                                isMoreSpecificProviderTarget(
+                                    receiverType,
+                                    other,
+                                    target
                                 )
                         }
                     }
@@ -1174,9 +1192,10 @@ internal fun StructuralRefactorPass.collectExactItemStackNbtMethodsNeedingHolder
         val mostSpecific = matches.filterTo(linkedSetOf()) { target ->
             matches.none { other ->
                 other != target &&
-                    javaProjectTypeIndex.isTypeAssignableTo(
-                        other.ownerQualified,
-                        target.ownerQualified
+                    isMoreSpecificProviderTarget(
+                        receiverType,
+                        candidateByKey.getValue(other),
+                        candidateByKey.getValue(target)
                     )
             }
         }
@@ -1510,7 +1529,7 @@ internal fun StructuralRefactorPass.collectExactItemStackNbtMethodsNeedingHolder
         }
     }
 
-    val result = accepted.filterTo(linkedSetOf()) { method ->
+    val methodsNeedingProvider = accepted.filterTo(linkedSetOf()) { method ->
         val candidate = candidateByKey.getValue(method)
         ExactExternalProviderContracts.providerExpression(
             candidate.declaration,
@@ -1521,7 +1540,15 @@ internal fun StructuralRefactorPass.collectExactItemStackNbtMethodsNeedingHolder
                 candidate.range.first,
                 javaInheritanceIndex
             ) == null
-    }.mapTo(linkedSetOf()) { method ->
+    }
+    inheritedInterfaceImplementations.forEach { (implementation, contract) ->
+        if ((implementation in methodsNeedingProvider) != (contract in methodsNeedingProvider)) {
+            throw IllegalStateException(
+                "Cannot partially rewrite inherited provider contract: $implementation implements $contract"
+            )
+        }
+    }
+    val result = methodsNeedingProvider.mapTo(linkedSetOf()) { method ->
         contract(candidateByKey.getValue(method))
     }
     val returnedKeys = result.mapTo(linkedSetOf()) { contract ->
