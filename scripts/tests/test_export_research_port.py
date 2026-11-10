@@ -293,6 +293,45 @@ def write_tool_jar(path: Path, version: str = "0.4.0") -> None:
         archive.writestr("META-INF/modporter/NOTICE", "ModPorter notice\n")
 
 
+def release_fixture(tool: export.ToolBundle) -> tuple[dict, bytes]:
+    tag = f"v{tool.version}"
+    jar_name = f"modporter-{tool.version}-all.jar"
+    checksums = f"{tool.jar_sha256}  {jar_name}\n".encode()
+    return {
+        "id": 101,
+        "tag_name": tag,
+        "draft": False,
+        "prerelease": True,
+        "html_url": f"{export.TOOL_URL}/releases/tag/{tag}",
+        "published_at": "2026-11-10T00:00:00Z",
+        "assets": [
+            {
+                "id": 201,
+                "name": jar_name,
+                "browser_download_url": f"{export.TOOL_URL}/releases/download/{tag}/{jar_name}",
+                "digest": f"sha256:{tool.jar_sha256}",
+            },
+            {
+                "id": 202,
+                "name": "SHA256SUMS",
+                "browser_download_url": f"{export.TOOL_URL}/releases/download/{tag}/SHA256SUMS",
+                "digest": f"sha256:{sha256_bytes(checksums)}",
+            },
+        ],
+    }, checksums
+
+
+def release_fetcher(release: dict, checksums: bytes):
+    def fetch(url: str, maximum_bytes: int) -> bytes:
+        if url == f"https://api.github.com/repos/CrabMods/modporter/releases/tags/{release['tag_name']}":
+            return json.dumps(release).encode()
+        if url == f"{export.TOOL_URL}/releases/download/{release['tag_name']}/SHA256SUMS":
+            return checksums
+        raise AssertionError(f"Unexpected public release request: {url}")
+
+    return fetch
+
+
 def construction_metadata(*, credit: bool = True) -> str:
     credit_line = (
         'credits="Ported with ModPorter: https://github.com/CrabMods/modporter"\n'
@@ -360,7 +399,7 @@ jar {
 
 
 class ExportResearchPortTest(unittest.TestCase):
-    def test_reads_released_04_tool_and_records_hash(self) -> None:
+    def test_reads_04_tool_metadata_and_records_hash(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             jar = Path(temp) / "modporter-0.4.0-all.jar"
             write_tool_jar(jar)
@@ -368,6 +407,82 @@ class ExportResearchPortTest(unittest.TestCase):
             self.assertEqual("0.4.0", bundle.version)
             self.assertEqual(hashlib.sha256(jar.read_bytes()).hexdigest(), bundle.jar_sha256)
             self.assertEqual(APACHE_LICENSE, bundle.apache_license)
+
+    def test_release_verification_binds_exact_published_jar_and_portable_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config, _, tool, _ = publication_inputs(root, root / "candidate")
+            release, checksums = release_fixture(tool)
+            verified = export.verify_released_tool(tool, fetch=release_fetcher(release, checksums))
+            self.assertEqual(tool.jar_sha256, verified.jar_sha256)
+            self.assertEqual("v0.4.0", verified.release["tag"])
+            self.assertEqual(201, verified.release["jarAssetId"])
+            self.assertEqual(sha256_bytes(checksums), verified.release["checksumsSha256"])
+            provenance = export.provenance_data(
+                config, verified, export.GitState(config.upstream_commit, "a" * 40, ""), []
+            )
+            self.assertEqual(dict(verified.release), provenance["generator"]["release"])
+            self.assertNotIn(str(root), json.dumps(provenance))
+
+    def test_release_verification_refuses_draft_wrong_origin_duplicate_and_missing_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            _, _, tool, _ = publication_inputs(Path(temp), Path(temp) / "candidate")
+            for name in ("draft", "unpublished", "origin", "duplicate", "missing", "jar-digest", "checksum-digest"):
+                with self.subTest(name=name):
+                    release, checksums = release_fixture(tool)
+                    if name == "draft":
+                        release["draft"] = True
+                    elif name == "unpublished":
+                        release["published_at"] = None
+                    elif name == "origin":
+                        release["assets"][0]["browser_download_url"] = "https://github.com/other/modporter/tool.jar"
+                    elif name == "duplicate":
+                        release["assets"].append(dict(release["assets"][0]))
+                    elif name == "missing":
+                        release["assets"] = release["assets"][:1]
+                    elif name == "jar-digest":
+                        release["assets"][0]["digest"] = "sha256:" + "0" * 64
+                    else:
+                        release["assets"][1]["digest"] = "sha256:" + "0" * 64
+                    with self.assertRaises(export.ExportError):
+                        export.verify_released_tool(tool, fetch=release_fetcher(release, checksums))
+
+    def test_local_tool_tampering_is_rejected_before_commands_or_output_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config, _, released_tool, _ = publication_inputs(root, root / "candidate")
+            release, checksums = release_fixture(released_tool)
+            with config.jar.open("ab") as stream:
+                stream.write(b"changed after release")
+            config.src.mkdir()
+            original = config.src / "protected.txt"
+            original.write_bytes(b"unchanged original source")
+
+            def refuse_commands(*args, **kwargs):
+                self.fail("unverified tool must not execute Git or Java")
+
+            with self.assertRaisesRegex(export.ExportError, "published release SHA256SUMS"):
+                export.export_research_port(
+                    config, runner=refuse_commands,
+                    release_fetch=release_fetcher(release, checksums),
+                )
+            self.assertFalse(config.out.exists())
+            self.assertEqual(b"unchanged original source", original.read_bytes())
+
+    def test_release_network_failure_and_ambiguous_checksums_do_not_admit_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            _, _, tool, _ = publication_inputs(Path(temp), Path(temp) / "candidate")
+            release, checksums = release_fixture(tool)
+
+            def unavailable(url: str, maximum_bytes: int) -> bytes:
+                raise export.ExportError("public release unavailable")
+
+            with self.assertRaisesRegex(export.ExportError, "unavailable"):
+                export.verify_released_tool(tool, fetch=unavailable)
+            for invalid in (checksums + checksums, checksums.replace(b"modporter-0.4.0", b"other-tool")):
+                with self.subTest(checksums=invalid):
+                    with self.assertRaisesRegex(export.ExportError, "published release SHA256SUMS"):
+                        export.verify_released_tool(tool, fetch=release_fetcher(release, invalid))
 
     def test_rejects_tool_outside_04_line(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

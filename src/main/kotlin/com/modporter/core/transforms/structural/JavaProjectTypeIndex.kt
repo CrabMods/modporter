@@ -84,6 +84,18 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         val arrayDepth: Int = 0
     )
 
+    private sealed interface MemberTypeLookup {
+        data class Resolved(val qualifiedName: String) : MemberTypeLookup
+        data object Absent : MemberTypeLookup
+        data object Unknown : MemberTypeLookup
+    }
+
+    private sealed interface DirectSuperLookup {
+        data class Project(val info: TypeInfo) : DirectSuperLookup
+        data object External : DirectSuperLookup
+        data object Unknown : DirectSuperLookup
+    }
+
     private data class TypeInfo(
         val qualifiedName: String,
         val unit: CompilationUnit,
@@ -115,6 +127,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
     )
     private val unitsByFile = linkedMapOf<Path, CompilationUnit>()
     private val typesByQualifiedName = linkedMapOf<String, TypeInfo>()
+    private val inheritedMemberTypeCache = linkedMapOf<Pair<String, String>, MemberTypeLookup>()
 
     internal val loadedSourceCount: Int
         get() = unitsByFile.size
@@ -125,6 +138,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         val normalized = file.toAbsolutePath().normalize()
         val unit = unitsByFile.remove(normalized) ?: return
         typesByQualifiedName.entries.removeIf { (_, info) -> info.unit === unit }
+        inheritedMemberTypeCache.clear()
     }
 
     fun expressionType(expression: Expression, use: Node): String? {
@@ -1519,7 +1533,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
                 it.copy(arrayDepth = it.arrayDepth + raw.arrayDepth)
             }
         }
-        val qualified = qualify(raw.name, owner.unit, owner.qualifiedName.substringBeforeLast('.', "")) ?: return null
+        val qualified = qualify(raw.name, owner) ?: return null
         val arguments = mutableListOf<TypeRef>()
         raw.arguments.forEach { argument ->
             arguments += resolveType(argument, owner, substitutions, resolvingBounds) ?: return null
@@ -1527,10 +1541,23 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         return TypeRef(qualified, arguments, raw.arrayDepth)
     }
 
-    private fun qualify(name: String, unit: CompilationUnit, packageName: String): String? {
+    private fun qualify(name: String, owner: TypeInfo): String? {
+        val unit = owner.unit
+        val packageName = packageName(unit)
         if (name in primitiveTypes) return name
         if (name.contains('.')) {
             val first = name.substringBefore('.')
+            when (val lexicalHead = lexicalMemberType(first, owner)) {
+                is MemberTypeLookup.Resolved -> {
+                    return resolveMemberTypePath(
+                        lexicalHead.qualifiedName,
+                        name.substringAfter('.').split('.'),
+                        owner
+                    )
+                }
+                MemberTypeLookup.Unknown -> return null
+                MemberTypeLookup.Absent -> Unit
+            }
             unit.imports.singleOrNull {
                 !it.isStatic && !it.isAsterisk && it.name.identifier == first
             }?.nameAsString?.let { imported ->
@@ -1541,7 +1568,12 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             if (name.substringBefore('.').firstOrNull()?.isLowerCase() == true) return name
             return null
         }
-        unit.findAll(TypeDeclaration::class.java)
+        when (val lexical = lexicalMemberType(name, owner)) {
+            is MemberTypeLookup.Resolved -> return lexical.qualifiedName
+            MemberTypeLookup.Unknown -> return null
+            MemberTypeLookup.Absent -> Unit
+        }
+        unit.types
             .filter { it.nameAsString == name }
             .mapNotNull { it.fullyQualifiedName.orElse(null) }
             .distinct()
@@ -1566,6 +1598,294 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             throw IllegalStateException("Ambiguous wildcard project type '$name': $wildcardMatches")
         }
         return wildcardMatches.singleOrNull()
+    }
+
+    private fun lexicalMemberType(name: String, owner: TypeInfo): MemberTypeLookup {
+        var scope: TypeInfo? = owner
+        while (scope != null) {
+            val exactScope = scope
+            val declarations = buildList {
+                if (exactScope.declaration.nameAsString == name) add(exactScope.qualifiedName)
+                addAll(immediateMemberTypes(exactScope, name).map { it.qualifiedName })
+            }.distinct()
+            if (declarations.size > 1) {
+                throw IllegalStateException(
+                    "Ambiguous lexical member type '$name' in ${exactScope.qualifiedName}: $declarations"
+                )
+            }
+            declarations.singleOrNull()?.let { return MemberTypeLookup.Resolved(it) }
+            when (val inherited = inheritedMemberType(name, exactScope, emptySet())) {
+                is MemberTypeLookup.Resolved -> return inherited
+                MemberTypeLookup.Unknown -> return MemberTypeLookup.Unknown
+                MemberTypeLookup.Absent -> Unit
+            }
+            val enclosing = enclosingType(exactScope.declaration)
+            scope = enclosing?.let { typeInfo(it) }
+            if (enclosing != null && scope == null) return MemberTypeLookup.Unknown
+        }
+        return MemberTypeLookup.Absent
+    }
+
+    private fun inheritedMemberType(
+        name: String,
+        inheritor: TypeInfo,
+        visiting: Set<String>
+    ): MemberTypeLookup {
+        val cacheKey = inheritor.qualifiedName to name
+        if (visiting.isEmpty()) inheritedMemberTypeCache[cacheKey]?.let { return it }
+        val key = "${inheritor.qualifiedName}#$name"
+        if (key in visiting) return MemberTypeLookup.Unknown
+        fun finish(result: MemberTypeLookup): MemberTypeLookup {
+            if (visiting.isEmpty()) inheritedMemberTypeCache[cacheKey] = result
+            return result
+        }
+        if (inheritor.directSupers.isEmpty()) return finish(MemberTypeLookup.Absent)
+        val nextVisiting = visiting + key
+        val candidates = mutableListOf<String>()
+        var unknown = false
+        inheritor.directSupers.forEach { rawSuper ->
+            val superInfo = when (val directSuper = resolveDirectSuper(rawSuper, inheritor)) {
+                is DirectSuperLookup.Project -> directSuper.info
+                DirectSuperLookup.External -> return@forEach
+                DirectSuperLookup.Unknown -> {
+                    unknown = true
+                    return@forEach
+                }
+            }
+            val declared = immediateMemberTypes(superInfo, name)
+            if (declared.size > 1) {
+                throw IllegalStateException(
+                    "Ambiguous member type '$name' declared on ${superInfo.qualifiedName}: " +
+                        declared.map { it.qualifiedName }
+                )
+            }
+            val branch = declared.singleOrNull()?.let { candidate ->
+                if (isMemberTypeInheritedBy(candidate, inheritor)) {
+                    MemberTypeLookup.Resolved(candidate.qualifiedName)
+                } else {
+                    MemberTypeLookup.Absent
+                }
+            } ?: inheritedMemberType(name, superInfo, nextVisiting)
+            when (branch) {
+                is MemberTypeLookup.Resolved -> {
+                    val candidate = loadType(branch.qualifiedName)
+                    if (candidate == null) {
+                        unknown = true
+                    } else if (isMemberTypeInheritedBy(candidate, inheritor)) {
+                        candidates += candidate.qualifiedName
+                    }
+                }
+                MemberTypeLookup.Unknown -> unknown = true
+                MemberTypeLookup.Absent -> Unit
+            }
+        }
+        val distinct = candidates.distinct()
+        if (distinct.size > 1) {
+            throw IllegalStateException(
+                "Ambiguous inherited member type '$name' on ${inheritor.qualifiedName}: $distinct"
+            )
+        }
+        if (unknown) return finish(MemberTypeLookup.Unknown)
+        return finish(distinct.singleOrNull()?.let { MemberTypeLookup.Resolved(it) } ?: MemberTypeLookup.Absent)
+    }
+
+    private fun immediateMemberTypes(owner: TypeInfo, name: String): List<TypeInfo> =
+        owner.declaration.members.filterIsInstance<TypeDeclaration<*>>()
+            .filter { it.nameAsString == name }
+            .mapNotNull { typeInfo(it) }
+            .distinctBy { it.qualifiedName }
+
+    private fun resolveMemberTypePath(
+        head: String,
+        segments: List<String>,
+        useOwner: TypeInfo
+    ): String? {
+        var current = loadType(head) ?: return null
+        segments.forEach { segment ->
+            when (val member = memberTypeOnType(segment, current, useOwner)) {
+                is MemberTypeLookup.Resolved -> current = loadType(member.qualifiedName) ?: return null
+                MemberTypeLookup.Absent, MemberTypeLookup.Unknown -> return null
+            }
+        }
+        return current.qualifiedName
+    }
+
+    private fun memberTypeOnType(
+        name: String,
+        target: TypeInfo,
+        useOwner: TypeInfo
+    ): MemberTypeLookup {
+        val declared = immediateMemberTypes(target, name)
+        if (declared.size > 1) {
+            throw IllegalStateException(
+                "Ambiguous member type '$name' declared on ${target.qualifiedName}: " +
+                    declared.map { it.qualifiedName }
+            )
+        }
+        declared.singleOrNull()?.let { candidate ->
+            return if (isMemberTypeAccessibleFrom(candidate, useOwner)) {
+                MemberTypeLookup.Resolved(candidate.qualifiedName)
+            } else {
+                MemberTypeLookup.Absent
+            }
+        }
+        return when (val inherited = inheritedMemberType(name, target, emptySet())) {
+            is MemberTypeLookup.Resolved -> {
+                val candidate = loadType(inherited.qualifiedName) ?: return MemberTypeLookup.Unknown
+                if (isMemberTypeAccessibleFrom(candidate, useOwner)) inherited else MemberTypeLookup.Absent
+            }
+            MemberTypeLookup.Absent -> MemberTypeLookup.Absent
+            MemberTypeLookup.Unknown -> MemberTypeLookup.Unknown
+        }
+    }
+
+    private fun isMemberTypeInheritedBy(member: TypeInfo, inheritor: TypeInfo): Boolean {
+        if (member.declaration.isPrivate) return false
+        if (isImplicitlyPublicMemberType(member) || member.declaration.isPublic || member.declaration.isProtected) {
+            return true
+        }
+        return packageName(member.unit) == packageName(inheritor.unit)
+    }
+
+    private fun isMemberTypeAccessibleFrom(member: TypeInfo, useOwner: TypeInfo): Boolean {
+        val declaringOwner = memberDeclaringType(member) ?: return false
+        if (isImplicitlyPublicMemberType(member) || member.declaration.isPublic) return true
+        if (member.declaration.isPrivate) {
+            return topLevelType(declaringOwner.declaration) === topLevelType(useOwner.declaration)
+        }
+        val samePackage = packageName(declaringOwner.unit) == packageName(useOwner.unit)
+        if (!member.declaration.isProtected) return samePackage
+        if (samePackage) return true
+        var lexicalOwner: TypeInfo? = useOwner
+        while (lexicalOwner != null) {
+            if (isProjectSubtype(lexicalOwner, declaringOwner.qualifiedName, emptySet()) == true) return true
+            lexicalOwner = enclosingType(lexicalOwner.declaration)?.let { typeInfo(it) }
+        }
+        return false
+    }
+
+    private fun isImplicitlyPublicMemberType(member: TypeInfo): Boolean {
+        val declaringOwner = memberDeclaringType(member)?.declaration ?: return false
+        return (declaringOwner is ClassOrInterfaceDeclaration && declaringOwner.isInterface) ||
+            declaringOwner is AnnotationDeclaration
+    }
+
+    private fun memberDeclaringType(member: TypeInfo): TypeInfo? =
+        enclosingType(member.declaration)?.let { typeInfo(it) }
+
+    private fun isProjectSubtype(actual: TypeInfo, expected: String, visiting: Set<String>): Boolean? {
+        if (actual.qualifiedName == expected) return true
+        if (actual.qualifiedName in visiting) return null
+        if (actual.directSupers.isEmpty()) return false
+        val nextVisiting = visiting + actual.qualifiedName
+        var unknown = false
+        actual.directSupers.forEach { rawSuper ->
+            when (val directSuper = resolveDirectSuper(rawSuper, actual)) {
+                is DirectSuperLookup.Project -> when (
+                    isProjectSubtype(directSuper.info, expected, nextVisiting)
+                ) {
+                    true -> return true
+                    null -> unknown = true
+                    false -> Unit
+                }
+                DirectSuperLookup.External -> Unit
+                DirectSuperLookup.Unknown -> unknown = true
+            }
+        }
+        return if (unknown) null else false
+    }
+
+    private fun resolveDirectSuper(raw: TypeRef, owner: TypeInfo): DirectSuperLookup {
+        val qualified = qualifyDirectSuper(raw.name, owner) ?: return DirectSuperLookup.Unknown
+        return loadType(qualified)?.let { DirectSuperLookup.Project(it) } ?: DirectSuperLookup.External
+    }
+
+    private fun qualifyDirectSuper(name: String, owner: TypeInfo): String? {
+        val unit = owner.unit
+        val packageName = packageName(unit)
+        if (name.contains('.')) {
+            val first = name.substringBefore('.')
+            directLexicalMemberType(first, owner.declaration)?.let { lexicalHead ->
+                val qualified = lexicalHead + name.removePrefix(first)
+                return qualified.takeIf { loadType(it) != null }
+            }
+            unit.imports.singleOrNull {
+                !it.isStatic && !it.isAsterisk && it.name.identifier == first
+            }?.nameAsString?.let { imported ->
+                return imported + name.removePrefix(first)
+            }
+            val samePackage = if (packageName.isEmpty()) name else "$packageName.$name"
+            if (loadType(samePackage) != null) return samePackage
+            if (first.firstOrNull()?.isLowerCase() == true) return name
+            return null
+        }
+        directLexicalMemberType(name, owner.declaration)?.let { return it }
+        unit.types
+            .filter { it.nameAsString == name }
+            .mapNotNull { it.fullyQualifiedName.orElse(null) }
+            .distinct()
+            .let { declarations ->
+                if (declarations.size > 1) {
+                    throw IllegalStateException("Ambiguous direct-super compilation-unit type '$name': $declarations")
+                }
+                declarations.singleOrNull()?.let { return it }
+            }
+        unit.imports.singleOrNull { !it.isStatic && !it.isAsterisk && it.name.identifier == name }
+            ?.nameAsString?.let { return it }
+        val samePackage = if (packageName.isEmpty()) name else "$packageName.$name"
+        if (loadType(samePackage) != null) return samePackage
+        implicitJavaLangTypes[name]?.let { return it }
+        val wildcardMatches = unit.imports.filter { !it.isStatic && it.isAsterisk }
+            .mapNotNull { import ->
+                val qualified = "${import.nameAsString}.$name"
+                qualified.takeIf { knownExternalTypes[name] == qualified || loadType(qualified) != null }
+            }
+            .distinct()
+        if (wildcardMatches.size > 1) {
+            throw IllegalStateException("Ambiguous direct-super wildcard project type '$name': $wildcardMatches")
+        }
+        return wildcardMatches.singleOrNull()
+    }
+
+    private fun directLexicalMemberType(name: String, owner: TypeDeclaration<*>): String? {
+        var scope: TypeDeclaration<*>? = owner
+        while (scope != null) {
+            val exactScope = scope
+            val declarations = buildList {
+                if (exactScope.nameAsString == name) add(exactScope)
+                addAll(
+                    exactScope.members.filterIsInstance<TypeDeclaration<*>>()
+                        .filter { it.nameAsString == name }
+                )
+            }.mapNotNull { it.fullyQualifiedName.orElse(null) }.distinct()
+            if (declarations.size > 1) {
+                throw IllegalStateException(
+                    "Ambiguous direct lexical member type '$name' in ${exactScope.nameAsString}: $declarations"
+                )
+            }
+            declarations.singleOrNull()?.let { return it }
+            scope = enclosingType(exactScope)
+        }
+        return null
+    }
+
+    private fun packageName(unit: CompilationUnit): String =
+        unit.packageDeclaration.map { it.nameAsString }.orElse("")
+
+    private fun topLevelType(declaration: TypeDeclaration<*>): TypeDeclaration<*> {
+        var top = declaration
+        while (true) {
+            top = enclosingType(top) ?: return top
+        }
+    }
+
+    private fun enclosingType(declaration: TypeDeclaration<*>): TypeDeclaration<*>? {
+        var cursor = declaration.parentNode.orElse(null)
+        while (cursor != null) {
+            if (cursor is TypeDeclaration<*>) return cursor
+            cursor = cursor.parentNode.orElse(null)
+        }
+        return null
     }
 
     private fun substitutions(info: TypeInfo, receiver: TypeRef): Map<String, TypeRef> {
@@ -1647,6 +1967,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
     }
 
     private fun registerUnit(unit: CompilationUnit) {
+        var registeredNewType = false
         unit.findAll(TypeDeclaration::class.java).forEach { declaration ->
             val qualified = declaration.fullyQualifiedName.orElse(null) ?: return@forEach
             if (typesByQualifiedName.containsKey(qualified)) return@forEach
@@ -1673,7 +1994,9 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
                 typeParameterBounds = bounds,
                 directSupers = directSupers.map { parseType(it.asString()) }
             )
+            registeredNewType = true
         }
+        if (registeredNewType) inheritedMemberTypeCache.clear()
     }
 
     private fun <T> exactSingle(values: List<T>, label: String): T? {
@@ -1816,7 +2139,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         )
         private val implicitJavaLangTypes = setOf(
             "Boolean", "Byte", "Character", "Class", "Comparable", "Double", "Enum", "Float", "Integer", "Long",
-            "Number", "Object", "Short", "String", "Throwable", "Void"
+            "Number", "Object", "Runnable", "Short", "String", "Throwable", "Void"
         ).associateWith { "java.lang.$it" }
         private val knownFields = mapOf(
             "net.minecraft.client.gui.screens.inventory.AbstractContainerScreen" to mapOf(

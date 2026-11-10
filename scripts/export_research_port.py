@@ -2,8 +2,9 @@
 """Export a bounded ModPorter-generated research candidate.
 
 The wrapper accepts only the two MIT-licensed, pinned upstream projects whose
-current Groovy build shapes were reviewed for the 0.4.0 release.  It runs the
-released JAR against a clean ``git archive`` snapshot, then applies a narrow
+current Groovy build shapes were reviewed for the 0.4.0 release. It verifies
+the public versioned GitHub release and SHA256SUMS before running the JAR
+against a clean ``git archive`` snapshot, then applies a narrow
 metadata and packaging policy.  It never edits Java/Kotlin mod logic.
 """
 
@@ -20,10 +21,11 @@ import sys
 import tarfile
 import tempfile
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Mapping, Sequence
 from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
 
 ISSUES_URL = "https://github.com/CrabMods/modporter/issues"
@@ -211,6 +213,7 @@ class ToolBundle:
     jar_name: str
     apache_license: bytes
     notice: bytes | None
+    release: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -394,6 +397,83 @@ def read_tool_bundle(jar: Path) -> ToolBundle:
         apache_license=apache_license,
         notice=notice,
     )
+
+
+def fetch_release_resource(url: str, maximum_bytes: int) -> bytes:
+    request = Request(url, headers={"User-Agent": "ModPorter-research-export"})
+    try:
+        with urlopen(request, timeout=30) as response:
+            if urlsplit(response.url).scheme != "https":
+                raise ExportError("release download redirected outside HTTPS")
+            payload = response.read(maximum_bytes + 1)
+    except OSError as exc:
+        raise ExportError(f"cannot verify public ModPorter release: {exc}") from exc
+    if len(payload) > maximum_bytes:
+        raise ExportError("public release response exceeded its expected size")
+    return payload
+
+
+def verify_released_tool(
+    tool: ToolBundle,
+    *,
+    fetch: Callable[[str, int], bytes] = fetch_release_resource,
+) -> ToolBundle:
+    tag = f"v{tool.version}"
+    release_url = f"{TOOL_URL}/releases/tag/{tag}"
+    asset_root = f"{TOOL_URL}/releases/download/{tag}"
+    jar_name = f"modporter-{tool.version}-all.jar"
+    try:
+        release = json.loads(fetch(
+            f"https://api.github.com/repos/CrabMods/modporter/releases/tags/{tag}",
+            1024 * 1024,
+        ), object_pairs_hook=_strict_json_object)
+        if (
+            not isinstance(release, dict)
+            or release.get("tag_name") != tag
+            or release.get("draft") is not False
+            or release.get("html_url") != release_url
+            or type(release.get("id")) is not int
+            or release["id"] <= 0
+            or not isinstance(release.get("published_at"), str)
+            or not release["published_at"]
+            or not isinstance(release.get("assets"), list)
+        ):
+            raise ExportError("ModPorter release identity or publication state is invalid")
+        assets = {}
+        for name in (jar_name, "SHA256SUMS"):
+            matches = [a for a in release["assets"] if isinstance(a, dict) and a.get("name") == name]
+            if (
+                len(matches) != 1
+                or matches[0].get("browser_download_url") != f"{asset_root}/{name}"
+                or type(matches[0].get("id")) is not int
+                or matches[0]["id"] <= 0
+            ):
+                raise ExportError(f"public release must contain exactly one official {name} asset")
+            assets[name] = matches[0]
+        checksums = fetch(assets["SHA256SUMS"]["browser_download_url"], 16 * 1024)
+        match = re.fullmatch(
+            rf"([0-9a-f]{{64}})  {re.escape(jar_name)}",
+            checksums.decode("utf-8-sig").strip(),
+        )
+        if match is None or match[1] != tool.jar_sha256:
+            raise ExportError("ModPorter JAR does not match the published release SHA256SUMS")
+        for name, payload_sha in ((jar_name, tool.jar_sha256), ("SHA256SUMS", hashlib.sha256(checksums).hexdigest())):
+            digest = assets[name].get("digest")
+            if digest is not None and digest != f"sha256:{payload_sha}":
+                raise ExportError(f"published {name} asset digest differs from its content")
+    except (ValueError, TypeError) as exc:
+        raise ExportError(f"invalid public ModPorter release evidence: {exc}") from exc
+    return replace(tool, release={
+        "tag": tag,
+        "url": release_url,
+        "id": release["id"],
+        "publishedAt": release["published_at"],
+        "jarAssetId": assets[jar_name]["id"],
+        "jarAssetUrl": assets[jar_name]["browser_download_url"],
+        "checksumsAssetId": assets["SHA256SUMS"]["id"],
+        "checksumsUrl": assets["SHA256SUMS"]["browser_download_url"],
+        "checksumsSha256": hashlib.sha256(checksums).hexdigest(),
+    })
 
 
 def default_runner(
@@ -1568,6 +1648,7 @@ def provenance_data(
             "license": "Apache-2.0",
             "jarFile": tool.jar_name,
             "jarSha256": tool.jar_sha256,
+            "release": dict(tool.release) if tool.release is not None else None,
             "invocation": [
                 "java",
                 "-jar",
@@ -1784,9 +1865,10 @@ def export_research_port(
     config: ExportConfig,
     *,
     runner: RunCommand = default_runner,
+    release_fetch: Callable[[str, int], bytes] = fetch_release_resource,
 ) -> None:
     spec = validate_config(config)
-    tool = read_tool_bundle(config.jar)
+    tool = verify_released_tool(read_tool_bundle(config.jar), fetch=release_fetch)
     output_existed = ensure_output_preflight(config.src, config.out)
     source_state = verify_source_git(runner, config, spec)
     reject_benchmark_contamination(config.src, "input source")
@@ -1804,6 +1886,8 @@ def export_research_port(
                 snapshot,
             )
             reject_benchmark_contamination(snapshot, "Git archive snapshot")
+            if sha256_file(config.jar) != tool.jar_sha256:
+                raise ExportError("verified ModPorter JAR changed before execution")
             result = runner(
                 tool_command(config.jar.resolve(), snapshot, config.out.resolve()),
                 cwd=None,
@@ -1813,6 +1897,8 @@ def export_research_port(
                 raise ExportError(
                     f"ModPorter exited with code {result.returncode}; partial output was removed"
                 )
+            if sha256_file(config.jar) != tool.jar_sha256:
+                raise ExportError("verified ModPorter JAR changed during execution")
         ensure_source_unchanged(runner, config.src, source_state)
         apply_publication_policy(
             config,
