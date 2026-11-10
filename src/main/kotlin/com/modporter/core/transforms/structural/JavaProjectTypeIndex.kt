@@ -82,10 +82,52 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         val method: MethodDeclaration
     )
 
+    data class ExactLambdaCallbackBinding(
+        val call: MethodCallExpr,
+        val owner: String,
+        val method: MethodDeclaration,
+        val callbackArgumentIndex: Int,
+        val lambdaParameterIndex: Int
+    )
+
     private data class TypeRef(
         val name: String,
         val arguments: List<TypeRef> = emptyList(),
         val arrayDepth: Int = 0
+    )
+
+    private data class ProjectMethodBinding(
+        val owner: String,
+        val declaration: MethodDeclaration
+    )
+
+    private data class ProjectFunctionalParameterBinding(
+        val owner: String,
+        val declaration: MethodDeclaration,
+        val parameterType: TypeRef
+    )
+
+    private enum class MethodOwnerKind {
+        CLASS,
+        INTERFACE
+    }
+
+    private sealed interface ProjectDispatchResolution<out T> {
+        data class Resolved<T>(
+            val value: T,
+            val ownerKind: MethodOwnerKind
+        ) : ProjectDispatchResolution<T>
+
+        data object Absent : ProjectDispatchResolution<Nothing>
+
+        data class Unknown(
+            val mayDeclareConcreteClassMethod: Boolean
+        ) : ProjectDispatchResolution<Nothing>
+    }
+
+    private data class DirectSuperBranch(
+        val raw: TypeRef,
+        val ownerKind: MethodOwnerKind
     )
 
     private sealed interface MemberTypeLookup {
@@ -285,6 +327,58 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
     fun projectMethodOwner(call: MethodCallExpr, declarationArity: Int = call.arguments.size): String? {
         val receiver = methodCallReceiverTypeRef(call) ?: return null
         return resolveProjectMethodOwner(receiver, call.nameAsString, declarationArity, mutableSetOf())
+    }
+
+    fun exactMethodCallReceiverType(call: MethodCallExpr): String? =
+        methodCallReceiverTypeRef(call)?.name
+
+    fun exactProjectMethodDeclaration(call: MethodCallExpr): MethodDeclaration? {
+        val caller = exactEnclosingNamedClass(call) ?: return null
+        val callerInfo = typeInfo(caller)
+            ?: throw IllegalStateException("Cannot index call owner '${caller.nameAsString}'")
+        val receiver = methodCallReceiverTypeRef(call) ?: return null
+        return resolveProjectMethodDeclaration(
+            receiver,
+            call,
+            callerInfo,
+            emptyMap(),
+            emptySet()
+        )?.declaration
+    }
+
+    fun exactLambdaCallbackBinding(
+        lambda: LambdaExpr,
+        lambdaParameterIndex: Int
+    ): ExactLambdaCallbackBinding? {
+        if (lambdaParameterIndex !in lambda.parameters.indices) return null
+        val call = lambda.parentNode.orElse(null) as? MethodCallExpr ?: return null
+        val argumentIndex = call.arguments.indexOfFirst { it === lambda }
+        if (argumentIndex < 0) return null
+        val caller = exactEnclosingNamedClass(call) ?: return null
+        val callerInfo = typeInfo(caller)
+            ?: throw IllegalStateException("Cannot index call owner '${caller.nameAsString}'")
+        val scopeExpression = call.scope.orElse(null)
+        val receiver = if (scopeExpression == null) {
+            TypeRef(callerInfo.qualifiedName)
+        } else {
+            resolveExpression(scopeExpression, call, callerInfo, emptyMap()) ?: return null
+        }
+        val binding = resolveProjectFunctionalParameterBinding(
+            receiver,
+            call,
+            argumentIndex,
+            lambdaParameterIndex,
+            callerInfo,
+            emptyMap(),
+            emptySet()
+        ) ?: return null
+        return ExactLambdaCallbackBinding(
+            call,
+            binding.owner,
+            binding.declaration,
+            argumentIndex,
+            lambdaParameterIndex
+        )
     }
 
     fun projectMethodTypeParameterCount(call: MethodCallExpr): Int? {
@@ -726,6 +820,25 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         return signatures.singleOrNull() == expectedTypes
     }
 
+    fun resolvesToUniqueProjectMethodSignatureIgnoringArgument(
+        call: MethodCallExpr,
+        expectedTypes: List<String>,
+        excludedArgumentIndex: Int
+    ): Boolean {
+        if (call.arguments.size != expectedTypes.size + 1 ||
+            excludedArgumentIndex !in call.arguments.indices
+        ) return false
+        val receiver = methodCallReceiverTypeRef(call) ?: return false
+        if (!hasClosedProjectMethodHierarchy(receiver.name)) return false
+        val signatures = collectProjectMethodSignatures(
+            receiver,
+            call.nameAsString,
+            expectedTypes.size,
+            mutableSetOf()
+        ) ?: return false
+        return signatures.singleOrNull() == expectedTypes
+    }
+
     fun argumentsMatchTypesExcluding(
         call: MethodCallExpr,
         expectedTypes: List<String>,
@@ -1049,6 +1162,100 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         )
     }
 
+    private fun resolveProjectMethodDeclaration(
+        receiver: TypeRef,
+        call: MethodCallExpr,
+        callerOwner: TypeInfo,
+        callerSubstitutions: Map<String, TypeRef>,
+        visited: Set<String>
+    ): ProjectMethodBinding? = when (
+        val resolution = resolveProjectMethodDispatch(
+            receiver,
+            call,
+            callerOwner,
+            callerSubstitutions,
+            visited
+        )
+    ) {
+        is ProjectDispatchResolution.Resolved -> resolution.value
+        ProjectDispatchResolution.Absent, is ProjectDispatchResolution.Unknown -> null
+    }
+
+    private fun resolveProjectMethodDispatch(
+        receiver: TypeRef,
+        call: MethodCallExpr,
+        callerOwner: TypeInfo,
+        callerSubstitutions: Map<String, TypeRef>,
+        visited: Set<String>
+    ): ProjectDispatchResolution<ProjectMethodBinding> {
+        if (receiver.toString() in visited) {
+            return ProjectDispatchResolution.Unknown(mayDeclareConcreteClassMethod = true)
+        }
+        val info = loadType(receiver.name)
+            ?: return externalMethodDispatch(receiver.name, call.nameAsString, MethodOwnerKind.CLASS)
+        val ownerKind = methodOwnerKind(info)
+        val substitutions = substitutions(info, receiver)
+        val methods = methods(info).filter {
+            it.nameAsString == call.nameAsString && it.parameters.size == call.arguments.size
+        }
+        val actualTypes = call.arguments.map { argument ->
+            resolveExpression(argument, call, callerOwner, callerSubstitutions)
+                ?: return ProjectDispatchResolution.Unknown(ownerKind == MethodOwnerKind.CLASS)
+        }
+        var unresolvedDirectCandidate = false
+        val matching = methods.mapNotNull { method ->
+            val expected = method.parameters.map { parameter ->
+                resolveLexicalType(parseType(parameter.typeAsString), method, info, substitutions)
+                    ?: run {
+                        unresolvedDirectCandidate = true
+                        return@mapNotNull null
+                    }
+            }
+            method.takeIf {
+                actualTypes.zip(expected).all { (actual, target) ->
+                    isAssignableTo(actual, target.name, mutableSetOf())
+                }
+            }
+        }
+        if (unresolvedDirectCandidate || matching.size > 1) {
+            return ProjectDispatchResolution.Unknown(ownerKind == MethodOwnerKind.CLASS)
+        }
+        matching.singleOrNull()?.let { method ->
+            return ProjectDispatchResolution.Resolved(
+                ProjectMethodBinding(info.qualifiedName, method),
+                ownerKind
+            )
+        }
+        val nextVisited = visited + receiver.toString()
+        val inherited = directSuperBranches(info).map { branch ->
+            val superType = resolveDirectSuperType(branch.raw, info, substitutions)
+                ?: return@map ProjectDispatchResolution.Unknown(
+                    branch.ownerKind == MethodOwnerKind.CLASS
+                )
+            if (loadType(superType.name) == null) {
+                externalMethodDispatch(superType.name, call.nameAsString, branch.ownerKind)
+            } else {
+                resolveProjectMethodDispatch(
+                    superType,
+                    call,
+                    callerOwner,
+                    callerSubstitutions,
+                    nextVisited
+                )
+            }
+        }
+        return collapseProjectDispatch(
+            inherited,
+            ::projectMethodBindingKey
+        ) { implementation, contract ->
+            concreteClassMethodSuppressesInterfaceMethod(
+                receiver.name,
+                implementation.declaration,
+                contract.declaration
+            )
+        }
+    }
+
     private fun resolveProjectMethodOwner(
         receiver: TypeRef,
         name: String,
@@ -1297,78 +1504,199 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
                 scope.name == "java.util.Optional" && parameterIndex == 0 -> scope.arguments.singleOrNull()
             else -> null
         }
-        return external ?: resolveProjectFunctionalParameter(
+        return external ?: resolveProjectFunctionalParameterType(
             scope,
             parentCall,
             argumentIndex,
             parameterIndex,
             owner,
             substitutions,
-            mutableSetOf()
+            emptySet()
         )
     }
 
-    private fun resolveProjectFunctionalParameter(
+    private fun resolveProjectFunctionalParameterBinding(
         receiver: TypeRef,
         call: MethodCallExpr,
         argumentIndex: Int,
         lambdaParameterIndex: Int,
         callerOwner: TypeInfo,
         callerSubstitutions: Map<String, TypeRef>,
-        visited: MutableSet<String>
-    ): TypeRef? {
-        if (!visited.add(receiver.toString())) return null
-        val info = loadType(receiver.name) ?: return null
+        visited: Set<String>
+    ): ProjectFunctionalParameterBinding? = when (
+        val resolution = resolveProjectFunctionalParameterDispatch(
+            receiver,
+            call,
+            argumentIndex,
+            lambdaParameterIndex,
+            callerOwner,
+            callerSubstitutions,
+            visited
+        )
+    ) {
+        is ProjectDispatchResolution.Resolved -> resolution.value
+        ProjectDispatchResolution.Absent, is ProjectDispatchResolution.Unknown -> null
+    }
+
+    private fun resolveProjectFunctionalParameterDispatch(
+        receiver: TypeRef,
+        call: MethodCallExpr,
+        argumentIndex: Int,
+        lambdaParameterIndex: Int,
+        callerOwner: TypeInfo,
+        callerSubstitutions: Map<String, TypeRef>,
+        visited: Set<String>
+    ): ProjectDispatchResolution<ProjectFunctionalParameterBinding> {
+        if (receiver.toString() in visited) {
+            return ProjectDispatchResolution.Unknown(mayDeclareConcreteClassMethod = true)
+        }
+        val info = loadType(receiver.name)
+            ?: return externalMethodDispatch(receiver.name, call.nameAsString, MethodOwnerKind.CLASS)
+        val ownerKind = methodOwnerKind(info)
         val substitutions = substitutions(info, receiver)
         val methods = methods(info).filter {
             it.nameAsString == call.nameAsString && it.parameters.size == call.arguments.size
         }
-        val lambdaArity = (call.arguments[argumentIndex] as? LambdaExpr)?.parameters?.size ?: return null
-        val matching = methods.filter candidates@{ method ->
-            val nonFunctionalArgumentsMatch = call.arguments.withIndex()
-                .filter { it.index != argumentIndex }
-                .all { (index, argument) ->
+        val lambdaArity = (call.arguments[argumentIndex] as? LambdaExpr)?.parameters?.size
+            ?: return ProjectDispatchResolution.Unknown(ownerKind == MethodOwnerKind.CLASS)
+        var unresolvedDirectCandidate = false
+        val matching = methods.mapNotNull candidates@{ method ->
+            call.arguments.forEachIndexed { index, argument ->
+                if (index == argumentIndex) return@forEachIndexed
                 val actual = resolveExpression(argument, call, callerOwner, callerSubstitutions)
-                    ?: return@candidates false
+                    ?: run {
+                        unresolvedDirectCandidate = true
+                        return@candidates null
+                    }
                 val expected = resolveType(parseType(method.parameters[index].typeAsString), info, substitutions)
-                    ?: return@candidates false
-                isAssignableTo(actual, expected.name, mutableSetOf())
+                    ?: run {
+                        unresolvedDirectCandidate = true
+                        return@candidates null
+                    }
+                if (!isAssignableTo(actual, expected.name, mutableSetOf())) return@candidates null
             }
-            if (!nonFunctionalArgumentsMatch) return@candidates false
             val functionalType = resolveType(
                 parseType(method.parameters[argumentIndex].typeAsString),
                 info,
                 substitutions
-            ) ?: return@candidates false
-            exactFunctionalParameterTypes(functionalType)?.size == lambdaArity
+            ) ?: run {
+                unresolvedDirectCandidate = true
+                return@candidates null
+            }
+            val parameterTypes = exactFunctionalParameterTypes(functionalType) ?: run {
+                unresolvedDirectCandidate = true
+                return@candidates null
+            }
+            method.takeIf { parameterTypes.size == lambdaArity }
         }
-        if (matching.size > 1) {
-            throw IllegalStateException(
-                "Ambiguous typed functional method '${call.nameAsString}/${call.arguments.size}' on ${receiver.name}"
-            )
+        if (unresolvedDirectCandidate || matching.size > 1) {
+            return ProjectDispatchResolution.Unknown(ownerKind == MethodOwnerKind.CLASS)
         }
         matching.singleOrNull()?.let { method ->
             val functionalType = resolveType(
                 parseType(method.parameters[argumentIndex].typeAsString),
                 info,
                 substitutions
-            ) ?: return null
-            return exactFunctionalParameterTypes(functionalType)?.getOrNull(lambdaParameterIndex)
+            ) ?: return ProjectDispatchResolution.Unknown(ownerKind == MethodOwnerKind.CLASS)
+            val parameterType = exactFunctionalParameterTypes(functionalType)
+                ?.getOrNull(lambdaParameterIndex)
+                ?: return ProjectDispatchResolution.Unknown(ownerKind == MethodOwnerKind.CLASS)
+            return ProjectDispatchResolution.Resolved(
+                ProjectFunctionalParameterBinding(info.qualifiedName, method, parameterType),
+                ownerKind
+            )
         }
-        return exactSingle(
-            resolvedSupers(info, substitutions).mapNotNull {
-                resolveProjectFunctionalParameter(
-                    it,
+        val nextVisited = visited + receiver.toString()
+        val inherited = directSuperBranches(info).map { branch ->
+            val superType = resolveDirectSuperType(branch.raw, info, substitutions)
+                ?: return@map ProjectDispatchResolution.Unknown(
+                    branch.ownerKind == MethodOwnerKind.CLASS
+                )
+            if (loadType(superType.name) == null) {
+                externalMethodDispatch(superType.name, call.nameAsString, branch.ownerKind)
+            } else {
+                resolveProjectFunctionalParameterDispatch(
+                    superType,
                     call,
                     argumentIndex,
                     lambdaParameterIndex,
                     callerOwner,
                     callerSubstitutions,
-                    visited
+                    nextVisited
                 )
-            },
-            "functional parameter '${call.nameAsString}/${call.arguments.size}' inherited by ${receiver.name}"
-        )
+            }
+        }
+        return collapseProjectDispatch(
+            inherited,
+            ::projectFunctionalBindingKey
+        ) { implementation, contract ->
+            concreteClassMethodSuppressesInterfaceMethod(
+                receiver.name,
+                implementation.declaration,
+                contract.declaration
+            )
+        }
+    }
+
+    private fun resolveProjectFunctionalParameterType(
+        receiver: TypeRef,
+        call: MethodCallExpr,
+        argumentIndex: Int,
+        lambdaParameterIndex: Int,
+        callerOwner: TypeInfo,
+        callerSubstitutions: Map<String, TypeRef>,
+        visited: Set<String>
+    ): TypeRef? {
+        if (receiver.toString() in visited) return null
+        val info = loadType(receiver.name) ?: return null
+        val substitutions = substitutions(info, receiver)
+        val methods = methods(info).filter {
+            it.nameAsString == call.nameAsString && it.parameters.size == call.arguments.size
+        }
+        val lambdaArity = (call.arguments[argumentIndex] as? LambdaExpr)?.parameters?.size ?: return null
+        val matchingTypes = methods.mapNotNull candidates@{ method ->
+            val nonFunctionalArgumentsMatch = call.arguments.withIndex()
+                .filter { it.index != argumentIndex }
+                .all { (index, argument) ->
+                    val actual = resolveExpression(argument, call, callerOwner, callerSubstitutions)
+                        ?: return@candidates null
+                    val expected = resolveType(parseType(method.parameters[index].typeAsString), info, substitutions)
+                        ?: return@candidates null
+                    isAssignableTo(actual, expected.name, mutableSetOf())
+                }
+            if (!nonFunctionalArgumentsMatch) return@candidates null
+            val functionalType = resolveType(
+                parseType(method.parameters[argumentIndex].typeAsString),
+                info,
+                substitutions
+            ) ?: return@candidates null
+            val parameters = exactFunctionalParameterTypes(functionalType) ?: return@candidates null
+            parameters.getOrNull(lambdaParameterIndex).takeIf { parameters.size == lambdaArity }
+        }.distinct()
+        if (matchingTypes.size > 1) {
+            throw IllegalStateException(
+                "Ambiguous functional parameter type '${call.nameAsString}/${call.arguments.size}' on ${receiver.name}"
+            )
+        }
+        matchingTypes.singleOrNull()?.let { return it }
+        val nextVisited = visited + receiver.toString()
+        val inheritedTypes = resolvedSupers(info, substitutions).mapNotNull { superType ->
+            resolveProjectFunctionalParameterType(
+                superType,
+                call,
+                argumentIndex,
+                lambdaParameterIndex,
+                callerOwner,
+                callerSubstitutions,
+                nextVisited
+            )
+        }.distinct()
+        if (inheritedTypes.size > 1) {
+            throw IllegalStateException(
+                "Ambiguous inherited functional parameter type '${call.nameAsString}/${call.arguments.size}' on ${receiver.name}"
+            )
+        }
+        return inheritedTypes.singleOrNull()
     }
 
     private fun exactFunctionalParameterTypes(type: TypeRef): List<TypeRef>? {
@@ -1518,6 +1846,107 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             "field '$name' inherited by ${receiver.name}"
         )
     }
+
+    private fun methodOwnerKind(info: TypeInfo): MethodOwnerKind = when (val declaration = info.declaration) {
+        is ClassOrInterfaceDeclaration ->
+            if (declaration.isInterface) MethodOwnerKind.INTERFACE else MethodOwnerKind.CLASS
+        is AnnotationDeclaration -> MethodOwnerKind.INTERFACE
+        else -> MethodOwnerKind.CLASS
+    }
+
+    private fun directSuperBranches(info: TypeInfo): List<DirectSuperBranch> {
+        val declaration = info.declaration
+        return when (declaration) {
+            is ClassOrInterfaceDeclaration -> {
+                if (declaration.isInterface) {
+                    info.directSupers.map { DirectSuperBranch(it, MethodOwnerKind.INTERFACE) }
+                } else {
+                    val explicitClassCount = declaration.extendedTypes.size
+                    val explicit = info.directSupers.mapIndexed { index, raw ->
+                        DirectSuperBranch(
+                            raw,
+                            if (index < explicitClassCount) MethodOwnerKind.CLASS else MethodOwnerKind.INTERFACE
+                        )
+                    }
+                    if (explicitClassCount == 0) {
+                        listOf(DirectSuperBranch(TypeRef("java.lang.Object"), MethodOwnerKind.CLASS)) + explicit
+                    } else {
+                        explicit
+                    }
+                }
+            }
+            is RecordDeclaration ->
+                listOf(DirectSuperBranch(TypeRef("java.lang.Record"), MethodOwnerKind.CLASS)) +
+                    info.directSupers.map { DirectSuperBranch(it, MethodOwnerKind.INTERFACE) }
+            is EnumDeclaration ->
+                listOf(DirectSuperBranch(TypeRef("java.lang.Enum"), MethodOwnerKind.CLASS)) +
+                    info.directSupers.map { DirectSuperBranch(it, MethodOwnerKind.INTERFACE) }
+            else -> info.directSupers.map { DirectSuperBranch(it, MethodOwnerKind.INTERFACE) }
+        }
+    }
+
+    private fun externalMethodDispatch(
+        qualifiedName: String,
+        methodName: String,
+        ownerKind: MethodOwnerKind
+    ): ProjectDispatchResolution<Nothing> {
+        val closedNames = knownClosedExternalMethodNames[qualifiedName]
+            ?: return ProjectDispatchResolution.Unknown(ownerKind == MethodOwnerKind.CLASS)
+        return if (methodName in closedNames) {
+            ProjectDispatchResolution.Unknown(ownerKind == MethodOwnerKind.CLASS)
+        } else {
+            ProjectDispatchResolution.Absent
+        }
+    }
+
+    private fun <T> collapseProjectDispatch(
+        resolutions: List<ProjectDispatchResolution<T>>,
+        key: (T) -> String,
+        classSuppressesInterface: (implementation: T, contract: T) -> Boolean
+    ): ProjectDispatchResolution<T> {
+        val resolved = buildList<ProjectDispatchResolution.Resolved<T>> {
+            resolutions.forEach { resolution ->
+                if (resolution is ProjectDispatchResolution.Resolved) add(resolution)
+            }
+        }
+        val unknown = resolutions.filterIsInstance<ProjectDispatchResolution.Unknown>()
+        if (unknown.isNotEmpty()) {
+            return ProjectDispatchResolution.Unknown(
+                unknown.any { it.mayDeclareConcreteClassMethod }
+            )
+        }
+        val classCandidates = resolved
+            .filter { it.ownerKind == MethodOwnerKind.CLASS }
+            .distinctBy { key(it.value) }
+        if (classCandidates.size > 1) {
+            return ProjectDispatchResolution.Unknown(mayDeclareConcreteClassMethod = true)
+        }
+        val interfaceCandidates = resolved
+            .filter { it.ownerKind == MethodOwnerKind.INTERFACE }
+            .distinctBy { key(it.value) }
+        classCandidates.singleOrNull()?.let { implementation ->
+            if (interfaceCandidates.all { contract ->
+                    classSuppressesInterface(implementation.value, contract.value)
+                }
+            ) {
+                return implementation
+            }
+            return ProjectDispatchResolution.Unknown(mayDeclareConcreteClassMethod = true)
+        }
+        return when (interfaceCandidates.size) {
+            0 -> ProjectDispatchResolution.Absent
+            1 -> interfaceCandidates.single()
+            else -> ProjectDispatchResolution.Unknown(mayDeclareConcreteClassMethod = false)
+        }
+    }
+
+    private fun projectMethodBindingKey(binding: ProjectMethodBinding): String =
+        "${binding.owner}#${binding.declaration.nameAsString}(" +
+            binding.declaration.parameters.joinToString(",") { it.typeAsString } + ")"
+
+    private fun projectFunctionalBindingKey(binding: ProjectFunctionalParameterBinding): String =
+        projectMethodBindingKey(ProjectMethodBinding(binding.owner, binding.declaration)) +
+            "->${binding.parameterType}"
 
     private fun resolvedSupers(info: TypeInfo, substitutions: Map<String, TypeRef>): List<TypeRef> =
         info.directSupers.mapNotNull { raw -> resolveDirectSuperType(raw, info, substitutions) }
@@ -2198,6 +2627,74 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             "java.util.List" to setOf("java.util.Collection", "java.lang.Iterable"),
             "java.util.Collection" to setOf("java.lang.Iterable")
         ) + ExactExternalTypeContracts.assignableTypes
+        private fun externalMethodNames(names: String): Set<String> =
+            names.trim().split(Regex("\\s+")).filter(String::isNotEmpty).toSet()
+
+        // Complete inherited non-private method-name surfaces (including static and
+        // package-private declarations) parsed from the exact target artifact
+        // neoforge-21.1.230.jar (SHA-256
+        // af1783b7997322eb00907509b567825e65ea9bd29b6d0b138d7d0a15c589894e).
+        // The matching moddev config pins net.neoforged:neoforge:21.1.230 and
+        // net.neoforged:neoform:1.21.1-20240808.144430. Only name absence is proof;
+        // a present name remains unresolved. Object.registerNatives is retained as
+        // a harmless private-name over-approximation.
+        private val knownClosedExternalMethodNames = mapOf(
+            "java.lang.Object" to externalMethodNames(
+                """
+                clone equals finalize getClass hashCode notify notifyAll registerNatives toString wait
+                """
+            ),
+            "net.minecraft.world.level.block.HorizontalDirectionalBlock" to externalMethodNames(
+                """
+                addLandingEffects addRunningEffects animateTick appendHoverText asBlock asItem attack
+                box builtInRegistryHolder byItem canBeHydrated canBeReplaced canConnectRedstone
+                canDropFromExplosion canEntityDestroy canHarvestBlock canStickTo canSupportCenter
+                canSupportRigidBlock canSurvive canSustainPlant clone codec collisionExtendsVertically
+                createBlockStateDefinition defaultBlockState defaultDestroyTime defaultMapColor destroy
+                dropFromExplosion dropResources entityInside equals fallOn finalize getAdjacentBlockPathType
+                getAnalogOutputSignal getAppearance getBeaconColorMultiplier getBedDirection getBlockPathType
+                getBlockSupportShape getBubbleColumnDirection getClass getCloneItemStack getCollisionShape
+                getDescriptionId getDestroyProgress getDirectSignal getDrops getEnchantPowerBonus getExpDrop
+                getExplosionResistance getFireSpreadSpeed getFlammability getFluidState getFriction getId
+                getInteractionShape getJumpFactor getLightBlock getLightEmission getLootTable getMapColor
+                getMaxHorizontalOffset getMaxVerticalOffset getMenuProvider getName getOcclusionShape
+                getPistonPushReaction getRenderShape getRespawnPosition getSeed getShadeBrightness getShape
+                getShapeForEachState getSignal getSoundType getSpeedFactor getStateAtViewpoint
+                getStateDefinition getStateForPlacement getToolModifiedState getVisualShape getWeakChanges
+                handlePrecipitation hasAnalogOutputSignal hasDynamicLightEmission hasDynamicShape hashCode
+                hidesNeighborFace ignitedByLava initializeClient isAir isBed isBurning
+                isCollisionShapeFullBlock isConduitFrame isEmpty isEnabled isExceptionForConnection
+                isFaceFull isFertile isFireSource isFlammable isLadder isOcclusionShapeFullBlock
+                isPathfindable isPortalFrame isPossibleToRespawnInThis isRandomlyTicking isScaffolding
+                isShapeFullBlock isSignalSource isSlimeBlock isStickyBlock
+                makesOpenTrapdoorAboveClimbable mirror neighborChanged notify notifyAll onBlockExploded
+                onBlockStateChange onCaughtFire onDestroyedByPlayer onDestroyedByPushReaction
+                onExplosionHit onNeighborChange onPlace onProjectileHit onRemove onTreeGrow playerDestroy
+                playerWillDestroy popExperience popResource popResourceFromFace propagatesSkylightDown
+                properties propertiesCodec pushEntitiesUp randomTick registerDefaultState registerNatives
+                requiredFeatures rotate setBedOccupied setPlacedBy shouldCheckWeakPower
+                shouldDisplayFluidOverlay shouldHideAdjacentFluidFace shouldRenderFace simpleCodec
+                skipRendering spawnAfterBreak spawnDestroyParticles stateById stepOn
+                supportsExternalFaceHiding tick toString triggerEvent tryDropExperience
+                updateEntityAfterFallOn updateFromNeighbourShapes updateIndirectNeighbourShapes
+                updateOrDestroy updateShape useItemOn useShapeForLightOcclusion useWithoutItem wait
+                wasExploded withPropertiesOf
+                """
+            ),
+            "net.minecraft.world.level.block.SimpleWaterloggedBlock" to externalMethodNames(
+                """
+                canPlaceLiquid clone equals finalize getClass getPickupSound hashCode notify notifyAll
+                pickupBlock placeLiquid registerNatives toString wait
+                """
+            ),
+            "net.minecraft.world.level.block.EntityBlock" to externalMethodNames(
+                """
+                clone equals finalize getClass getListener getTicker hashCode newBlockEntity notify
+                notifyAll registerNatives toString wait
+                """
+            )
+        )
+
         // Flattened from the mapped Minecraft 1.21.1 and NeoForge 21.1 source
         // hierarchy. A surface is closed only when it includes every inherited
         // public or protected instance method, so absence is valid override proof.

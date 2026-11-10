@@ -14,11 +14,12 @@ repositories {
 }
 
 val testKitRuntimeOnly by configurations.creating
+val javaParserVersion = "3.26.4"
 
 dependencies {
     // Java AST parsing
-    implementation("com.github.javaparser:javaparser-core:3.26.4")
-    implementation("com.github.javaparser:javaparser-symbol-solver-core:3.26.4")
+    implementation("com.github.javaparser:javaparser-core:$javaParserVersion")
+    implementation("com.github.javaparser:javaparser-symbol-solver-core:$javaParserVersion")
 
     // CLI framework
     implementation("com.github.ajalt.clikt:clikt:4.2.2")
@@ -41,6 +42,19 @@ dependencies {
     testImplementation("net.java.dev.jna:jna:5.13.0")
     testCompileOnly(gradleTestKit())
     testKitRuntimeOnly(gradleTestKit())
+}
+
+// TestKit contributes Gradle's older parser to compilation only. Keep the
+// parser API used to compile tests identical to the implementation/runtime API.
+sourceSets.named("test") {
+    val alignedClasspath = compileClasspath.filter { file ->
+        !file.name.startsWith("javaparser-core-") ||
+            file.name == "javaparser-core-$javaParserVersion.jar"
+    }
+    compileClasspath = files(
+        alignedClasspath.filter { it.name == "javaparser-core-$javaParserVersion.jar" },
+        alignedClasspath
+    )
 }
 
 application {

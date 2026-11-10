@@ -17,13 +17,40 @@ import com.github.javaparser.ast.stmt.IfStmt
 
 /** Proves a registry provider from the exact world that produced a serialized BlockEntity receiver. */
 internal object ExactReceiverProviderProvenance {
+    sealed interface Resolution {
+        data object None : Resolution
+        data class Unique(val expression: String) : Resolution
+        data class Unsafe(val reason: String) : Resolution
+    }
+
     fun providerExpression(
         call: MethodCallExpr,
         callable: MethodDeclaration,
         index: JavaProjectTypeIndex
-    ): String? {
-        val receiver = call.scope.orElse(null) ?: return null
+    ): String? = when (val resolution = resolve(call, callable, index)) {
+        Resolution.None -> null
+        is Resolution.Unique -> resolution.expression
+        is Resolution.Unsafe -> throw IllegalStateException(
+            "Unsafe receiver registry provider provenance for ${call.nameAsString}: ${resolution.reason}"
+        )
+    }
+
+    fun resolve(
+        call: MethodCallExpr,
+        callable: MethodDeclaration,
+        index: JavaProjectTypeIndex
+    ): Resolution {
+        when (val callback = ExactProjectCallbackProviderProvenance.resolve(call, callable, index)) {
+            is ExactProjectCallbackProviderProvenance.Resolution.Unique ->
+                return Resolution.Unique(callback.expression)
+            is ExactProjectCallbackProviderProvenance.Resolution.Unsafe ->
+                return Resolution.Unsafe(callback.reason)
+            ExactProjectCallbackProviderProvenance.Resolution.None -> Unit
+        }
+        val receiver = call.scope.orElse(null) ?: return Resolution.None
         return traceReceiver(receiver, call, callable, index, linkedSetOf())
+            ?.let(Resolution::Unique)
+            ?: Resolution.None
     }
 
     private fun traceReceiver(

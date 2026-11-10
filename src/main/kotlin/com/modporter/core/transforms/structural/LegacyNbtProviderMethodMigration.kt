@@ -241,11 +241,20 @@ internal class LegacyNbtProviderMethodMigration {
                 val namedTargets = targetsByName[call.nameAsString].orEmpty()
                 if (namedTargets.isEmpty()) return@calls
                 val callable = enclosingCallable(call) ?: return@calls
-                val receiverType = typeIndex.methodCallReceiverType(call) ?: return@calls
-                val matches = namedTargets.filter { target ->
+                val signatureMatches = namedTargets.filter { target ->
                     target.legacyArity == call.arguments.size &&
-                        typeIndex.isTypeAssignableTo(receiverType, target.owner) &&
                         typeIndex.argumentsMatchTypes(call, target.legacyParameterTypes)
+                }
+                if (signatureMatches.isEmpty()) return@calls
+                val receiverType = typeIndex.methodCallReceiverType(call)
+                if (receiverType == null) {
+                    if (allowContextProviderExpressions) {
+                        exactProviderExpressionAtCall(call, callable, typeIndex)
+                    }
+                    return@calls
+                }
+                val matches = signatureMatches.filter { target ->
+                    typeIndex.isTypeAssignableTo(receiverType, target.owner)
                 }
                 if (matches.isEmpty()) return@calls
                 val positions = matches.map { it.providerIndex }.distinct()
@@ -254,17 +263,18 @@ internal class LegacyNbtProviderMethodMigration {
                         "Ambiguous HolderLookup.Provider positions for typed call '$call': $positions"
                     )
                 }
-                val provider = targetDeclarations[callable as? MethodDeclaration]?.providerName
+                val contextualProvider = if (allowContextProviderExpressions) {
+                    exactProviderExpressionAtCall(
+                        call,
+                        callable,
+                        typeIndex
+                    )
+                } else {
+                    null
+                }
+                val provider = contextualProvider
+                    ?: targetDeclarations[callable as? MethodDeclaration]?.providerName
                     ?: existingProviderName(callable)
-                    ?: if (allowContextProviderExpressions) {
-                        exactProviderExpressionAtCall(
-                            call,
-                            callable,
-                            typeIndex
-                        )
-                    } else {
-                        null
-                    }
                     ?: return@calls
                 val index = positions.single()
                 val insertionOffset = argumentInsertionOffset(unit, call, index)
@@ -382,6 +392,15 @@ internal class LegacyNbtProviderMethodMigration {
                 else -> null
             }
         }, "direct")?.let { return it }
+        (callable as? MethodDeclaration)?.let { method ->
+            when (val receiver = ExactReceiverProviderProvenance.resolve(call, method, typeIndex)) {
+                ExactReceiverProviderProvenance.Resolution.None -> Unit
+                is ExactReceiverProviderProvenance.Resolution.Unique -> return receiver.expression
+                is ExactReceiverProviderProvenance.Resolution.Unsafe -> throw IllegalStateException(
+                    "Unsafe receiver registry provider provenance for ${call.nameAsString}: ${receiver.reason}"
+                )
+            }
+        }
         unique(parsedParameters.mapNotNull { (type, name) ->
             when (type) {
                 in LEVEL_TYPES -> "$name.registryAccess()"

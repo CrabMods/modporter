@@ -89,8 +89,9 @@ internal class ExactProjectProviderCallMigration {
     private data class ProjectCallSite(
         val file: Path,
         val call: MethodCallExpr,
-        val caller: Demand,
-        val callee: Demand
+        val caller: Demand?,
+        val callee: Demand,
+        val hasProviderArgument: Boolean
     )
 
     private data class DischargedTarget(
@@ -423,6 +424,13 @@ internal class ExactProjectProviderCallMigration {
                 continue
             }
             callSites.forEach { (file, call) ->
+                val hasProviderArgument = call.arguments.size == callee.legacyArity + 1
+                protectedFiles.add(file)
+                val siteKey = "$file:${call.range.orElseThrow()}:${callee.key}"
+                if (hasProviderArgument) {
+                    projectCallSites[siteKey] = ProjectCallSite(file, call, null, callee, true)
+                    return@forEach
+                }
                 val callable = enclosingCallable(call) ?: throw IllegalStateException(
                     "Call to ${callee.key.owner}.${callee.key.name} is outside a callable in $file"
                 )
@@ -433,9 +441,7 @@ internal class ExactProjectProviderCallMigration {
                     index
                 )
                 val caller = demandFor(file, callable, call, targetOwnedProvider)
-                protectedFiles.add(file)
-                val siteKey = "$file:${call.range.orElseThrow()}:${callee.key}"
-                projectCallSites[siteKey] = ProjectCallSite(file, call, caller, callee)
+                projectCallSites[siteKey] = ProjectCallSite(file, call, caller, callee, false)
                 if (!caller.hadProvider) queue.addLast(caller)
             }
         }
@@ -446,7 +452,10 @@ internal class ExactProjectProviderCallMigration {
             grew = false
             demands.values.filterNot { it.hadProvider || it.key in reachable }.forEach { demand ->
                 val incoming = projectCallSites.values.filter { it.callee.key == demand.key }
-                if (demand.canAddProvider && incoming.isNotEmpty() && incoming.all { it.caller.key in reachable }) {
+                if (demand.canAddProvider && incoming.isNotEmpty() && incoming.all { site ->
+                        site.hasProviderArgument || site.caller?.key?.let(reachable::contains) == true
+                    }
+                ) {
                     if (reachable.add(demand.key)) grew = true
                 }
             }
@@ -478,11 +487,15 @@ internal class ExactProjectProviderCallMigration {
             ensureLexical(site.file)
             replaceMethodReference(site)
         }
-        projectCallSites.values.filter { it.caller.key in reachable && it.callee.key in reachable }.forEach { site ->
+        val projectSitesNeedingArgument = projectCallSites.values.filter { site ->
+            !site.hasProviderArgument && site.caller?.key?.let(reachable::contains) == true &&
+                site.callee.key in reachable
+        }
+        projectSitesNeedingArgument.forEach { site ->
             ensureLexical(site.file)
             site.call.arguments.add(
                 site.callee.providerIndex,
-                StaticJavaParser.parseExpression(site.caller.providerName)
+                StaticJavaParser.parseExpression(checkNotNull(site.caller).providerName)
             )
         }
 
@@ -492,9 +505,7 @@ internal class ExactProjectProviderCallMigration {
         changedFiles += initialSites.filter { it.caller.key in reachable }.map { it.file }
         changedFiles += initialReferenceSites.filter { it.caller.key in reachable }.map { it.file }
         changedFiles += demands.values.filter { !it.hadProvider && it.key in reachable }.map { it.file }
-        changedFiles += projectCallSites.values
-            .filter { it.caller.key in reachable && it.callee.key in reachable }
-            .map { it.file }
+        changedFiles += projectSitesNeedingArgument.map { it.file }
         return writeChanges(changedFiles, unit = ::unit, dryRun = dryRun)
     }
 
@@ -1349,16 +1360,69 @@ internal class ExactProjectProviderCallMigration {
             if (!source.contains(callee.key.name)) return@forEach
             val sizeBefore = result.size
             unit(file).findAll(MethodCallExpr::class.java)
-                .filter { it.nameAsString == callee.key.name && it.arguments.size == callee.legacyArity }
+                .filter { it.nameAsString == callee.key.name }
                 .filter { call ->
                     val receiverType = index.methodCallReceiverType(call) ?: return@filter false
-                    index.isTypeAssignableTo(receiverType, callee.key.owner) &&
-                        index.argumentsMatchTypes(call, callee.key.parameterTypes)
+                    if (!index.isTypeAssignableTo(receiverType, callee.key.owner)) return@filter false
+                    if (call.arguments.size == callee.legacyArity) {
+                        return@filter index.argumentsMatchTypes(call, callee.key.parameterTypes)
+                    }
+                    isProvisionalProviderCall(call, callee, index)
                 }
                 .forEach { result += file to it }
             if (result.size == sizeBefore && file !in protectedFiles) releaseUnit(file)
         }
         return result
+    }
+
+    private fun isProvisionalProviderCall(
+        call: MethodCallExpr,
+        callee: Demand,
+        index: JavaProjectTypeIndex
+    ): Boolean {
+        if (call.arguments.size != callee.legacyArity + 1 ||
+            callee.providerIndex !in call.arguments.indices ||
+            !index.argumentsMatchTypesExcluding(call, callee.key.parameterTypes, callee.providerIndex) ||
+            !index.resolvesToUniqueProjectMethodSignatureIgnoringArgument(
+                call, callee.key.parameterTypes, callee.providerIndex
+            ) ||
+            index.projectMethodOwner(call, call.arguments.size) != null
+        ) return false
+        val argument = call.arguments[callee.providerIndex]
+        val type = index.expressionType(argument, call) ?: return false
+        if (type != HOLDER_LOOKUP_PROVIDER && type != REGISTRY_ACCESS &&
+            !index.isTypeAssignableTo(type, HOLDER_LOOKUP_PROVIDER)
+        ) return false
+        val callable = enclosingCallable(call) ?: return false
+        if (argument is NameExpr) {
+            var ancestor: com.github.javaparser.ast.Node? = call
+            while (ancestor != null && ancestor !== callable) {
+                if (ancestor is com.github.javaparser.ast.expr.LambdaExpr &&
+                    ancestor.parameters.any { it.nameAsString == argument.nameAsString }
+                ) return false
+                ancestor = ancestor.parentNode.orElse(null)
+            }
+            val useBegin = call.range.orElse(null)?.begin ?: return false
+            if (callable.findAll(AssignExpr::class.java).any { assignment ->
+                    val target = assignment.target as? NameExpr ?: return@any false
+                    target.nameAsString == argument.nameAsString &&
+                        assignment.range.orElse(null)?.begin?.let { it < useBegin } != false
+                }
+            ) return false
+            callable.parameters.singleOrNull { it.nameAsString == argument.nameAsString }?.let { parameter ->
+                return ExactNullabilityProof.parameterProvenNonNullAt(parameter, callable, call)
+            }
+            if (index.exactVisibleLocalInitializer(argument.nameAsString, call, callable) == null &&
+                !index.exactInstanceFieldIsFinal(call, argument.nameAsString)
+            ) return false
+        } else if (argument is FieldAccessExpr) {
+            if (argument.scope !is ThisExpr ||
+                !index.exactInstanceFieldIsFinal(call, argument.nameAsString)
+            ) return false
+        } else {
+            return false
+        }
+        return ExactNullabilityProof.expressionProvenNonNullAt(argument.toString(), callable, call)
     }
 
     private fun declaredOwner(method: MethodDeclaration, file: Path): String =

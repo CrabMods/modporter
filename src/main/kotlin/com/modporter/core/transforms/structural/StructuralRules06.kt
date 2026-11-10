@@ -405,6 +405,70 @@ internal fun StructuralRefactorPass.migrateProjectItemStackNbtMethods(
     fun ownerAt(offset: Int): String? =
         currentTypeBlocks().lastOrNull { offset in it.bodyStart..it.end }?.name
 
+    val directTypeImports = Regex(
+        """(?m)^\s*import\s+(?!static\b)([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)\s*;"""
+    ).findAll(executableCode)
+        .groupBy(
+            keySelector = { it.groupValues[1].substringAfterLast('.') },
+            valueTransform = { it.groupValues[1] }
+        )
+
+    fun normalizeContractType(type: String): String =
+        type.replace(Regex("""@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*"""), "")
+            .replace(Regex("""\bfinal\s+"""), "")
+            .replace(Regex("""\s+"""), "")
+            .replace(
+                Regex("""(?<![A-Za-z0-9_$])(?:[a-z_$][\w$]*\.)+([A-Z_$][\w$]*)"""),
+                "${'$'}1"
+            )
+
+    fun contractTypeIdentity(type: String, offset: Int): String {
+        val normalized = normalizeContractType(type)
+        val arraySuffix = Regex("""(?:\[\])+$""").find(normalized)?.value.orEmpty()
+        val elementType = normalized.removeSuffix(arraySuffix)
+        if (!Regex("""[A-Za-z_$][\w$]*""").matches(elementType)) return normalized
+
+        val enclosingTypes = currentTypeBlocks()
+            .filter { offset in it.bodyStart..it.end }
+            .mapTo(linkedSetOf()) { it.referenceName }
+        val lexicalCandidates = currentTypeBlocks()
+            .filter { block ->
+                if (block.name != elementType || !block.referenceName.contains('.')) return@filter false
+                block.referenceName.substringBeforeLast('.') in enclosingTypes
+            }
+            .groupBy { block -> block.referenceName.substringBeforeLast('.').count { it == '.' } }
+            .entries
+            .maxByOrNull { (depth, _) -> depth }
+            ?.value
+            .orEmpty()
+            .map { it.referenceName }
+            .distinct()
+        if (lexicalCandidates.size > 1) {
+            throw IllegalStateException(
+                "Ambiguous lexical Java type '$elementType' at offset $offset: $lexicalCandidates"
+            )
+        }
+        lexicalCandidates.singleOrNull()?.let { return it + arraySuffix }
+
+        val importedTypes = directTypeImports[elementType].orEmpty()
+            .map(::normalizeContractType)
+            .distinct()
+        if (importedTypes.size > 1) {
+            throw IllegalStateException(
+                "Ambiguous imported Java type '$elementType': $importedTypes"
+            )
+        }
+        return importedTypes.singleOrNull()?.plus(arraySuffix) ?: normalized
+    }
+
+    fun contractTypesMatch(actual: String, expected: String): Boolean =
+        actual == expected ||
+            (
+                Regex("""[A-Za-z_$][\w$]*""").matches(actual) &&
+                    Regex("""[A-Za-z_$][\w$]*""").matches(expected) &&
+                    javaInheritanceIndex.inherits(actual, setOf(expected))
+                )
+
     fun declaresOrInherits(
         owner: String,
         target: HolderLookupNbtMethod
@@ -447,19 +511,20 @@ internal fun StructuralRefactorPass.migrateProjectItemStackNbtMethods(
     fun declarationContract(
         owner: String?,
         methodName: String,
-        parameters: List<String>
+        parameters: List<String>,
+        offset: Int
     ): HolderLookupNbtMethod? {
         val candidates = candidateContracts(owner, methodName, parameters.size)
         if (candidates.isEmpty()) return null
         val declaredTypes = parameters.map { parameter ->
             parseJavaParameter(parameter)?.first
-                ?.let(::normalizeJavaTypeForContract)
+                ?.let { contractTypeIdentity(it, offset) }
                 ?: return null
         }
         val typed = candidates.filter { it.legacyParameterTypes != null }
         val exact = mostSpecificContracts(owner, typed.filter { target ->
             target.legacyParameterTypes
-                ?.map(::normalizeJavaTypeForContract) == declaredTypes
+                ?.map { contractTypeIdentity(it, offset) } == declaredTypes
         })
         if (exact.size > 1) {
             throw IllegalStateException(
@@ -508,29 +573,24 @@ internal fun StructuralRefactorPass.migrateProjectItemStackNbtMethods(
         if (typed.isNotEmpty()) {
             val resolvedTypes = arguments.map { argument ->
                 argumentType(argument.trim(), offset)
-                    ?.let(::normalizeJavaTypeForContract)
+                    ?.let { contractTypeIdentity(it, offset) }
             }
-            val exact = mostSpecificContracts(owner, typed.filter { target ->
+            val matchStates = typed.associateWith { target ->
                 val expected = target.legacyParameterTypes.orEmpty()
-                    .map(::normalizeJavaTypeForContract)
-                expected.indices.all { index ->
+                    .map { contractTypeIdentity(it, offset) }
+                expected.indices.map { index ->
                     val actual = resolvedTypes[index]
-                    if (actual != null) {
-                        val actualSimple = actual.substringAfterLast('.')
-                        val expectedSimple = expected[index].substringAfterLast('.')
-                        actualSimple == expectedSimple ||
-                            javaInheritanceIndex.inherits(
-                                actualSimple,
-                                setOf(expectedSimple)
-                            )
-                    } else if (index == 0 &&
-                        expected[index].substringAfterLast('.') == "CompoundTag"
-                    ) {
-                        looksLikeTagArgument(arguments[index])
-                    } else {
-                        false
+                    when {
+                        actual != null -> contractTypesMatch(actual, expected[index])
+                        index == 0 &&
+                            expected[index].substringAfterLast('.') == "CompoundTag" &&
+                            looksLikeTagArgument(arguments[index]) -> true
+                        else -> null
                     }
                 }
+            }
+            val exact = mostSpecificContracts(owner, typed.filter { target ->
+                matchStates.getValue(target).all { it == true }
             })
             if (exact.size > 1) {
                 throw IllegalStateException(
@@ -541,7 +601,8 @@ internal fun StructuralRefactorPass.migrateProjectItemStackNbtMethods(
             exact.singleOrNull()?.let { return it }
             val unambiguous = typed.singleOrNull()
             if (unambiguous != null &&
-                !unambiguous.requiresTypedCallResolution
+                !unambiguous.requiresTypedCallResolution &&
+                matchStates.getValue(unambiguous).none { it == false }
             ) {
                 return unambiguous
             }
@@ -575,7 +636,7 @@ internal fun StructuralRefactorPass.migrateProjectItemStackNbtMethods(
         val params = match.groupValues[3].trim().let { parameterText ->
             if (parameterText.isBlank()) emptyList() else splitTopLevelJavaArgs(parameterText)
         }
-        val contract = declarationContract(owner, methodName, params)
+        val contract = declarationContract(owner, methodName, params, match.range.last)
         if (contract == null) {
             return@replaceExecutableRegex match.value
         }
