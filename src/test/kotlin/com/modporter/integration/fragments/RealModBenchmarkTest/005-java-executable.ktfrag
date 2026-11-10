@@ -1,4 +1,77 @@
 
+    private fun javaExecutable(): String {
+        val javaHome = System.getProperty("java.home")?.takeIf { it.isNotBlank() }
+        val executable = if (System.getProperty("os.name").lowercase().contains("win")) "java.exe" else "java"
+        val javaPath = javaHome?.let { Path.of(it, "bin", executable) }
+        return if (javaPath != null && javaPath.exists()) javaPath.toString() else "java"
+    }
+
+    private val resolvedJava21Executable: String by lazy {
+        val executable = if (System.getProperty("os.name").lowercase().contains("win")) "java.exe" else "java"
+        val directOverride = System.getenv("MODPORTER_BENCHMARK_JAVA21")
+            ?.takeIf { it.isNotBlank() }
+            ?.let { Path.of(it).toAbsolutePath().normalize() }
+
+        val homeOverride = listOf("MODPORTER_BENCHMARK_JAVA21_HOME", "JAVA21_HOME", "JDK21_HOME")
+            .asSequence()
+            .mapNotNull { System.getenv(it)?.takeIf { value -> value.isNotBlank() } }
+            .map { Path.of(it).toAbsolutePath().normalize() }
+            .map { it.resolve("bin").resolve(executable) }
+            .firstOrNull { it.exists() }
+
+        val discoveredCandidates = sequenceOf(
+            Path.of("C:/Program Files/Java"),
+            Path.of("C:/Program Files/Eclipse Adoptium"),
+            Path.of(System.getProperty("user.home"), ".jdks")
+        ).flatMap { root ->
+            val files = root.toFile().listFiles { file -> file.isDirectory && file.name.contains("21") }.orEmpty()
+            files.asSequence()
+        }.map { it.toPath().resolve("bin").resolve(executable) }
+
+        val candidates = sequenceOf(directOverride, homeOverride)
+            .filterNotNull()
+            .plus(discoveredCandidates)
+            .filter { it.exists() }
+            .distinct()
+
+        candidates.firstOrNull { isJava21(it) }?.toString()
+            ?: error(
+                "Strict real-mod benchmarks require Java 21. Set " +
+                    "MODPORTER_BENCHMARK_JAVA21 or MODPORTER_BENCHMARK_JAVA21_HOME."
+            )
+    }
+
+    private fun java21Executable(): String = resolvedJava21Executable
+
+    private fun isJava21(executable: Path): Boolean {
+        val process = ProcessBuilder(executable.toString(), "-XshowSettings:properties", "-version")
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        if (!process.waitFor(15, TimeUnit.SECONDS)) {
+            process.destroyForcibly()
+            return false
+        }
+        return Regex("(?m)^\\s*java\\.specification\\.version\\s*=\\s*21\\s*$").containsMatchIn(output)
+    }
+
+    private fun locateMinecraftServerJar(): Path? {
+        val override = System.getenv("MODPORTER_BENCHMARK_MINECRAFT_SERVER_JAR")
+            ?.takeIf { it.isNotBlank() }
+            ?.let { Path.of(it).toAbsolutePath().normalize() }
+        if (override != null && override.exists()) return override
+
+        val userHome = Path.of(System.getProperty("user.home"))
+        val artifact = userHome.resolve(".gradle/caches/neoformruntime/artifacts/minecraft_1.21.1_server.jar")
+        return artifact.takeIf { it.exists() }
+    }
+
+    private fun serverReachedReadyState(logFile: Path): Boolean {
+        if (!logFile.exists()) return false
+        val log = StrictUtf8RuntimeLog.asciiSearchText(logFile)
+        return log.contains("Done (") || log.contains("For help, type")
+    }
+
     private fun auditRuntimeLog(
         logFile: Path,
         failOnWarnings: Boolean,
@@ -1122,73 +1195,4 @@
             }
         }
         return jars.toList()
-    }
-
-    private fun jarContainsEntryNamed(jar: Path, fileName: String): Boolean =
-        runCatching {
-            ZipFile(jar.toFile()).use { zip ->
-                val entries = zip.entries()
-                while (entries.hasMoreElements()) {
-                    val entry = entries.nextElement()
-                    if (!entry.isDirectory && entry.name.substringAfterLast('/') == fileName) return true
-                }
-            }
-            false
-        }.getOrDefault(false)
-
-    private fun modIdFromJar(jar: Path): String? =
-        readJarEntryText(jar, "META-INF/neoforge.mods.toml")?.let { parseTomlModId(it) }
-            ?: readJarEntryText(jar, "META-INF/mods.toml")?.let { parseTomlModId(it) }
-            ?: readJarEntryText(jar, "fabric.mod.json")?.let { parseJsonModId(it) }
-
-    private fun readJarEntryText(jar: Path, entryName: String): String? =
-        runCatching {
-            ZipFile(jar.toFile()).use { zip ->
-                val entry = zip.getEntry(entryName) ?: return null
-                zip.getInputStream(entry).bufferedReader().use { it.readText() }
-            }
-        }.getOrNull()
-
-    private fun parseTomlModId(text: String): String? =
-        Regex("""(?m)^\s*modId\s*=\s*["']([^"']+)["']""")
-            .find(text)
-            ?.groupValues
-            ?.get(1)
-
-    private fun parseJsonModId(text: String): String? =
-        Regex(""""id"\s*:\s*"([^"]+)"""")
-            .find(text)
-            ?.groupValues
-            ?.get(1)
-
-    private fun projectContainsFileNamed(projectDir: Path, fileName: String): Boolean {
-        if (!projectDir.exists()) return false
-        val roots = listOf(
-            projectDir.resolve("src/main/resources"),
-            projectDir.resolve("src/generated/resources")
-        ).filter { it.exists() }
-        for (root in roots) {
-            Files.walk(root).use { files ->
-                if (files.anyMatch { Files.isRegularFile(it) && it.fileName.toString() == fileName }) return true
-            }
-        }
-        return false
-    }
-
-    private fun projectContainsText(projectDir: Path, text: String): Boolean {
-        if (!projectDir.exists()) return false
-        val roots = listOf(
-            projectDir.resolve("src/main/java"),
-            projectDir.resolve("src/main/kotlin"),
-            projectDir.resolve("src/main/resources"),
-            projectDir.resolve("src/generated/resources")
-        ).filter { it.exists() }
-        for (root in roots) {
-            Files.walk(root).use { files ->
-                if (files.anyMatch { Files.isRegularFile(it) && runCatching { it.readText().contains(text) }.getOrDefault(false) }) {
-                    return true
-                }
-            }
-        }
-        return false
     }

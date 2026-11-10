@@ -1,4 +1,73 @@
 
+    private fun jarContainsEntryNamed(jar: Path, fileName: String): Boolean =
+        runCatching {
+            ZipFile(jar.toFile()).use { zip ->
+                val entries = zip.entries()
+                while (entries.hasMoreElements()) {
+                    val entry = entries.nextElement()
+                    if (!entry.isDirectory && entry.name.substringAfterLast('/') == fileName) return true
+                }
+            }
+            false
+        }.getOrDefault(false)
+
+    private fun modIdFromJar(jar: Path): String? =
+        readJarEntryText(jar, "META-INF/neoforge.mods.toml")?.let { parseTomlModId(it) }
+            ?: readJarEntryText(jar, "META-INF/mods.toml")?.let { parseTomlModId(it) }
+            ?: readJarEntryText(jar, "fabric.mod.json")?.let { parseJsonModId(it) }
+
+    private fun readJarEntryText(jar: Path, entryName: String): String? =
+        runCatching {
+            ZipFile(jar.toFile()).use { zip ->
+                val entry = zip.getEntry(entryName) ?: return null
+                zip.getInputStream(entry).bufferedReader().use { it.readText() }
+            }
+        }.getOrNull()
+
+    private fun parseTomlModId(text: String): String? =
+        Regex("""(?m)^\s*modId\s*=\s*["']([^"']+)["']""")
+            .find(text)
+            ?.groupValues
+            ?.get(1)
+
+    private fun parseJsonModId(text: String): String? =
+        Regex(""""id"\s*:\s*"([^"]+)"""")
+            .find(text)
+            ?.groupValues
+            ?.get(1)
+
+    private fun projectContainsFileNamed(projectDir: Path, fileName: String): Boolean {
+        if (!projectDir.exists()) return false
+        val roots = listOf(
+            projectDir.resolve("src/main/resources"),
+            projectDir.resolve("src/generated/resources")
+        ).filter { it.exists() }
+        for (root in roots) {
+            Files.walk(root).use { files ->
+                if (files.anyMatch { Files.isRegularFile(it) && it.fileName.toString() == fileName }) return true
+            }
+        }
+        return false
+    }
+
+    private fun projectContainsText(projectDir: Path, text: String): Boolean {
+        if (!projectDir.exists()) return false
+        val roots = listOf(
+            projectDir.resolve("src/main/java"),
+            projectDir.resolve("src/main/kotlin"),
+            projectDir.resolve("src/main/resources"),
+            projectDir.resolve("src/generated/resources")
+        ).filter { it.exists() }
+        for (root in roots) {
+            Files.walk(root).use { files ->
+                if (files.anyMatch { Files.isRegularFile(it) && runCatching { it.readText().contains(text) }.getOrDefault(false) }) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
     private fun sourceDeclaresSoundEvent(projectDir: Path, namespace: String, soundPath: String): Boolean {
         if (!projectDir.exists()) return false
         val roots = listOf(
@@ -673,6 +742,7 @@
             "manualInterventionRequired" to
                 (unresolvedReviewSignalCount() + (result?.totalSkipped ?: 0) + (result?.totalErrors ?: 0) > 0),
             "strictReviewValidation" to strictReviewValidation.toTelemetryMap(),
+            "nativeCapabilityValidation" to nativeCapabilityValidation.toTelemetryMap(),
             "allowedRuntimeIssueClasses" to allowedRuntimeIssueClasses(),
             "passes" to passRows,
             "checks" to linkedMapOf(
@@ -946,7 +1016,9 @@
                 validatedCount = 0,
                 unresolvedCount = 0,
                 state = "NOT_EVALUATED"
-            )
+            ),
+        val nativeCapabilityValidation: LegacyCapabilityNativeValidation =
+            LegacyCapabilityNativeValidation.notEvaluated()
     )
 
     data class DataGenerationOutcome(
@@ -982,138 +1054,3 @@
         val index = note.indexOf(marker)
         return if (index >= 0) note.substring(index) else null
     }
-
-    data class RuntimeLogPolicy(
-        val readyChecks: List<RuntimeMarkerCheck>,
-        val shutdownChecks: List<RuntimeMarkerCheck> = emptyList(),
-        val stopCommand: String? = null,
-        val terminateAfterReady: Boolean = false,
-        val terminateAfterShutdownChecks: Boolean = false,
-        val requireZeroExit: Boolean = true,
-        val failOnWarnings: Boolean = false,
-        val progressChecks: List<RuntimeMarkerCheck> = emptyList(),
-        val progressLabel: String = "progress",
-        val progressGraceSeconds: Long? = null
-    ) {
-        fun ready(logFile: Path): Boolean = missingReadyChecks(logFile).isEmpty()
-
-        fun progress(logFile: Path): Boolean =
-            progressChecks.isNotEmpty() && missingChecks(logFile, progressChecks).isEmpty()
-
-        fun shutdown(logFile: Path): Boolean =
-            shutdownChecks.isNotEmpty() && missingShutdownChecks(logFile).isEmpty()
-
-        fun missingReadyChecks(logFile: Path): List<String> =
-            missingChecks(logFile, readyChecks)
-
-        fun missingShutdownChecks(logFile: Path): List<String> =
-            missingChecks(logFile, shutdownChecks)
-
-        private fun missingChecks(logFile: Path, checks: List<RuntimeMarkerCheck>): List<String> {
-            if (checks.isEmpty()) return emptyList()
-            if (!logFile.exists()) return checks.map { it.label }
-            val log = StrictUtf8RuntimeLog.asciiSearchText(logFile)
-            return checks.filterNot { check -> check.patterns.any { it.containsMatchIn(log) } }
-                .map { it.label }
-        }
-
-        companion object {
-            fun serverReady(failOnWarnings: Boolean): RuntimeLogPolicy =
-                RuntimeLogPolicy(
-                    readyChecks = listOf(
-                        RuntimeMarkerCheck("dedicated server ready", listOf(Regex("""Done \("""))),
-                        RuntimeMarkerCheck("command prompt ready", listOf(Regex("""For help, type "help"""")))
-                    ),
-                    terminateAfterReady = true,
-                    requireZeroExit = false,
-                    failOnWarnings = failOnWarnings
-                )
-
-            fun standaloneServerStop(failOnWarnings: Boolean): RuntimeLogPolicy =
-                RuntimeLogPolicy(
-                    readyChecks = listOf(
-                        RuntimeMarkerCheck("dedicated server ready", listOf(Regex("""Done \("""))),
-                        RuntimeMarkerCheck("command prompt ready", listOf(Regex("""For help, type "help"""")))
-                    ),
-                    shutdownChecks = listOf(
-                        RuntimeMarkerCheck("server stopped", listOf(Regex("""Stopping server|ThreadedAnvilChunkStorage.*All chunks are saved|All chunks are saved|BUILD SUCCESSFUL""")))
-                    ),
-                    stopCommand = "stop",
-                    requireZeroExit = false,
-                    failOnWarnings = failOnWarnings
-                )
-
-            fun gameTestServer(failOnWarnings: Boolean): RuntimeLogPolicy =
-                RuntimeLogPolicy(
-                    readyChecks = listOf(
-                        RuntimeMarkerCheck("game test server ran", listOf(Regex("""(?:GAME TESTS COMPLETE|All \d+ required tests passed|Done \()""")))
-                    ),
-                    shutdownChecks = listOf(
-                        RuntimeMarkerCheck("server stopped", listOf(Regex("""Stopping server|BUILD SUCCESSFUL""")))
-                    ),
-                    terminateAfterShutdownChecks = true,
-                    requireZeroExit = false,
-                    failOnWarnings = failOnWarnings
-                )
-
-            fun clientStart(failOnWarnings: Boolean): RuntimeLogPolicy =
-                RuntimeLogPolicy(
-                    readyChecks = clientStartChecks,
-                    terminateAfterReady = true,
-                    requireZeroExit = false,
-                    failOnWarnings = failOnWarnings
-                )
-
-            fun clientWorld(
-                failOnWarnings: Boolean,
-                progressGraceSeconds: Long,
-                requireStrictSpawnReceipt: Boolean = false,
-                requireClientWorldCoordinator: Boolean = false
-            ): RuntimeLogPolicy =
-                RuntimeLogPolicy(
-                    readyChecks = clientStartChecks + listOf(
-                        RuntimeMarkerCheck("integrated server started", listOf(Regex("""Starting integrated minecraft server version"""))),
-                        RuntimeMarkerCheck("spawn prepared", listOf(Regex("""Time elapsed: \d+ ms"""))),
-                        RuntimeMarkerCheck("player joined loaded world", listOf(Regex("""logged in with entity id"""))),
-                        RuntimeMarkerCheck("creative tab browse complete", listOf(Regex("""\[ModPorterBenchmark] Creative tab browse complete:""")))
-                    ) + if (requireStrictSpawnReceipt) {
-                        listOf(
-                            RuntimeMarkerCheck(
-                                "strict spawn receipt sealed",
-                                listOf(Regex("""\[ModPorterStrictSpawn] Receipt sealed:"""))
-                            )
-                        )
-                    } else {
-                        emptyList()
-                    } + if (requireClientWorldCoordinator) {
-                        listOf(
-                            RuntimeMarkerCheck(
-                                "strict station-map receipt sealed",
-                                listOf(Regex("""\[ModPorterStrictStation] Receipt sealed:"""))
-                            ),
-                            RuntimeMarkerCheck(
-                                "client-world coordinator sealed",
-                                listOf(Regex("""\[ModPorterClientWorld] Coordinator sealed:"""))
-                            )
-                        )
-                    } else {
-                        emptyList()
-                    },
-                    terminateAfterReady =
-                        !requireStrictSpawnReceipt && !requireClientWorldCoordinator,
-                    requireZeroExit =
-                        requireStrictSpawnReceipt || requireClientWorldCoordinator,
-                    failOnWarnings = failOnWarnings,
-                    progressChecks = clientStartChecks,
-                    progressLabel = "client start",
-                    progressGraceSeconds = progressGraceSeconds
-                )
-        }
-    }
-
-    data class RuntimeMarkerCheck(
-        val label: String,
-        val patterns: List<Regex>
-    )
-
-    enum class Status { PASS, FAIL, SKIP }

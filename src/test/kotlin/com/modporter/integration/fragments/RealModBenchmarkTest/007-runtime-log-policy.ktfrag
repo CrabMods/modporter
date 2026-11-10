@@ -1,3 +1,157 @@
+
+    data class RuntimeLogPolicy(
+        val readyChecks: List<RuntimeMarkerCheck>,
+        val shutdownChecks: List<RuntimeMarkerCheck> = emptyList(),
+        val stopCommand: String? = null,
+        val terminateAfterReady: Boolean = false,
+        val terminateAfterShutdownChecks: Boolean = false,
+        val requireZeroExit: Boolean = true,
+        val failOnWarnings: Boolean = false,
+        val progressChecks: List<RuntimeMarkerCheck> = emptyList(),
+        val progressLabel: String = "progress",
+        val progressGraceSeconds: Long? = null
+    ) {
+        fun ready(logFile: Path): Boolean = missingReadyChecks(logFile).isEmpty()
+
+        fun progress(logFile: Path): Boolean =
+            progressChecks.isNotEmpty() && missingChecks(logFile, progressChecks).isEmpty()
+
+        fun shutdown(logFile: Path): Boolean =
+            shutdownChecks.isNotEmpty() && missingShutdownChecks(logFile).isEmpty()
+
+        fun missingReadyChecks(logFile: Path): List<String> =
+            missingChecks(logFile, readyChecks)
+
+        fun missingShutdownChecks(logFile: Path): List<String> =
+            missingChecks(logFile, shutdownChecks)
+
+        private fun missingChecks(logFile: Path, checks: List<RuntimeMarkerCheck>): List<String> {
+            if (checks.isEmpty()) return emptyList()
+            if (!logFile.exists()) return checks.map { it.label }
+            val log = StrictUtf8RuntimeLog.asciiSearchText(logFile)
+            return checks.filterNot { check -> check.patterns.any { it.containsMatchIn(log) } }
+                .map { it.label }
+        }
+
+        companion object {
+            fun serverReady(failOnWarnings: Boolean): RuntimeLogPolicy =
+                RuntimeLogPolicy(
+                    readyChecks = listOf(
+                        RuntimeMarkerCheck("dedicated server ready", listOf(Regex("""Done \("""))),
+                        RuntimeMarkerCheck("command prompt ready", listOf(Regex("""For help, type "help"""")))
+                    ),
+                    terminateAfterReady = true,
+                    requireZeroExit = false,
+                    failOnWarnings = failOnWarnings
+                )
+
+            fun standaloneServerStop(failOnWarnings: Boolean): RuntimeLogPolicy =
+                RuntimeLogPolicy(
+                    readyChecks = listOf(
+                        RuntimeMarkerCheck("dedicated server ready", listOf(Regex("""Done \("""))),
+                        RuntimeMarkerCheck("command prompt ready", listOf(Regex("""For help, type "help"""")))
+                    ),
+                    shutdownChecks = listOf(
+                        RuntimeMarkerCheck("server stopped", listOf(Regex("""Stopping server|ThreadedAnvilChunkStorage.*All chunks are saved|All chunks are saved|BUILD SUCCESSFUL""")))
+                    ),
+                    stopCommand = "stop",
+                    requireZeroExit = false,
+                    failOnWarnings = failOnWarnings
+                )
+
+            fun gameTestServer(failOnWarnings: Boolean): RuntimeLogPolicy =
+                RuntimeLogPolicy(
+                    readyChecks = listOf(
+                        RuntimeMarkerCheck("game test server ran", listOf(Regex("""(?:GAME TESTS COMPLETE|All \d+ required tests passed|Done \()""")))
+                    ),
+                    shutdownChecks = listOf(
+                        RuntimeMarkerCheck("server stopped", listOf(Regex("""Stopping server|BUILD SUCCESSFUL""")))
+                    ),
+                    terminateAfterShutdownChecks = true,
+                    requireZeroExit = false,
+                    failOnWarnings = failOnWarnings
+                )
+
+            fun clientStart(failOnWarnings: Boolean): RuntimeLogPolicy =
+                RuntimeLogPolicy(
+                    readyChecks = clientStartChecks,
+                    terminateAfterReady = true,
+                    requireZeroExit = false,
+                    failOnWarnings = failOnWarnings
+                )
+
+            fun clientWorld(
+                failOnWarnings: Boolean,
+                progressGraceSeconds: Long,
+                requireStrictSpawnReceipt: Boolean = false,
+                requireClientWorldCoordinator: Boolean = false,
+                requireNativeCapabilityReceipt: Boolean = false
+            ): RuntimeLogPolicy =
+                RuntimeLogPolicy(
+                    readyChecks = clientStartChecks + listOf(
+                        RuntimeMarkerCheck("integrated server started", listOf(Regex("""Starting integrated minecraft server version"""))),
+                        RuntimeMarkerCheck("spawn prepared", listOf(Regex("""Time elapsed: \d+ ms"""))),
+                        RuntimeMarkerCheck("player joined loaded world", listOf(Regex("""logged in with entity id"""))),
+                        RuntimeMarkerCheck("creative tab browse complete", listOf(Regex("""\[ModPorterBenchmark] Creative tab browse complete:""")))
+                    ) + if (requireStrictSpawnReceipt) {
+                        listOf(
+                            RuntimeMarkerCheck(
+                                "strict spawn receipt sealed",
+                                listOf(Regex("""\[ModPorterStrictSpawn] Receipt sealed:"""))
+                            )
+                        )
+                    } else {
+                        emptyList()
+                    } + if (requireClientWorldCoordinator) {
+                        listOf(
+                            RuntimeMarkerCheck(
+                                "strict station-map receipt sealed",
+                                listOf(Regex("""\[ModPorterStrictStation] Receipt sealed:"""))
+                            ),
+                            RuntimeMarkerCheck(
+                                "client-world coordinator sealed",
+                                listOf(Regex("""\[ModPorterClientWorld] Coordinator sealed:"""))
+                            )
+                        )
+                    } else {
+                        emptyList()
+                    } + if (requireNativeCapabilityReceipt) {
+                        listOf(
+                            RuntimeMarkerCheck(
+                                "native retained-capability receipt sealed",
+                                listOf(
+                                    Regex(
+                                        """\[ModPorterCapabilityProbe] Receipt sealed path=.* """ +
+                                            """sha256=[0-9a-f]{64} traceSha256=[0-9a-f]{64} status=PASS"""
+                                    )
+                                )
+                            )
+                        )
+                    } else {
+                        emptyList()
+                    },
+                    terminateAfterReady =
+                        !requireStrictSpawnReceipt &&
+                            !requireClientWorldCoordinator &&
+                            !requireNativeCapabilityReceipt,
+                    requireZeroExit =
+                        requireStrictSpawnReceipt ||
+                            requireClientWorldCoordinator ||
+                            requireNativeCapabilityReceipt,
+                    failOnWarnings = failOnWarnings,
+                    progressChecks = clientStartChecks,
+                    progressLabel = "client start",
+                    progressGraceSeconds = progressGraceSeconds
+                )
+        }
+    }
+
+    data class RuntimeMarkerCheck(
+        val label: String,
+        val patterns: List<Regex>
+    )
+
+    enum class Status { PASS, FAIL, SKIP }
     enum class CheckStatus { PASS, FAIL, NOT_RUN }
 
     companion object {
@@ -370,6 +524,20 @@
                             System.out.println("[ModPorterBenchmark] Waiting for strict spawn receipt before client exit");
                         }
                         return;
+                    }
+                    if (Boolean.getBoolean("modporter.capabilityProbe.enabled")) {
+                        if (!Boolean.getBoolean("modporter.capabilityProbe.completed")) {
+                            if (!strictSpawnWaitLogged) {
+                                strictSpawnWaitLogged = true;
+                                System.out.println("[ModPorterBenchmark] Waiting for native capability receipt before client exit");
+                            }
+                            return;
+                        }
+                        if (!Boolean.getBoolean("modporter.capabilityProbe.passed")) {
+                            throw new IllegalStateException(
+                                "Native retained-capability runtime probe completed without PASS"
+                            );
+                        }
                     }
                     minecraft.stop();
                 }

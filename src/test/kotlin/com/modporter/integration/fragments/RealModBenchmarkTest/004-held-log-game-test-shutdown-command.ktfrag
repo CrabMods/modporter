@@ -839,7 +839,8 @@
 
     private fun stageClientWorldHarness(
         projectDir: Path,
-        strictReviewRequest: StrictReviewRuntimeRequest? = null
+        strictReviewRequest: StrictReviewRuntimeRequest? = null,
+        nativeCapabilityRequest: LegacyCapabilityNativeRuntimeRequest? = null
     ): List<String> {
         val issues = mutableListOf<String>()
         val harnessPackage = benchmarkHarnessPackage(projectDir)
@@ -854,6 +855,30 @@
             if (strictReviewRequest.stationMapRequired) {
                 sourceDir.resolve(StrictSpawnValidationContract.STATION_HARNESS_FILE)
                     .writeText(CreateStationMapRuntimeHarnessSource.source(harnessPackage, modId))
+            }
+        }
+        if (nativeCapabilityRequest != null) {
+            if (nativeCapabilityRequest.harnessPackage != harnessPackage) {
+                issues.add(
+                    "Native capability harness package differs from benchmark package: " +
+                        "${nativeCapabilityRequest.harnessPackage} != $harnessPackage"
+                )
+            } else {
+                val nativeSource = LegacyCapabilityNativeRuntimeHarnessSource.source(
+                    harnessPackage,
+                    nativeCapabilityRequest.compatPackage
+                )
+                val nativeHarness = sourceDir.resolve(
+                    LegacyCapabilityNativeRuntimeHarnessSource.FILE_NAME
+                )
+                nativeHarness.writeText(nativeSource)
+                val stagedHash = sha256File(nativeHarness)
+                if (stagedHash != nativeCapabilityRequest.harnessSourceSha256) {
+                    issues.add(
+                        "Native capability harness source hash changed while staging: " +
+                            "$stagedHash != ${nativeCapabilityRequest.harnessSourceSha256}"
+                    )
+                }
             }
         }
 
@@ -927,6 +952,53 @@
                         )
                     )
                 }
+            }
+            if (nativeCapabilityRequest != null) {
+                add(systemProperty("modporter.capabilityProbe.enabled", "true"))
+                add(systemProperty("modporter.capabilityProbe.completed", "false"))
+                add(systemProperty("modporter.capabilityProbe.passed", "false"))
+                add(
+                    systemProperty(
+                        "modporter.capabilityProbe.profileId",
+                        LegacyCapabilityNativeRuntimeHarnessSource.PROFILE_ID
+                    )
+                )
+                add(
+                    systemProperty(
+                        "modporter.capabilityProbe.validationSessionId",
+                        nativeCapabilityRequest.validationSessionId
+                    )
+                )
+                add(
+                    systemProperty(
+                        "modporter.capabilityProbe.evidenceDir",
+                        nativeCapabilityRequest.evidenceDir.toString()
+                    )
+                )
+                add(
+                    systemProperty(
+                        "modporter.capabilityProbe.receipt",
+                        nativeCapabilityRequest.receiptPath.toString()
+                    )
+                )
+                add(
+                    systemProperty(
+                        "modporter.capabilityProbe.trace",
+                        nativeCapabilityRequest.tracePath.toString()
+                    )
+                )
+                add(
+                    systemProperty(
+                        "modporter.capabilityProbe.mixinConfigResource",
+                        nativeCapabilityRequest.mixinConfigResource
+                    )
+                )
+                add(
+                    systemProperty(
+                        "modporter.capabilityProbe.mixinConfigSha256",
+                        nativeCapabilityRequest.mixinConfigSha256
+                    )
+                )
             }
         }
         val previous = buildFile.readText()
@@ -1103,77 +1175,4 @@
         } else {
             javaBin.toString() + File.pathSeparator + existingPath
         }
-    }
-
-    private fun javaExecutable(): String {
-        val javaHome = System.getProperty("java.home")?.takeIf { it.isNotBlank() }
-        val executable = if (System.getProperty("os.name").lowercase().contains("win")) "java.exe" else "java"
-        val javaPath = javaHome?.let { Path.of(it, "bin", executable) }
-        return if (javaPath != null && javaPath.exists()) javaPath.toString() else "java"
-    }
-
-    private val resolvedJava21Executable: String by lazy {
-        val executable = if (System.getProperty("os.name").lowercase().contains("win")) "java.exe" else "java"
-        val directOverride = System.getenv("MODPORTER_BENCHMARK_JAVA21")
-            ?.takeIf { it.isNotBlank() }
-            ?.let { Path.of(it).toAbsolutePath().normalize() }
-
-        val homeOverride = listOf("MODPORTER_BENCHMARK_JAVA21_HOME", "JAVA21_HOME", "JDK21_HOME")
-            .asSequence()
-            .mapNotNull { System.getenv(it)?.takeIf { value -> value.isNotBlank() } }
-            .map { Path.of(it).toAbsolutePath().normalize() }
-            .map { it.resolve("bin").resolve(executable) }
-            .firstOrNull { it.exists() }
-
-        val discoveredCandidates = sequenceOf(
-            Path.of("C:/Program Files/Java"),
-            Path.of("C:/Program Files/Eclipse Adoptium"),
-            Path.of(System.getProperty("user.home"), ".jdks")
-        ).flatMap { root ->
-            val files = root.toFile().listFiles { file -> file.isDirectory && file.name.contains("21") }.orEmpty()
-            files.asSequence()
-        }.map { it.toPath().resolve("bin").resolve(executable) }
-
-        val candidates = sequenceOf(directOverride, homeOverride)
-            .filterNotNull()
-            .plus(discoveredCandidates)
-            .filter { it.exists() }
-            .distinct()
-
-        candidates.firstOrNull { isJava21(it) }?.toString()
-            ?: error(
-                "Strict real-mod benchmarks require Java 21. Set " +
-                    "MODPORTER_BENCHMARK_JAVA21 or MODPORTER_BENCHMARK_JAVA21_HOME."
-            )
-    }
-
-    private fun java21Executable(): String = resolvedJava21Executable
-
-    private fun isJava21(executable: Path): Boolean {
-        val process = ProcessBuilder(executable.toString(), "-XshowSettings:properties", "-version")
-            .redirectErrorStream(true)
-            .start()
-        val output = process.inputStream.bufferedReader().use { it.readText() }
-        if (!process.waitFor(15, TimeUnit.SECONDS)) {
-            process.destroyForcibly()
-            return false
-        }
-        return Regex("(?m)^\\s*java\\.specification\\.version\\s*=\\s*21\\s*$").containsMatchIn(output)
-    }
-
-    private fun locateMinecraftServerJar(): Path? {
-        val override = System.getenv("MODPORTER_BENCHMARK_MINECRAFT_SERVER_JAR")
-            ?.takeIf { it.isNotBlank() }
-            ?.let { Path.of(it).toAbsolutePath().normalize() }
-        if (override != null && override.exists()) return override
-
-        val userHome = Path.of(System.getProperty("user.home"))
-        val artifact = userHome.resolve(".gradle/caches/neoformruntime/artifacts/minecraft_1.21.1_server.jar")
-        return artifact.takeIf { it.exists() }
-    }
-
-    private fun serverReachedReadyState(logFile: Path): Boolean {
-        if (!logFile.exists()) return false
-        val log = StrictUtf8RuntimeLog.asciiSearchText(logFile)
-        return log.contains("Done (") || log.contains("For help, type")
     }

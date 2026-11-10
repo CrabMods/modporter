@@ -53,6 +53,16 @@
                 structureIssues.addAll(preparation.issues)
                 strictReviewRequest = preparation.request
             }
+            var nativeCapabilityRequest: LegacyCapabilityNativeRuntimeRequest? = null
+            if (options.runClientWorld) {
+                val nativePreparation = LegacyCapabilityNativeRuntimeValidation.prepare(
+                    projectDir = modDir,
+                    strictReviewRequest = strictReviewRequest,
+                    harnessPackage = benchmarkHarnessPackage(modDir)
+                )
+                structureIssues.addAll(nativePreparation.issues)
+                nativeCapabilityRequest = nativePreparation.request
+            }
             var compile = CheckResult.notRun("MODPORTER_BENCHMARK_COMPILE=false")
             if (structureIssues.isEmpty() && options.compile) {
                 structureIssues.addAll(stageBenchmarkDependencies(case, artifactRoot, modDir))
@@ -217,7 +227,11 @@
                 if (clientSmokeWorldFixture.result.status == CheckStatus.FAIL || clientSmokeWorldFixture.path == null) {
                     runClientWorld = CheckResult(CheckStatus.FAIL, "Client smoke world fixture failed: ${clientSmokeWorldFixture.result.note}")
                 } else {
-                    val harnessIssues = stageClientWorldHarness(modDir, strictReviewRequest)
+                    val harnessIssues = stageClientWorldHarness(
+                        modDir,
+                        strictReviewRequest,
+                        nativeCapabilityRequest
+                    )
                     if (harnessIssues.isNotEmpty()) {
                         runClientWorld = CheckResult(CheckStatus.FAIL, harnessIssues.joinToString("; "))
                     } else {
@@ -247,7 +261,8 @@
                                         options.logClean,
                                         options.progressGraceSeconds,
                                         strictReviewRequest != null,
-                                        strictReviewRequest?.stationMapRequired == true
+                                        strictReviewRequest?.stationMapRequired == true,
+                                        nativeCapabilityRequest != null
                                     ),
                                     prepared.path,
                                     strictReviewRequest
@@ -265,6 +280,14 @@
                 runtimeNote = runClientWorld.note,
                 runtimeLog = reportsDir.resolve("${case.id}-runClientWorld.log")
             )
+            val nativeCapabilityValidation = nativeCapabilityRequest?.let { request ->
+                LegacyCapabilityNativeRuntimeValidation.verify(
+                    request = request,
+                    runtimePassed = runClientWorld.status == CheckStatus.PASS,
+                    runtimeNote = runClientWorld.note,
+                    runtimeLog = reportsDir.resolve("${case.id}-runClientWorld.log")
+                )
+            } ?: LegacyCapabilityNativeValidation.notEvaluated()
             val failedChecks = mutableListOf<String>()
             failedChecks.addAll(structureIssues)
             if (compile.status == CheckStatus.FAIL) failedChecks.add("compileJava failed: ${compile.note}")
@@ -294,6 +317,12 @@
                         "MEDIUM/LOW change(s)"
                 )
             }
+            if (nativeCapabilityValidation.state == "FAILED") {
+                failedChecks.add(
+                    "Native capability runtime gate failed: " +
+                        nativeCapabilityValidation.issues.joinToString("; ")
+                )
+            }
 
             val allowedRuntimeIssues = listOf(runServer, runGameTestServer, runClient, runClientWorld)
                 .mapNotNull { it.allowedRuntimeIssueNote() }
@@ -317,7 +346,8 @@
                 runGameTestServer = runGameTestServer,
                 runClient = runClient,
                 runClientWorld = runClientWorld,
-                strictReviewValidation = strictReviewValidation
+                strictReviewValidation = strictReviewValidation,
+                nativeCapabilityValidation = nativeCapabilityValidation
             )
         } finally {
             terminateScopedJavaProcesses(outputDir)

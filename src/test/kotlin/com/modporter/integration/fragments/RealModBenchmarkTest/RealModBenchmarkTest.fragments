@@ -2,6 +2,6 @@
 002-runtime-log-audit-keeps-texture-mip-warning-when-input-dimensions-differ.ktfrag
 003-run-case.ktfrag
 004-held-log-game-test-shutdown-command.ktfrag
-005-audit-runtime-log.ktfrag
-006-source-declares-sound-event.ktfrag
-007-check-status.ktfrag
+005-java-executable.ktfrag
+006-jar-contains-entry-named.ktfrag
+007-runtime-log-policy.ktfrag

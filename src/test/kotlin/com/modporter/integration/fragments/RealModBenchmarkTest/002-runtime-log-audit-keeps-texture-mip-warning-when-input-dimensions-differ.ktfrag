@@ -369,6 +369,106 @@
     }
 
     @Test
+    fun `native capability client world validation stages sealed probe contract`(
+        @TempDir tempDir: Path
+    ) {
+        tempDir.resolve("gradle.properties").writeText("mod_id=resmod\n")
+        tempDir.resolve("build.gradle").writeText(
+            """
+            neoForge {
+                runs {
+                    clientWorld {
+                        client()
+                    }
+                }
+            }
+            """.trimIndent()
+        )
+        val harnessPackage = "com.modporter.generated.resmod.benchmark"
+        val compatPackage = "com.modporter.generated.resmod.compat"
+        val nativeSource = LegacyCapabilityNativeRuntimeHarnessSource.source(
+            harnessPackage,
+            compatPackage
+        )
+        val sourceHash = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(nativeSource.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        val request = LegacyCapabilityNativeRuntimeRequest(
+            validationSessionId = "22222222-2222-2222-2222-222222222222",
+            evidenceDir = tempDir.resolve("evidence"),
+            receiptPath = tempDir.resolve(LegacyCapabilityNativeRuntimeHarnessSource.RECEIPT_FILE_NAME),
+            tracePath = tempDir.resolve(LegacyCapabilityNativeRuntimeHarnessSource.TRACE_FILE_NAME),
+            wrapperReceiptPath = tempDir.resolve("wrapper-receipt.json"),
+            convertedModDir = tempDir,
+            runtimeDirectory = tempDir.resolve("run"),
+            compatPackage = compatPackage,
+            harnessPackage = harnessPackage,
+            harnessSourceSha256 = sourceHash,
+            mixinConfigResource = "modporter-legacy-capability-query.mixins.json",
+            mixinConfigSha256 = "a".repeat(64)
+        )
+
+        val issues = stageClientWorldHarness(tempDir, nativeCapabilityRequest = request)
+        val sourceDir = tempDir.resolve("src/main/java/com/modporter/generated/resmod/benchmark")
+        val nativeHarness = sourceDir.resolve(LegacyCapabilityNativeRuntimeHarnessSource.FILE_NAME)
+        val build = tempDir.resolve("build.gradle").readText()
+        val generic = sourceDir.resolve(StrictSpawnValidationContract.GENERIC_HARNESS_FILE).readText()
+
+        assertTrue(issues.isEmpty(), "Expected native capability staging to succeed: $issues")
+        assertEquals(nativeSource, nativeHarness.readText())
+        assertEquals(sourceHash, sha256File(nativeHarness))
+        for (property in listOf(
+            "modporter.capabilityProbe.enabled",
+            "modporter.capabilityProbe.completed",
+            "modporter.capabilityProbe.passed",
+            "modporter.capabilityProbe.profileId",
+            "modporter.capabilityProbe.validationSessionId",
+            "modporter.capabilityProbe.evidenceDir",
+            "modporter.capabilityProbe.receipt",
+            "modporter.capabilityProbe.trace",
+            "modporter.capabilityProbe.mixinConfigResource",
+            "modporter.capabilityProbe.mixinConfigSha256"
+        )) {
+            assertTrue(build.contains("systemProperty '$property'"), "Missing $property in:\n$build")
+        }
+        assertTrue(generic.contains("Waiting for native capability receipt before client exit"), generic)
+        assertTrue(generic.contains("Native retained-capability runtime probe completed without PASS"), generic)
+        assertTrue(stageClientWorldHarness(tempDir, nativeCapabilityRequest = request).isEmpty())
+        assertEquals(build, tempDir.resolve("build.gradle").readText(), "restaging must preserve exact bytes")
+
+        val wrongPackage = request.copy(harnessPackage = "com.modporter.generated.other.benchmark")
+        val mismatch = stageClientWorldHarness(tempDir, nativeCapabilityRequest = wrongPackage)
+        assertTrue(
+            mismatch.any { it.contains("Native capability harness package differs") },
+            mismatch.joinToString("; ")
+        )
+    }
+
+    @Test
+    fun `native capability runtime policy requires exact pass seal and clean exit`(@TempDir tempDir: Path) {
+        val policy = RuntimeLogPolicy.clientWorld(
+            failOnWarnings = true,
+            progressGraceSeconds = 75,
+            requireNativeCapabilityReceipt = true
+        )
+        val log = tempDir.resolve("native-capability.log")
+        val label = "native retained-capability receipt sealed"
+
+        assertTrue(!policy.terminateAfterReady)
+        assertTrue(policy.requireZeroExit)
+        log.writeText(
+            "[ModPorterCapabilityProbe] Receipt sealed path=receipt.json " +
+                "sha256=bad traceSha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb status=PASS\n"
+        )
+        assertTrue(label in policy.missingReadyChecks(log))
+        log.writeText(
+            "[ModPorterCapabilityProbe] Receipt sealed path=receipt.json " +
+                "sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa traceSha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb status=PASS\n"
+        )
+        assertTrue(label !in policy.missingReadyChecks(log))
+    }
+
+    @Test
     fun `benchmark client world harness reaches a kotlin dsl module build`(@TempDir tempDir: Path) {
         tempDir.resolve("gradle.properties").writeText("mod_id=resmod\n")
         tempDir.resolve("build.gradle.kts").writeText(
