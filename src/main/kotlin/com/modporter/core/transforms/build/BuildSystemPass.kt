@@ -4741,14 +4741,14 @@ neoForge {
         val configsByPath = linkedMapOf<Path, String>()
 
         Files.walk(resourcesDir).use { paths ->
-            paths.filter { it.isRegularFile() && it.extension.equals("json", ignoreCase = true) }
+            paths.filter { it.isRegularFile() && hasMixinConfigName(it) }
                 .forEach { config ->
                     configsByPath[config.toAbsolutePath().normalize()] = config.readText()
                 }
         }
         plannedChanges.forEach { change ->
             val ownedPath = ownedPlannedResourcePath(projectDir, ownedResourcesDir, change.file) ?: return@forEach
-            if (!ownedPath.extension.equals("json", ignoreCase = true)) return@forEach
+            if (!hasMixinConfigName(ownedPath)) return@forEach
             if (!isStructuredMixinConfig(change.after)) return@forEach
             configsByPath[ownedPath] = change.after
         }
@@ -4787,6 +4787,10 @@ neoForge {
                 candidate != ownedResourcesDir && candidate.startsWith(ownedResourcesDir)
             }
     }
+
+    private fun hasMixinConfigName(path: Path): Boolean =
+        path.extension.equals("json", ignoreCase = true) &&
+            path.fileName.toString().contains("mixin", ignoreCase = true)
 
     private fun isStructuredMixinConfig(source: String): Boolean = runCatching {
         val root = Json.parseToJsonElement(source).jsonObject

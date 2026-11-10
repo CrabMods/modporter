@@ -112,11 +112,15 @@ class PlannedMixinPipelineParityTest {
         """.trimIndent() + "\n"
         val ownedConfig = project.resolve("src/main/resources/generated.mixins.json")
         val malformedConfig = project.resolve("src/main/resources/malformed.mixins.json")
+        val ordinaryData = project.resolve("src/main/resources/ordinary-data.json")
+        val plannedOrdinaryData = project.resolve("src/main/resources/planned-data.json")
+        ordinaryData.writeText(validConfig)
         val foreignConfig = directory.resolve("other-project/src/main/resources/foreign.mixins.json")
         val planned = listOf(
             plannedConfigChange(ownedConfig, validConfig),
             plannedConfigChange(ownedConfig, validConfig),
             plannedConfigChange(malformedConfig, "{ not-json"),
+            plannedConfigChange(plannedOrdinaryData, validConfig),
             plannedConfigChange(foreignConfig, validConfig)
         )
 
@@ -129,6 +133,8 @@ class PlannedMixinPipelineParityTest {
         assertEquals(metadataBefore, project.resolve("src/main/resources/META-INF/neoforge.mods.toml").readText())
         assertFalse(ownedConfig.exists())
         assertFalse(malformedConfig.exists())
+        assertEquals(validConfig, ordinaryData.readText())
+        assertFalse(plannedOrdinaryData.exists())
         assertFalse(foreignConfig.exists())
         val registrations = result.mixinRegistrations()
         assertEquals(1, registrations.size, registrations.joinToString("\n"))
