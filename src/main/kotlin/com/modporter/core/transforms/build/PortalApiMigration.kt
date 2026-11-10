@@ -2,17 +2,27 @@ package com.modporter.core.transforms.build
 
 import com.modporter.core.pipeline.Change
 import com.modporter.core.pipeline.Confidence
+import com.modporter.core.transforms.structural.LegacyPortalProbeTemplateDecision
+import com.modporter.core.transforms.structural.LegacyPortalProbeTemplateKind
+import com.modporter.core.transforms.structural.decideLegacyPortalProbeTemplate
+import java.nio.charset.StandardCharsets
+import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
-import kotlin.io.path.createDirectories
-import kotlin.io.path.deleteExisting
+import java.nio.file.StandardCopyOption
 import kotlin.io.path.exists
 import kotlin.io.path.extension
 import kotlin.io.path.readText
-import kotlin.io.path.writeText
 import kotlin.streams.toList
 
-internal class PortalApiMigration {
+internal enum class PortalApiMigrationFault {
+    NONE,
+    AFTER_FIRST_PUBLISH
+}
+
+internal class PortalApiMigration(
+    private val fault: PortalApiMigrationFault = PortalApiMigrationFault.NONE
+) {
     private data class ParsedMethod(
         val name: String,
         val start: Int,
@@ -37,13 +47,35 @@ internal class PortalApiMigration {
         val count: Int
     )
 
+    private data class PortalApiPublishEntry(
+        val target: Path,
+        val original: ByteArray,
+        val staged: ByteArray?,
+        val stagedNew: Path?,
+        val stagedRollback: Path,
+        val deletionTombstone: Path?
+    )
+
+    private data class ProbeNormalization(
+        val file: Path,
+        val kind: LegacyPortalProbeTemplateKind
+    )
+
+    private sealed interface ProbeNormalizationResult {
+        data object NoHelper : ProbeNormalizationResult
+        data object Refused : ProbeNormalizationResult
+        data class Selected(val normalization: ProbeNormalization) : ProbeNormalizationResult
+    }
+
     fun migrate(projectDir: Path, dryRun: Boolean): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return emptyList()
-        val sourceByFile = Files.walk(srcDir)
-            .filter { it.extension == "java" }
-            .toList()
-            .associateWith { it.readText() }
+        val javaFiles = Files.walk(srcDir).use { paths ->
+            paths.filter { it.extension == "java" }.toList()
+        }
+        val originalBytesByFile = javaFiles.associateWith { Files.readAllBytes(it) }
+        val sourceByFile = originalBytesByFile
+            .mapValues { (_, bytes) -> String(bytes, StandardCharsets.UTF_8) }
             .toMutableMap()
         val originalByFile = sourceByFile.toMap()
         val targets = linkedSetOf<MethodTarget>()
@@ -55,70 +87,93 @@ internal class PortalApiMigration {
             targets += rewrite.targets
             providerRewriteCount += rewrite.count
         }
-        if (targets.isEmpty()) return emptyList()
 
-        val processedTargets = linkedSetOf<MethodTarget>()
-        while (true) {
-            val pending = targets.filterNot { it in processedTargets }
-            if (pending.isEmpty()) break
-            for (target in pending) {
+        if (targets.isNotEmpty()) {
+            val processedTargets = linkedSetOf<MethodTarget>()
+            while (true) {
+                val pending = targets.filterNot { it in processedTargets }
+                if (pending.isEmpty()) break
+                for (target in pending) {
+                    for ((file, source) in sourceByFile.toMap()) {
+                        sourceByFile[file] = rewriteCallsRemovingLastArgument(file, source, target)
+                    }
+                    processedTargets += target
+                }
+
+                var discovered = false
                 for ((file, source) in sourceByFile.toMap()) {
-                    sourceByFile[file] = rewriteCallsRemovingLastArgument(file, source, target)
+                    val owner = javaTopLevelOwner(source) ?: continue
+                    var modified = source
+                    val methods = parseStaticMethods(modified).asReversed()
+                    for (method in methods) {
+                        if (method.parameters.size < 2) continue
+                        val lastParameter = method.parameters.last()
+                        val lastName = javaParameterName(lastParameter) ?: continue
+                        val body = modified.substring(method.openBrace + 1, method.closeBrace)
+                        val executableBody = maskJavaCommentsAndLiterals(body)
+                        if (Regex("""\b${Regex.escape(lastName)}\b""")
+                                .containsMatchIn(executableBody)
+                        ) continue
+                        if (!processedTargets.any { target -> bodyCallsTarget(executableBody, target) }) {
+                            continue
+                        }
+
+                        val oldArity = method.parameters.size
+                        val newParameters = method.parameters.dropLast(1).joinToString(", ")
+                        modified = modified.replaceRange(
+                            method.openParen + 1 until method.closeParen,
+                            newParameters
+                        )
+                        val target = MethodTarget(owner.first, owner.second, method.name, oldArity, file)
+                        if (targets.add(target)) discovered = true
+                    }
+                    sourceByFile[file] = modified
                 }
-                processedTargets += target
+                if (!discovered && targets.all { it in processedTargets }) break
             }
 
-            var discovered = false
             for ((file, source) in sourceByFile.toMap()) {
-                val owner = javaTopLevelOwner(source) ?: continue
-                var modified = source
-                val methods = parseStaticMethods(modified).asReversed()
-                for (method in methods) {
-                    if (method.parameters.size < 2) continue
-                    val lastParameter = method.parameters.last()
-                    val lastName = javaParameterName(lastParameter) ?: continue
-                    val body = modified.substring(method.openBrace + 1, method.closeBrace)
-                    val executableBody = maskJavaCommentsAndLiterals(body)
-                    if (Regex("""\b${Regex.escape(lastName)}\b""").containsMatchIn(executableBody)) continue
-                    if (!processedTargets.any { target -> bodyCallsTarget(executableBody, target) }) continue
-
-                    val oldArity = method.parameters.size
-                    val newParameters = method.parameters.dropLast(1).joinToString(", ")
-                    modified = modified.replaceRange(method.openParen + 1 until method.closeParen, newParameters)
-                    val target = MethodTarget(owner.first, owner.second, method.name, oldArity, file)
-                    if (targets.add(target)) discovered = true
-                }
-                sourceByFile[file] = modified
+                sourceByFile[file] = removeUnusedExplicitJavaImports(
+                    cleanupMigratedPortalJavadocs(source)
+                )
             }
-            if (!discovered && targets.all { it in processedTargets }) break
         }
 
-        for ((file, source) in sourceByFile.toMap()) {
-            sourceByFile[file] = removeUnusedExplicitJavaImports(cleanupMigratedPortalJavadocs(source))
+        val removedReflectionFiles = if (targets.isEmpty()) {
+            emptyList()
+        } else {
+            removeUnreferencedReflectionAdapters(projectDir, sourceByFile, originalByFile)
         }
-
-        val removedReflectionFiles = removeUnreferencedReflectionAdapters(
-            projectDir,
-            sourceByFile,
-            originalByFile,
-            dryRun
-        )
+        val probeNormalization = when (val result = normalizeLegacyPortalProbe(sourceByFile)) {
+            ProbeNormalizationResult.NoHelper -> null
+            ProbeNormalizationResult.Refused -> return emptyList()
+            is ProbeNormalizationResult.Selected -> result.normalization
+        }
         val changes = mutableListOf<Change>()
         for ((file, content) in sourceByFile) {
             val original = originalByFile[file] ?: continue
             if (content == original) continue
-            changes += Change(
-                file = file,
-                line = 1,
-                description = "Migrate source-structured portal provider pipeline to Minecraft 1.21 Portal and DimensionTransition APIs",
-                before = "PortalInfo/ITeleporter provider pipeline with callback parameters",
-                after = "Portal.getPortalDestination with statically pruned obsolete callback parameters",
-                confidence = Confidence.HIGH,
-                ruleId = "build-portal-dimension-transition-pipeline"
-            )
-            if (!dryRun) {
-                file.parent.createDirectories()
-                file.writeText(content)
+            val isProbeNormalization = probeNormalization?.file == file
+            changes += if (isProbeNormalization) {
+                Change(
+                    file = file,
+                    line = 1,
+                    description = "Close the generated legacy portal helper onto its native probe feature",
+                    before = "full reflection-capable LegacyPortalProbe template",
+                    after = "native-only existing-portal probe template",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-portal-native-probe-closure"
+                )
+            } else {
+                Change(
+                    file = file,
+                    line = 1,
+                    description = "Migrate source-structured portal provider pipeline to Minecraft 1.21 Portal and DimensionTransition APIs",
+                    before = "PortalInfo/ITeleporter provider pipeline with callback parameters",
+                    after = "Portal.getPortalDestination with statically pruned obsolete callback parameters",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-portal-dimension-transition-pipeline"
+                )
             }
         }
         for (file in removedReflectionFiles) {
@@ -132,8 +187,47 @@ internal class PortalApiMigration {
                 ruleId = "build-portal-unreferenced-reflection-adapter"
             )
         }
-        check(providerRewriteCount > 0)
+        if (changes.isEmpty()) return emptyList()
+        if (targets.isNotEmpty()) check(providerRewriteCount > 0)
+        if (!dryRun) {
+            publishPortalApiChangesAtomically(
+                srcDir,
+                originalBytesByFile,
+                sourceByFile,
+                removedReflectionFiles.toSet()
+            )
+        }
         return changes
+    }
+
+    private fun normalizeLegacyPortalProbe(
+        sourceByFile: MutableMap<Path, String>
+    ): ProbeNormalizationResult {
+        val candidates = sourceByFile.mapNotNull { (file, source) ->
+            if (file.fileName.toString() != "LegacyPortalProbe.java") return@mapNotNull null
+            val owner = javaTopLevelOwner(source) ?: return@mapNotNull null
+            val fqn = owner.first
+            if (!Regex(
+                    """^com\.modporter\.generated\.[a-z0-9_]+\.compat\.LegacyPortalProbe$"""
+                ).matches(fqn)
+            ) return@mapNotNull null
+            Triple(file, fqn.substringBeforeLast('.'), source)
+        }
+        if (candidates.isEmpty()) return ProbeNormalizationResult.NoHelper
+        if (candidates.size != 1) return ProbeNormalizationResult.Refused
+        val (file, packageName, existing) = candidates.single()
+        return when (val decision = decideLegacyPortalProbeTemplate(
+            sourceByFile,
+            file,
+            packageName,
+            existing
+        )) {
+            is LegacyPortalProbeTemplateDecision.Refused -> ProbeNormalizationResult.Refused
+            is LegacyPortalProbeTemplateDecision.Selected -> {
+                sourceByFile[file] = decision.content
+                ProbeNormalizationResult.Selected(ProbeNormalization(file, decision.kind))
+            }
+        }
     }
 
     private fun rewritePortalProviderMethods(file: Path, source: String): CandidateRewrite {
@@ -298,8 +392,7 @@ internal class PortalApiMigration {
     private fun removeUnreferencedReflectionAdapters(
         projectDir: Path,
         sourceByFile: MutableMap<Path, String>,
-        originalByFile: Map<Path, String>,
-        dryRun: Boolean
+        originalByFile: Map<Path, String>
     ): List<Path> {
         val removed = mutableListOf<Path>()
         val resources = listOf(projectDir.resolve("src/main/resources"), projectDir.resolve("src/generated/resources"))
@@ -336,9 +429,207 @@ internal class PortalApiMigration {
 
             sourceByFile.remove(file)
             removed.add(file)
-            if (!dryRun && file.exists()) file.deleteExisting()
         }
         return removed
+    }
+
+    private fun publishPortalApiChangesAtomically(
+        sourceRoot: Path,
+        originalBytesByFile: Map<Path, ByteArray>,
+        sourceByFile: Map<Path, String>,
+        removedFiles: Set<Path>
+    ) {
+        val modifiedFiles = sourceByFile.filter { (file, source) ->
+            val original = originalBytesByFile[file] ?: return@filter false
+            !source.toByteArray(StandardCharsets.UTF_8).contentEquals(original)
+        }.keys
+        val publishFiles = (modifiedFiles + removedFiles).sorted()
+        val entries = mutableListOf<PortalApiPublishEntry>()
+        verifyPortalApiSourceSnapshot(sourceRoot, originalBytesByFile, emptyList())
+        try {
+            for (target in publishFiles) {
+                val original = originalBytesByFile[target]
+                    ?: error("Portal API publication lost its original file: $target")
+                require(Files.isRegularFile(target)) {
+                    "Portal API publish target disappeared before staging: $target"
+                }
+                require(Files.readAllBytes(target).contentEquals(original)) {
+                    "Portal API publish target changed before staging: $target"
+                }
+                val staged = if (target in removedFiles) {
+                    null
+                } else {
+                    sourceByFile.getValue(target).toByteArray(StandardCharsets.UTF_8)
+                }
+                var stagedNew: Path? = null
+                var rollback: Path? = null
+                try {
+                    stagedNew = staged?.let { bytes ->
+                        Files.createTempFile(target.parent, ".modporter-portal-api-new-", ".tmp").also {
+                            Files.write(it, bytes)
+                            require(Files.readAllBytes(it).contentEquals(bytes)) {
+                                "Portal API staged bytes changed: $target"
+                            }
+                        }
+                    }
+                    val rollbackPath = Files.createTempFile(
+                        target.parent,
+                        ".modporter-portal-api-rollback-",
+                        ".tmp"
+                    )
+                    rollback = rollbackPath
+                    val tombstone = if (staged == null) {
+                        Files.delete(rollbackPath)
+                        rollbackPath
+                    } else {
+                        Files.write(rollbackPath, original)
+                        require(Files.readAllBytes(rollbackPath).contentEquals(original)) {
+                            "Portal API rollback bytes changed while staging: $target"
+                        }
+                        null
+                    }
+                    entries += PortalApiPublishEntry(
+                        target,
+                        original,
+                        staged,
+                        stagedNew,
+                        rollbackPath,
+                        tombstone
+                    )
+                } catch (failure: Throwable) {
+                    runCatching { stagedNew?.let { Files.deleteIfExists(it) } }
+                    runCatching { rollback?.let { Files.deleteIfExists(it) } }
+                    throw failure
+                }
+            }
+            verifyPortalApiSourceSnapshot(sourceRoot, originalBytesByFile, emptyList())
+        } catch (failure: Throwable) {
+            cleanupPortalApiStage(entries)
+            throw failure
+        }
+
+        val published = mutableListOf<PortalApiPublishEntry>()
+        try {
+            for (entry in entries) {
+                verifyPortalApiSourceSnapshot(sourceRoot, originalBytesByFile, published)
+                require(Files.isRegularFile(entry.target)) {
+                    "Portal API publish target disappeared after staging: ${entry.target}"
+                }
+                require(Files.readAllBytes(entry.target).contentEquals(entry.original)) {
+                    "Portal API publish target changed after staging: ${entry.target}"
+                }
+                if (entry.staged == null) {
+                    atomicPortalApiMove(entry.target, entry.deletionTombstone!!)
+                } else {
+                    atomicPortalApiMove(entry.stagedNew!!, entry.target)
+                }
+                published += entry
+                verifyPortalApiSourceSnapshot(sourceRoot, originalBytesByFile, published)
+                if (published.size == 1 && fault == PortalApiMigrationFault.AFTER_FIRST_PUBLISH) {
+                    error("Injected portal API publication failure after first atomic publish")
+                }
+            }
+        } catch (failure: Throwable) {
+            val rollbackFailures = mutableListOf<Throwable>()
+            for (entry in published.asReversed()) {
+                runCatching {
+                    if (entry.staged == null) {
+                        require(!Files.exists(entry.target)) {
+                            "Deleted portal API target reappeared before rollback: ${entry.target}"
+                        }
+                        atomicPortalApiMove(entry.deletionTombstone!!, entry.target)
+                    } else {
+                        require(Files.readAllBytes(entry.target).contentEquals(entry.staged)) {
+                            "Portal API target changed before rollback: ${entry.target}"
+                        }
+                        atomicPortalApiMove(entry.stagedRollback, entry.target)
+                    }
+                    require(Files.readAllBytes(entry.target).contentEquals(entry.original)) {
+                        "Portal API rollback bytes changed: ${entry.target}"
+                    }
+                }.exceptionOrNull()?.let(rollbackFailures::add)
+            }
+            cleanupPortalApiStage(entries, preserveRecovery = rollbackFailures.isNotEmpty())
+            val wrapped = IllegalStateException(
+                if (rollbackFailures.isEmpty()) {
+                    "Portal API publication failed; all published entries were rolled back"
+                } else {
+                    "Portal API publication failed and aggregate rollback was incomplete; " +
+                        "rollback artifacts were preserved beside their targets"
+                },
+                failure
+            )
+            rollbackFailures.forEach(wrapped::addSuppressed)
+            throw wrapped
+        }
+        cleanupPortalApiStage(entries)
+    }
+
+    private fun verifyPortalApiSourceSnapshot(
+        sourceRoot: Path,
+        originalBytesByFile: Map<Path, ByteArray>,
+        published: List<PortalApiPublishEntry>
+    ) {
+        val publishedByTarget = published.associateBy { it.target }
+        val expectedFiles = originalBytesByFile.keys.filterTo(linkedSetOf()) { file ->
+            publishedByTarget[file]?.staged != null || file !in publishedByTarget
+        }
+        val currentFiles = Files.walk(sourceRoot).use { paths ->
+            paths.filter { it.extension == "java" }.toList().toSet()
+        }
+        require(currentFiles == expectedFiles) {
+            "Portal API Java source set changed during publication; added=" +
+                "${(currentFiles - expectedFiles).sorted()}, removed=${(expectedFiles - currentFiles).sorted()}"
+        }
+        for ((file, original) in originalBytesByFile) {
+            val publishedEntry = publishedByTarget[file]
+            val expected = when {
+                publishedEntry == null -> original
+                publishedEntry.staged == null -> null
+                else -> publishedEntry.staged
+            }
+            if (expected == null) {
+                require(!Files.exists(file)) {
+                    "Portal API deleted source reappeared during publication: $file"
+                }
+            } else {
+                require(Files.isRegularFile(file)) {
+                    "Portal API source disappeared during publication: $file"
+                }
+                require(Files.readAllBytes(file).contentEquals(expected)) {
+                    "Portal API source bytes changed during publication: $file"
+                }
+            }
+        }
+    }
+
+    private fun atomicPortalApiMove(source: Path, target: Path) {
+        try {
+            Files.move(
+                source,
+                target,
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING
+            )
+        } catch (unsupported: AtomicMoveNotSupportedException) {
+            throw IllegalStateException(
+                "Atomic portal API publication is unavailable for $target",
+                unsupported
+            )
+        }
+    }
+
+    private fun cleanupPortalApiStage(
+        entries: List<PortalApiPublishEntry>,
+        preserveRecovery: Boolean = false
+    ) {
+        for (entry in entries) {
+            runCatching { entry.stagedNew?.let { Files.deleteIfExists(it) } }
+            if (!preserveRecovery) {
+                runCatching { Files.deleteIfExists(entry.stagedRollback) }
+                runCatching { entry.deletionTombstone?.let { Files.deleteIfExists(it) } }
+            }
+        }
     }
 
     private fun parseStaticMethods(source: String): List<ParsedMethod> {

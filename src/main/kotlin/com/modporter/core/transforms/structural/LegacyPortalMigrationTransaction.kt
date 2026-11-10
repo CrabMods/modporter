@@ -60,7 +60,8 @@ private data class PortalProjectSnapshot(
 )
 
 private data class PortalHelperTemplates(
-    val probe: String,
+    val probeFull: String,
+    val probeNative: String,
     val portalInfo: String
 )
 
@@ -162,7 +163,12 @@ internal fun StructuralRefactorPass.migrateLegacyPortalFamilyTransaction(
         val changedJava = changedPortalJavaPaths(original, migrated)
         validatePortalFamilyBoundary(original, migrated, admittedFamily, changedJava)
         validateChangedPortalJavaParses(tempProject, migrated, changedJava)
-        validateGeneratedPortalHelpers(migrated, templates, admittedFamily + changedJava)
+        validateGeneratedPortalHelpers(
+            tempProject,
+            migrated,
+            templates,
+            admittedFamily + changedJava
+        )
         validateLegacyPortalCanonicalUses(tempProject, migrated, admittedFamily)
         verifyPortalSnapshotUnchanged(originalProject, original)
 
@@ -302,6 +308,7 @@ private fun StructuralRefactorPass.loadPortalHelperTemplates(
     }
     return PortalHelperTemplates(
         load("/compat/LegacyPortalProbe.java.template"),
+        load("/compat/LegacyPortalProbe.native.java.template"),
         load("/compat/PortalInfo.java.template")
     )
 }
@@ -550,6 +557,7 @@ private fun validateChangedPortalJavaParses(
 }
 
 private fun validateGeneratedPortalHelpers(
+    tempProject: Path,
     migrated: PortalProjectSnapshot,
     templates: PortalHelperTemplates,
     scopedJava: Set<Path>
@@ -585,12 +593,36 @@ private fun validateGeneratedPortalHelpers(
         val helperFqn = "$packageName.${relative.name.removeSuffix(".java")}"
         if (!TRANSACTION_GENERATED_HELPER.matches(helperFqn)) continue
         val expected = when (relative.name) {
-            "LegacyPortalProbe.java" -> templates.probe.replace("@PACKAGE@", packageName)
+            "LegacyPortalProbe.java" -> {
+                val sources = migrated.javaFiles.associate { javaRelative ->
+                    tempProject.resolve(javaRelative) to String(
+                        migrated.files.getValue(javaRelative).bytes,
+                        StandardCharsets.UTF_8
+                    )
+                }
+                val decision = decideLegacyPortalProbeTemplate(
+                    sources,
+                    tempProject.resolve(relative),
+                    packageName,
+                    source
+                )
+                require(decision is LegacyPortalProbeTemplateDecision.Selected) {
+                    "Generated portal helper feature closure was refused: $helperFqn; " +
+                        (decision as LegacyPortalProbeTemplateDecision.Refused).reason
+                }
+                require(
+                    decision.content == templates.probeFull.replace("@PACKAGE@", packageName) ||
+                        decision.content == templates.probeNative.replace("@PACKAGE@", packageName)
+                ) {
+                    "Selected portal helper did not match a loaded owned resource: $helperFqn"
+                }
+                decision.content
+            }
             "PortalInfo.java" -> templates.portalInfo.replace("@PACKAGE@", packageName)
             else -> error("Unreachable portal helper: $relative")
         }
         require(source == expected) {
-            "Generated portal helper does not match the loaded resource: $helperFqn"
+            "Generated portal helper does not match its exact selected resource: $helperFqn"
         }
         helperPackages.getOrPut(packageName) { linkedSetOf() } += relative.name
     }

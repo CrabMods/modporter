@@ -7,6 +7,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.readBytes
+import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -276,8 +277,14 @@ class LegacyPortalMigrationTransactionTest {
         """)
         val originalProbe = probe.readBytes()
         val originalTeleporter = teleporter.readBytes()
+        val original = snapshot()
+        val pass = StructuralRefactorPass()
 
-        val changes = StructuralRefactorPass().migrateLegacyPortalFamilyTransaction(
+        val preview = pass.migrateLegacyPortalFamilyTransaction(directory, dryRun = true)
+        assertTrue(preview.isNotEmpty(), preview.toString())
+        assertSnapshotUnchanged(original)
+
+        val changes = pass.migrateLegacyPortalFamilyTransaction(
             directory,
             dryRun = false
         )
@@ -285,6 +292,19 @@ class LegacyPortalMigrationTransactionTest {
         assertTrue(changes.isNotEmpty(), changes.toString())
         assertTrue(!probe.readBytes().contentEquals(originalProbe))
         assertContentEquals(originalTeleporter, teleporter.readBytes())
+        val helper = directory.resolve(
+            "src/main/java/com/modporter/generated/portal_transaction/compat/LegacyPortalProbe.java"
+        ).readText()
+        assertTrue(helper.contains("findClosestPortalPosition(exitPos, isNether, worldBorder)"), helper)
+        assertTrue(helper.contains("TicketType.PORTAL"), helper)
+        assertTrue(helper.contains("PortalForcer.TICKET_RADIUS"), helper)
+        assertTrue(helper.contains("PortalShape.findCollisionFreePosition("), helper)
+        assertTrue(!helper.contains("MethodHandle"), helper)
+        assertTrue(!helper.contains("java.lang.reflect"), helper)
+        assertTrue(!helper.contains(".createPortal("), helper)
+        val migrated = snapshot()
+        assertTrue(pass.migrateLegacyPortalFamilyTransaction(directory, dryRun = false).isEmpty())
+        assertSnapshotUnchanged(migrated)
     }
 
     @Test

@@ -32,6 +32,7 @@ import com.github.javaparser.ast.expr.ThisExpr
 import com.github.javaparser.ast.expr.TypeExpr
 import com.github.javaparser.ast.expr.TypePatternExpr
 import com.github.javaparser.ast.expr.UnaryExpr
+import com.github.javaparser.ast.expr.VariableDeclarationExpr
 import com.github.javaparser.ast.stmt.BlockStmt
 import com.github.javaparser.ast.stmt.CatchClause
 import com.github.javaparser.ast.stmt.ExpressionStmt
@@ -800,6 +801,91 @@ internal object LegacyItemComponentPatchTransport {
         )
     }
 
+    private fun streamMapLambda(streamReturn: ReturnStmt, lootName: String): LambdaExpr? {
+        val terminal = streamReturn.expression.orElse(null) as? MethodCallExpr ?: return null
+        if (terminal.nameAsString != "toList" || terminal.arguments.isNotEmpty() ||
+            terminal.typeArguments.isPresent
+        ) return null
+        val mapCall = terminal.scope.orElse(null) as? MethodCallExpr ?: return null
+        if (mapCall.nameAsString != "map" || mapCall.arguments.size != 1 ||
+            mapCall.typeArguments.isPresent
+        ) return null
+        val streamCall = mapCall.scope.orElse(null) as? MethodCallExpr ?: return null
+        if (streamCall.nameAsString != "stream" || streamCall.arguments.isNotEmpty() ||
+            streamCall.typeArguments.isPresent
+        ) return null
+        if ((streamCall.scope.orElse(null) as? NameExpr)?.nameAsString != lootName) return null
+        return mapCall.arguments.single() as? LambdaExpr
+    }
+
+    private fun tagOverlayValue(
+        file: ParsedFile,
+        statement: Statement,
+        expectedOwner: String
+    ): Expression? {
+        val expression = (statement as? ExpressionStmt)?.expression ?: return null
+        val direct = expression as? MethodCallExpr ?: return null
+        if (direct.nameAsString == "setTag") {
+            if ((direct.scope.orElse(null) as? NameExpr)?.nameAsString != expectedOwner ||
+                direct.arguments.size != 1 || direct.typeArguments.isPresent
+            ) return null
+            return direct.arguments.single()
+        }
+        if (direct.nameAsString != "make" ||
+            direct.scope.map { it.toString() }.orElse("") != "net.minecraft.Util" ||
+            direct.arguments.size != 2 || direct.typeArguments.isPresent ||
+            (direct.arguments[0] as? NameExpr)?.nameAsString != expectedOwner
+        ) return null
+
+        val lambda = direct.arguments[1] as? LambdaExpr ?: return null
+        if (lambda.parameters.size != 1 ||
+            !lambda.parameters.single().type.isUnknownType ||
+            lambda.parameters.single().isVarArgs
+        ) return null
+        val generatedOwner = lambda.parameters.single().nameAsString
+        if (!generatedOwner.matches(Regex("""modPorterCustomDataOwner\d*"""))) return null
+        val body = lambda.body as? BlockStmt ?: return null
+        if (body.statements.size != 2) return null
+
+        val declarationStatement = body.statements[0] as? ExpressionStmt ?: return null
+        val declaration = declarationStatement.expression as? VariableDeclarationExpr ?: return null
+        if (declaration.variables.size != 1 || declaration.modifiers.isNotEmpty()) return null
+        val tagVariable = declaration.variables.single()
+        val generatedValue = tagVariable.nameAsString
+        if (!file.isType(tagVariable.typeAsString, COMPOUND_TAG, tagVariable) ||
+            !generatedValue.matches(Regex("""modPorterCustomDataValue\d*"""))
+        ) return null
+        val initializer = tagVariable.initializer.orElse(null) ?: return null
+
+        val guard = body.statements[1] as? IfStmt ?: return null
+        if (!guard.condition.isNullComparison(generatedValue)) return null
+        val nullBlock = guard.thenStmt as? BlockStmt ?: return null
+        val valueBlock = guard.elseStmt.orElse(null) as? BlockStmt ?: return null
+        val remove = (nullBlock.statements.singleOrNull() as? ExpressionStmt)
+            ?.expression as? MethodCallExpr ?: return null
+        if (remove.nameAsString != "remove" || remove.typeArguments.isPresent ||
+            (remove.scope.orElse(null) as? NameExpr)?.nameAsString != generatedOwner ||
+            remove.arguments.singleOrNull()?.toString() !=
+            "net.minecraft.core.component.DataComponents.CUSTOM_DATA"
+        ) return null
+
+        val set = (valueBlock.statements.singleOrNull() as? ExpressionStmt)
+            ?.expression as? MethodCallExpr ?: return null
+        if (set.nameAsString != "set" || set.typeArguments.isPresent ||
+            (set.scope.orElse(null) as? NameExpr)?.nameAsString != generatedOwner ||
+            set.arguments.size != 2 ||
+            set.arguments[0].toString() !=
+            "net.minecraft.core.component.DataComponents.CUSTOM_DATA"
+        ) return null
+        val customData = set.arguments[1] as? MethodCallExpr ?: return null
+        if (customData.nameAsString != "of" || customData.typeArguments.isPresent ||
+            customData.scope.map { it.toString() }.orElse("") !=
+            "net.minecraft.world.item.component.CustomData" ||
+            (customData.arguments.singleOrNull() as? NameExpr)?.nameAsString != generatedValue
+        ) return null
+        return initializer
+    }
+
     private fun dropConsumer(
         file: ParsedFile,
         getterCall: MethodCallExpr,
@@ -819,7 +905,7 @@ internal object LegacyItemComponentPatchTransport {
         val nullReturn = nullGuard.thenStmt.unwrapSingle() as? ReturnStmt ?: return null
         val lootName = (nullReturn.expression.orElse(null) as? NameExpr)?.nameAsString ?: return null
         val streamReturn = block.statements[firstIndex + 2] as? ReturnStmt ?: return null
-        val lambda = streamReturn.findAll(LambdaExpr::class.java).singleOrNull() ?: return null
+        val lambda = streamMapLambda(streamReturn, lootName) ?: return null
         if (lambda.parameters.size != 1) return null
         val overlayName = lambda.parameters.single().nameAsString
         val lambdaBlock = lambda.body as? BlockStmt ?: return null
@@ -844,15 +930,15 @@ internal object LegacyItemComponentPatchTransport {
             itemCall.scope.map { it.toString() }.orElse("") != overlayName ||
             countCall.scope.map { it.toString() }.orElse("") != overlayName
         ) return null
-        val overlayStatement = lambdaBlock.statements[2] as? ExpressionStmt ?: return null
-        val setTag = overlayStatement.expression as? MethodCallExpr ?: return null
-        if (setTag.nameAsString != "setTag" ||
-            setTag.scope.map { it.toString() }.orElse("") != modifiedVariable.nameAsString ||
-            setTag.arguments.size != 1
-        ) return null
-        val getTag = setTag.arguments.single() as? MethodCallExpr ?: return null
+        val overlayValue = tagOverlayValue(
+            file,
+            lambdaBlock.statements[2],
+            modifiedVariable.nameAsString
+        ) ?: return null
+        val getTag = overlayValue as? MethodCallExpr ?: return null
         if (getTag.nameAsString != "getTag" ||
-            getTag.scope.map { it.toString() }.orElse("") != overlayName
+            getTag.arguments.isNotEmpty() ||
+            (getTag.scope.orElse(null) as? NameExpr)?.nameAsString != overlayName
         ) return null
         val finalReturn = lambdaBlock.statements[3] as? ReturnStmt ?: return null
         if (finalReturn.expression.map { it.toString() }.orElse("") != modifiedVariable.nameAsString) {
@@ -985,12 +1071,12 @@ internal object LegacyItemComponentPatchTransport {
             putInt.arguments[0] !is StringLiteralExpr ||
             putInt.arguments[1].toString() != integerVariable.nameAsString
         ) return null
-        val setTagStatement = block.statements[firstIndex + 5] as? ExpressionStmt ?: return null
-        val setTag = setTagStatement.expression as? MethodCallExpr ?: return null
-        if (setTag.nameAsString != "setTag" ||
-            setTag.scope.map { it.toString() }.orElse("") != resultVariable.nameAsString ||
-            setTag.arguments.singleOrNull()?.toString() != vanillaVariable.nameAsString
-        ) return null
+        val overlayValue = tagOverlayValue(
+            file,
+            block.statements[firstIndex + 5],
+            resultVariable.nameAsString
+        ) ?: return null
+        if ((overlayValue as? NameExpr)?.nameAsString != vanillaVariable.nameAsString) return null
         val returned = block.statements[firstIndex + 6] as? ReturnStmt ?: return null
         if (returned.expression.map { it.toString() }.orElse("") != resultVariable.nameAsString) {
             return null

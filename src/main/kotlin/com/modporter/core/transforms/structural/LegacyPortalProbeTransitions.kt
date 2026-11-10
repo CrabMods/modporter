@@ -18,6 +18,7 @@ import com.github.javaparser.ast.expr.MethodReferenceExpr
 import com.github.javaparser.ast.expr.NameExpr
 import com.github.javaparser.ast.expr.ObjectCreationExpr
 import com.github.javaparser.ast.expr.SuperExpr
+import com.github.javaparser.ast.expr.ThisExpr
 import com.github.javaparser.ast.expr.TypeExpr
 import com.github.javaparser.ast.stmt.BlockStmt
 import com.github.javaparser.ast.stmt.ExpressionStmt
@@ -31,6 +32,7 @@ import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
+import kotlin.streams.toList
 
 /*
  * Primary evidence for this deliberately narrow migration:
@@ -93,6 +95,25 @@ private data class ReflectedTeleporterShape(
     val fallbackCall: MethodCallExpr
 )
 
+internal enum class LegacyPortalProbeTemplateKind {
+    FULL,
+    NATIVE_ONLY
+}
+
+internal sealed interface LegacyPortalProbeTemplateDecision {
+    data class Selected(
+        val kind: LegacyPortalProbeTemplateKind,
+        val content: String
+    ) : LegacyPortalProbeTemplateDecision
+
+    data class Refused(val reason: String) : LegacyPortalProbeTemplateDecision
+}
+
+private val LEGACY_PORTAL_PROBE_SIMPLE_TOKEN = Regex("""\bLegacyPortalProbe\b""")
+private val LEGACY_PORTAL_PROBE_PACKAGE = Regex(
+    """^com\.modporter\.generated\.[a-z0-9_]+\.compat$"""
+)
+
 private class PortalDraftOffsets(private val source: String) {
     private val lineStarts = buildList {
         add(0)
@@ -112,6 +133,279 @@ private class PortalDraftOffsets(private val source: String) {
         val end = endExclusive(node)
         return if (start < 0 || end < start) "" else source.substring(start, end)
     }
+}
+
+internal fun loadLegacyPortalProbeTemplate(
+    kind: LegacyPortalProbeTemplateKind,
+    packageName: String
+): String {
+    require(LEGACY_PORTAL_PROBE_PACKAGE.matches(packageName)) {
+        "Refusing an unowned generated portal helper package: $packageName"
+    }
+    val resourceName = when (kind) {
+        LegacyPortalProbeTemplateKind.FULL -> "/compat/LegacyPortalProbe.java.template"
+        LegacyPortalProbeTemplateKind.NATIVE_ONLY ->
+            "/compat/LegacyPortalProbe.native.java.template"
+    }
+    val resource = LegacyPortalProbeTemplateDecision::class.java.getResource(resourceName)
+        ?: error("Missing required portal helper resource: $resourceName")
+    return resource.readText().replace("@PACKAGE@", packageName)
+}
+
+internal fun decideLegacyPortalProbeTemplate(
+    sources: Map<Path, String>,
+    helperFile: Path,
+    packageName: String,
+    existingContent: String?
+): LegacyPortalProbeTemplateDecision {
+    val helperFqn = "$packageName.LegacyPortalProbe"
+    if (!GENERATED_LEGACY_PORTAL_PROBE_IMPORT.matches(helperFqn)) {
+        return LegacyPortalProbeTemplateDecision.Refused(
+            "Portal helper is outside the owned generated namespace: $helperFqn"
+        )
+    }
+    val fullTemplate = loadLegacyPortalProbeTemplate(LegacyPortalProbeTemplateKind.FULL, packageName)
+    val nativeTemplate = loadLegacyPortalProbeTemplate(
+        LegacyPortalProbeTemplateKind.NATIVE_ONLY,
+        packageName
+    )
+    val existingKind = when (existingContent) {
+        null -> null
+        fullTemplate -> LegacyPortalProbeTemplateKind.FULL
+        nativeTemplate -> LegacyPortalProbeTemplateKind.NATIVE_ONLY
+        else -> return LegacyPortalProbeTemplateDecision.Refused(
+            "Existing portal helper is not an exact owned template: $helperFile"
+        )
+    }
+
+    val parser = JavaParser(
+        ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
+    )
+    var nativeUses = 0
+    var fullUses = 0
+    for ((file, source) in sources) {
+        if (file.toAbsolutePath().normalize() == helperFile.toAbsolutePath().normalize()) continue
+        if (!source.contains("LegacyPortalProbe") && !source.contains(helperFqn)) continue
+        val parsed = parser.parse(source)
+        if (!parsed.isSuccessful || !parsed.result.isPresent) {
+            return LegacyPortalProbeTemplateDecision.Refused(
+                "Portal helper consumer does not parse: $file"
+            )
+        }
+        val unit = parsed.result.get()
+        val exactImport = unit.imports.any {
+            !it.isAsterisk && !it.isStatic && it.nameAsString == helperFqn
+        }
+        if (unit.imports.any { it.isStatic && it.nameAsString.startsWith("$helperFqn.") }) {
+            return LegacyPortalProbeTemplateDecision.Refused(
+                "Static portal helper import is outside the admitted feature closure: $file"
+            )
+        }
+        val samePackage = unit.packageDeclaration
+            .map { it.nameAsString == packageName }
+            .orElse(false)
+        val wildcardImport = unit.imports.any {
+            it.isAsterisk && !it.isStatic && it.nameAsString == packageName
+        }
+        val simpleBinding = exactImport || samePackage
+        val conflictingImport = unit.imports.any {
+            !it.isAsterisk && !it.isStatic &&
+                it.nameAsString.endsWith(".LegacyPortalProbe") &&
+                it.nameAsString != helperFqn
+        }
+        val shadowedSimpleName = simpleBinding && (
+            unit.findAll(TypeDeclaration::class.java).any { it.nameAsString == "LegacyPortalProbe" } ||
+                unit.findAll(VariableDeclarator::class.java)
+                    .any { it.nameAsString == "LegacyPortalProbe" } ||
+                unit.findAll(Parameter::class.java).any { it.nameAsString == "LegacyPortalProbe" } ||
+                unit.findAll(TypeParameter::class.java).any { it.nameAsString == "LegacyPortalProbe" }
+            )
+        if (conflictingImport || shadowedSimpleName) {
+            return LegacyPortalProbeTemplateDecision.Refused(
+                "Portal helper simple name is shadowed or ambiguous in $file"
+            )
+        }
+        val offsets = PortalDraftOffsets(source)
+        val allowedRanges = mutableListOf<IntRange>()
+        unit.imports.filter {
+            !it.isAsterisk && !it.isStatic && it.nameAsString == helperFqn
+        }.forEach { importDeclaration ->
+            portalProbeNodeRange(offsets, importDeclaration)?.let(allowedRanges::add)
+        }
+
+        for (call in unit.findAll(MethodCallExpr::class.java)) {
+            val scope = call.scope.orElse(null) ?: continue
+            val scopeText = offsets.text(scope)
+            val bound = scopeText == helperFqn ||
+                (simpleBinding && scope is NameExpr && scope.nameAsString == "LegacyPortalProbe")
+            if (!bound) continue
+            val admitted = when {
+                call.nameAsString == "findDimensionEntryPoint" &&
+                    isExactNativePortalProbeCall(call) -> {
+                    nativeUses++
+                    true
+                }
+                call.nameAsString in setOf("vanilla", "adapt", "reflective", "portalInfo") &&
+                    call.arguments.size == 1 -> {
+                    fullUses++
+                    true
+                }
+                call.nameAsString == "findVirtual" && call.arguments.size >= 3 -> {
+                    fullUses++
+                    true
+                }
+                else -> false
+            }
+            if (!admitted) {
+                return LegacyPortalProbeTemplateDecision.Refused(
+                    "Unsupported portal helper call ${call.nameAsString}/${call.arguments.size} in $file"
+                )
+            }
+            portalProbeNodeRange(offsets, scope)?.let(allowedRanges::add)
+        }
+
+        for (reference in unit.findAll(MethodReferenceExpr::class.java)) {
+            val scope = reference.scope
+            val scopeText = offsets.text(scope)
+            val bound = scopeText == helperFqn ||
+                (simpleBinding && scopeText == "LegacyPortalProbe")
+            if (!bound) continue
+            if (reference.identifier != "vanilla") {
+                return LegacyPortalProbeTemplateDecision.Refused(
+                    "Unsupported portal helper method reference ${reference.identifier} in $file"
+                )
+            }
+            fullUses++
+            portalProbeNodeRange(offsets, scope)?.let(allowedRanges::add)
+        }
+
+        for (type in unit.findAll(ClassOrInterfaceType::class.java)) {
+            val typeText = offsets.text(type)
+            val boundTeleporter = typeText == "$helperFqn.Teleporter" ||
+                (simpleBinding && typeText == "LegacyPortalProbe.Teleporter")
+            if (!boundTeleporter) continue
+            fullUses++
+            portalProbeNodeRange(offsets, type)?.let(allowedRanges::add)
+        }
+
+        val remainder = maskLegacyPortalProbeRanges(source, allowedRanges)
+        if (remainder.contains(helperFqn)) {
+            return LegacyPortalProbeTemplateDecision.Refused(
+                "Unsupported fully qualified portal helper consumer in $file"
+            )
+        }
+        if ((simpleBinding || wildcardImport) &&
+            LEGACY_PORTAL_PROBE_SIMPLE_TOKEN.containsMatchIn(remainder)
+        ) {
+            return LegacyPortalProbeTemplateDecision.Refused(
+                "Unsupported portal helper consumer in $file"
+            )
+        }
+    }
+
+    if (nativeUses == 0 && fullUses == 0) {
+        return LegacyPortalProbeTemplateDecision.Refused(
+            "Portal helper has no exact admitted source consumer"
+        )
+    }
+    val selectedKind = if (fullUses == 0) {
+        LegacyPortalProbeTemplateKind.NATIVE_ONLY
+    } else {
+        LegacyPortalProbeTemplateKind.FULL
+    }
+    if (existingKind == LegacyPortalProbeTemplateKind.NATIVE_ONLY &&
+        selectedKind == LegacyPortalProbeTemplateKind.FULL
+    ) {
+        return LegacyPortalProbeTemplateDecision.Refused(
+            "Native-only portal helper cannot satisfy admitted full helper consumers"
+        )
+    }
+    val content = if (selectedKind == LegacyPortalProbeTemplateKind.NATIVE_ONLY) {
+        nativeTemplate
+    } else {
+        fullTemplate
+    }
+    return LegacyPortalProbeTemplateDecision.Selected(selectedKind, content)
+}
+
+private fun isExactNativePortalProbeCall(call: MethodCallExpr): Boolean {
+    if (call.arguments.size != 3 || call.arguments[0] !is ThisExpr) return false
+    val entrance = call.arguments[1]
+    val exactEntrance = (entrance as? NameExpr)?.nameAsString == "portalEntrancePos" ||
+        (entrance as? com.github.javaparser.ast.expr.FieldAccessExpr)?.let {
+            it.nameAsString == "portalEntrancePos" && it.scope is ThisExpr
+        } == true
+    if (!exactEntrance) return false
+    val destination = (call.arguments[2] as? NameExpr)?.nameAsString ?: return false
+    val owner = call.findAncestor(MethodDeclaration::class.java).orElse(null) ?: return false
+    if (owner.nameAsString != "findDimensionEntryPoint" || owner.parameters.size != 1) return false
+    val parameter = owner.parameters.single()
+    return parameter.nameAsString == destination && parameter.type.asString().endsWith("ServerLevel")
+}
+
+private fun portalProbeNodeRange(
+    offsets: PortalDraftOffsets,
+    node: Node
+): IntRange? {
+    val start = offsets.start(node)
+    val endExclusive = offsets.endExclusive(node)
+    return if (start < 0 || endExclusive <= start) null else start until endExclusive
+}
+
+private fun maskLegacyPortalProbeRanges(source: String, ranges: List<IntRange>): String {
+    val masked = source.toCharArray()
+    for (range in ranges) {
+        for (index in range) {
+            if (index !in masked.indices) continue
+            if (masked[index] != '\n' && masked[index] != '\r') masked[index] = ' '
+        }
+    }
+    var index = 0
+    while (index < source.length) {
+        when {
+            source.startsWith("//", index) -> {
+                val end = source.indexOf('\n', index + 2).let { if (it < 0) source.length else it }
+                for (position in index until end) if (masked[position] != '\r') masked[position] = ' '
+                index = end
+            }
+            source.startsWith("/*", index) -> {
+                val end = source.indexOf("*/", index + 2).let { if (it < 0) source.length else it + 2 }
+                for (position in index until end) {
+                    if (masked[position] != '\n' && masked[position] != '\r') masked[position] = ' '
+                }
+                index = end
+            }
+            source.startsWith("\"\"\"", index) -> {
+                val end = source.indexOf("\"\"\"", index + 3)
+                    .let { if (it < 0) source.length else it + 3 }
+                for (position in index until end) {
+                    if (masked[position] != '\n' && masked[position] != '\r') masked[position] = ' '
+                }
+                index = end
+            }
+            source[index] == '"' || source[index] == '\'' -> {
+                val quote = source[index]
+                var end = index + 1
+                var escaped = false
+                while (end < source.length) {
+                    val character = source[end]
+                    if (character == quote && !escaped) {
+                        end++
+                        break
+                    }
+                    escaped = character == '\\' && !escaped
+                    if (character != '\\') escaped = false
+                    end++
+                }
+                for (position in index until end) {
+                    if (masked[position] != '\n' && masked[position] != '\r') masked[position] = ' '
+                }
+                index = end
+            }
+            else -> index++
+        }
+    }
+    return String(masked)
 }
 
 /**
@@ -262,15 +556,35 @@ internal fun StructuralRefactorPass.migrateLegacyPortalProbeTransitions(
     }
 
     val generated = root.resolve(compatPackage.replace('.', '/')).resolve("LegacyPortalProbe.java")
-    val content = javaClass.getResource("/compat/LegacyPortalProbe.java.template")!!
-        .readText()
-        .replace("@PACKAGE@", compatPackage)
-    val helperChanged = !java.nio.file.Files.exists(generated) || generated.readText() != content
+    val projectSources = walkJavaSourceRoots(root).use { paths ->
+        paths.filter { it.toString().endsWith(".java") }
+            .toList()
+            .associateWith { it.readText() }
+            .toMutableMap()
+    }
+    projectSources.putAll(stagedSources)
+    val existingContent = projectSources[generated]
+    val templateDecision = decideLegacyPortalProbeTemplate(
+        projectSources,
+        generated,
+        compatPackage,
+        existingContent
+    )
+    if (templateDecision is LegacyPortalProbeTemplateDecision.Refused) return emptyList()
+    val selected = templateDecision as LegacyPortalProbeTemplateDecision.Selected
+    val content = selected.content
+    val helperChanged = existingContent != content
     if (helperChanged) {
+        val helperDescription = when (selected.kind) {
+            LegacyPortalProbeTemplateKind.FULL ->
+                "Generate the exact old portal probe algorithm and checked value adapters"
+            LegacyPortalProbeTemplateKind.NATIVE_ONLY ->
+                "Generate the exact old native portal probe algorithm"
+        }
         changes += Change(
             generated,
             1,
-            "Generate the exact old portal probe algorithm and checked value adapters",
+            helperDescription,
             "",
             "$compatPackage.LegacyPortalProbe",
             Confidence.HIGH,

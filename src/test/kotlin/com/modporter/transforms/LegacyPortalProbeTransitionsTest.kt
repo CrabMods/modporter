@@ -12,6 +12,7 @@ import kotlin.io.path.writeText
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlin.streams.toList
 
 class LegacyPortalProbeTransitionsTest {
     @TempDir lateinit var directory: Path
@@ -263,11 +264,98 @@ class LegacyPortalProbeTransitionsTest {
             ),
             migratedProbe
         )
-        assertTrue(
-            directory.resolve(
-                "src/main/java/com/modporter/generated/portal_probe/compat/LegacyPortalProbe.java"
-            ).exists()
+        val helper = directory.resolve(
+            "src/main/java/com/modporter/generated/portal_probe/compat/LegacyPortalProbe.java"
         )
+        assertTrue(helper.exists())
+        val helperSource = helper.readText()
+        assertTrue(helperSource.contains("findClosestPortalPosition(exitPos, isNether, worldBorder)"), helperSource)
+        assertTrue(helperSource.contains("TicketType.PORTAL"), helperSource)
+        assertTrue(helperSource.contains("PortalForcer.TICKET_RADIUS"), helperSource)
+        assertTrue(helperSource.contains("PortalShape.findCollisionFreePosition("), helperSource)
+        assertFalse(helperSource.contains("MethodHandle"), helperSource)
+        assertFalse(helperSource.contains("java.lang.reflect"), helperSource)
+        assertFalse(helperSource.contains(".createPortal("), helperSource)
+        assertTrue(StructuralRefactorPass()
+            .migrateLegacyPortalProbeTransitions(directory, dryRun = false)
+            .isEmpty())
+    }
+
+    @Test
+    fun `owned helper drift refuses the exact probe without partial writes`() {
+        modEntry()
+        val probe = java("example/DriftProbe.java", """
+            package example;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.level.portal.PortalInfo;
+            class DriftProbe extends Entity {
+                void remember() { portalEntrancePos = blockPosition(); }
+                @Override
+                public PortalInfo findDimensionEntryPoint(ServerLevel destination) {
+                    return super.findDimensionEntryPoint(destination);
+                }
+            }
+        """)
+        val helper = java(
+            "com/modporter/generated/portal_probe/compat/LegacyPortalProbe.java",
+            """
+            package com.modporter.generated.portal_probe.compat;
+            public final class LegacyPortalProbe { private LegacyPortalProbe() {} }
+            """
+        )
+        val originalProbe = probe.readText()
+        val originalHelper = helper.readText()
+
+        val changes = StructuralRefactorPass()
+            .migrateLegacyPortalProbeTransitions(directory, dryRun = false)
+
+        assertTrue(changes.isEmpty(), changes.toString())
+        assertEquals(originalProbe, probe.readText())
+        assertEquals(originalHelper, helper.readText())
+    }
+
+    @Test
+    fun `unsupported extra helper consumer refuses native closure without partial writes`() {
+        modEntry()
+        val probe = java("example/ExtraConsumerProbe.java", """
+            package example;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.level.portal.PortalInfo;
+            class ExtraConsumerProbe extends Entity {
+                void remember() { portalEntrancePos = blockPosition(); }
+                @Override
+                public PortalInfo findDimensionEntryPoint(ServerLevel destination) {
+                    return super.findDimensionEntryPoint(destination);
+                }
+            }
+        """)
+        java("example/UnknownPortalProbeUse.java", """
+            package example;
+            import com.modporter.generated.portal_probe.compat.LegacyPortalProbe;
+            class UnknownPortalProbeUse {
+                Class<?> helperType() { return LegacyPortalProbe.class; }
+            }
+        """)
+        val helper = directory.resolve(
+            "src/main/java/com/modporter/generated/portal_probe/compat/LegacyPortalProbe.java"
+        )
+        helper.parent.createDirectories()
+        helper.writeText(
+            LegacyPortalProbeTransitionsTest::class.java
+                .getResource("/compat/LegacyPortalProbe.java.template")!!
+                .readText()
+                .replace("@PACKAGE@", "com.modporter.generated.portal_probe.compat")
+        )
+        val original = snapshotBytes()
+
+        val changes = StructuralRefactorPass()
+            .migrateLegacyPortalProbeTransitions(directory, dryRun = false)
+
+        assertTrue(changes.isEmpty(), changes.toString())
+        assertEquals(original, snapshotBytes())
+        assertTrue(probe.exists())
     }
 
     @Test
@@ -425,6 +513,12 @@ class LegacyPortalProbeTransitionsTest {
         )
         assertFalse(migrated.contains("import net.minecraftforge.common.util.ITeleporter;"), migrated)
         assertTrue(passHasOneHelperImport(migrated), migrated)
+    }
+
+    private fun snapshotBytes(): Map<String, List<Byte>> = java.nio.file.Files.walk(directory).use { paths ->
+        paths.filter(java.nio.file.Files::isRegularFile).toList().associate { path ->
+            directory.relativize(path).toString() to java.nio.file.Files.readAllBytes(path).toList()
+        }
     }
 
     private fun passHasOneHelperImport(source: String): Boolean =
