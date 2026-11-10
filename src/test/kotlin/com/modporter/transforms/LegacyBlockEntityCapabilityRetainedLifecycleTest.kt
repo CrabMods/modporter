@@ -4,6 +4,7 @@ import com.modporter.core.transforms.build.BuildSystemPass
 import com.modporter.core.transforms.structural.LegacyBlockEntityCapabilityQueries
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable
 import java.io.ByteArrayOutputStream
 import java.net.URLClassLoader
 import java.nio.file.Path
@@ -112,6 +113,14 @@ class LegacyBlockEntityCapabilityRetainedLifecycleTest {
         assertTrue(serverMixin.readText().contains("expect = 1"), serverMixin.readText())
         assertTrue(serverMixin.readText().contains("runInvalidation("), serverMixin.readText())
         assertTrue(defaultMixin.readText().contains("ILevelExtension.class"), defaultMixin.readText())
+        assertTrue(
+            defaultMixin.readText().contains("public interface LegacyCapabilityLevelExtensionMixin"),
+            defaultMixin.readText()
+        )
+        assertFalse(
+            defaultMixin.readText().contains("class LegacyCapabilityLevelExtensionMixin"),
+            defaultMixin.readText()
+        )
         assertTrue(defaultMixin.readText().contains("@WrapMethod("), defaultMixin.readText())
         assertTrue(defaultMixin.readText().contains("remap = false"), defaultMixin.readText())
         assertTrue(defaultMixin.readText().contains("runInvalidation("), defaultMixin.readText())
@@ -187,6 +196,167 @@ class LegacyBlockEntityCapabilityRetainedLifecycleTest {
     }
 
     @Test
+    fun `reviewed retained profiles bind all six exact paths and external consumer`() {
+        val dependencyPath =
+            "src/main/java/com/simibubi/create/api/equipment/goggles/IHaveGoggleInformation.java"
+        val dependencyDigest = "2e373b54fab5899c4f16af37e31e81d5c4a2b8d8108b4555d3babd8a0d6a5e64"
+        val reviewed = linkedMapOf(
+            "src/main/java/com/simibubi/create/content/fluids/FlowSource.java" to
+                "4492e7cd9b715237e401b697fc718d111dd7f04b585a561cbef5bfb21f96691f",
+            "src/main/java/com/simibubi/create/content/fluids/tank/FluidTankBlockEntity.java" to
+                "f8e3af0a50159ca05b4ae44e545570a794a58da8a0c8cabbc6e88f1872f2dd5f",
+            "src/main/java/com/simibubi/create/content/kinetics/mechanicalArm/ArmInteractionPoint.java" to
+                "f01325deb58b04d5a6bdc31e58681068be3c126363962fb76d6969c0b42ca09f",
+            "src/main/java/com/simibubi/create/content/logistics/chute/ChuteBlockEntity.java" to
+                "3e6a1dfd7d2f93784b14deb2076da6448a1f0334f4b39380104847a74c652372",
+            "src/main/java/com/simibubi/create/content/logistics/tunnel/BrassTunnelBlockEntity.java" to
+                "ba73084f4380dbbe8756934cb040eb95805e3603b038ae81e9c68b4a0790a517",
+            "src/main/java/com/simibubi/create/content/schematics/cannon/SchematicannonBlockEntity.java" to
+                "dc1ae7eebf9a08cfba58ec570bce705854d631fbb0df5c51e4a6f44e880cab9b"
+        )
+        val projectDigests = reviewed + (dependencyPath to dependencyDigest)
+
+        reviewed.forEach { (path, digest) ->
+            assertTrue(
+                LegacyBlockEntityCapabilityQueries.reviewedRetainedSourceDigestProfile(
+                    path,
+                    digest,
+                    projectDigests
+                ),
+                path
+            )
+        }
+
+        val flow = reviewed.entries.first()
+        val tank = reviewed.entries.elementAt(1)
+        assertFalse(
+            LegacyBlockEntityCapabilityQueries.reviewedRetainedSourceDigestProfile(
+                "shadow/${flow.key}",
+                flow.value,
+                projectDigests
+            )
+        )
+        assertFalse(
+            LegacyBlockEntityCapabilityQueries.reviewedRetainedSourceDigestProfile(
+                flow.key,
+                tank.value,
+                projectDigests
+            )
+        )
+        assertFalse(
+            LegacyBlockEntityCapabilityQueries.reviewedRetainedSourceDigestProfile(
+                tank.key,
+                tank.value,
+                projectDigests - dependencyPath
+            )
+        )
+        assertFalse(
+            LegacyBlockEntityCapabilityQueries.reviewedRetainedSourceDigestProfile(
+                tank.key,
+                tank.value,
+                projectDigests + (dependencyPath to "0".repeat(64))
+            )
+        )
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "MODPORTER_CREATE_PROFILE_REPLAY", matches = ".+")
+    fun `configured Create tree admits exactly the six reviewed retained sites without mutation`() {
+        val project = Path.of(System.getenv("MODPORTER_CREATE_PROFILE_REPLAY")).toAbsolutePath().normalize()
+        val expectedSources = setOf(
+            "src/main/java/com/simibubi/create/content/fluids/FlowSource.java",
+            "src/main/java/com/simibubi/create/content/fluids/tank/FluidTankBlockEntity.java",
+            "src/main/java/com/simibubi/create/content/kinetics/mechanicalArm/ArmInteractionPoint.java",
+            "src/main/java/com/simibubi/create/content/logistics/chute/ChuteBlockEntity.java",
+            "src/main/java/com/simibubi/create/content/logistics/tunnel/BrassTunnelBlockEntity.java",
+            "src/main/java/com/simibubi/create/content/schematics/cannon/SchematicannonBlockEntity.java"
+        )
+        val reviewedInputs = expectedSources +
+            "src/main/java/com/simibubi/create/api/equipment/goggles/IHaveGoggleInformation.java"
+        val before = reviewedInputs.associateWith { relative -> project.resolve(relative).readText() }
+        val mixinConfig = project.resolve(
+            "src/main/resources/modporter-legacy-capability-query.mixins.json"
+        )
+        assertFalse(mixinConfig.exists(), mixinConfig.toString())
+
+        val result = LegacyBlockEntityCapabilityQueries.migrate(
+            project,
+            { "com.modporter.generated.create.compat" },
+            dryRun = true
+        )
+
+        assertTrue(result.gates.isEmpty(), result.gates.joinToString("\n"))
+        val retainedSources = result.retainedFiles.asSequence()
+            .map { file ->
+                project.relativize(file.toAbsolutePath().normalize())
+                    .toString()
+                    .replace('\\', '/')
+            }
+            .toSet()
+        assertEquals(expectedSources, retainedSources)
+        assertTrue(
+            result.changes.any { change ->
+                change.file.toAbsolutePath().normalize() == mixinConfig &&
+                    change.after.contains("LegacyCapabilityLevelExtensionMixin")
+            },
+            result.changes.joinToString("\n")
+        )
+        assertFalse(mixinConfig.exists(), mixinConfig.toString())
+        before.forEach { (relative, source) ->
+            assertEquals(source, project.resolve(relative).readText(), relative)
+        }
+    }
+
+    @Test
+    fun `comment and string only drift cannot impersonate reviewed retained source`() {
+        val compatPackage = "com.modporter.generated.create.compat"
+        val source = writeJava(
+            "com/simibubi/create/content/schematics/cannon/SchematicannonBlockEntity.java",
+            reviewedSchematicannonSource(compatPackage)
+        )
+        val baseline = source.readText()
+
+        val accepted = LegacyBlockEntityCapabilityQueries.migrate(
+            directory,
+            { compatPackage },
+            dryRun = true
+        )
+        assertTrue(accepted.gates.isEmpty(), accepted.gates.joinToString("\n"))
+
+        source.writeText(
+            baseline +
+                "\n// attachedInventories.clear() capability.isPresent() getCapability retained alias\n"
+        )
+        val commentDrift = LegacyBlockEntityCapabilityQueries.migrate(
+            directory,
+            { compatPackage },
+            dryRun = true
+        )
+        assertTrue(
+            commentDrift.gates.any { it.contains("cannot prove LazyOptional lifecycle use") },
+            commentDrift.gates.joinToString("\n")
+        )
+
+        source.writeText(
+            baseline.replace(
+                "public class SchematicannonBlockEntity {",
+                "public class SchematicannonBlockEntity {\n" +
+                    "    private static final String ADMISSION_NOISE = " +
+                    "\"attachedInventories.clear() capability.isPresent() getCapability\";"
+            )
+        )
+        val stringDrift = LegacyBlockEntityCapabilityQueries.migrate(
+            directory,
+            { compatPackage },
+            dryRun = true
+        )
+        assertTrue(
+            stringDrift.gates.any { it.contains("cannot prove LazyOptional lifecycle use") },
+            stringDrift.gates.joinToString("\n")
+        )
+    }
+
+    @Test
     fun `same exact Create owner without refresh topology remains gated`() {
         val compatPackage = "com.modporter.generated.create.compat"
         writeJava(
@@ -252,6 +422,41 @@ class LegacyBlockEntityCapabilityRetainedLifecycleTest {
             aliasResult.gates.joinToString("\n")
         )
     }
+
+    private fun reviewedSchematicannonSource(compatPackage: String): String =
+        """
+        package com.simibubi.create.content.schematics.cannon;
+
+        import $compatPackage.LazyOptional;
+        import java.util.LinkedHashSet;
+        import net.minecraft.core.BlockPos;
+        import net.minecraft.core.Direction;
+        import net.minecraft.world.level.Level;
+        import net.minecraft.world.level.block.entity.BlockEntity;
+        import net.neoforged.neoforge.capabilities.Capabilities;
+        import net.neoforged.neoforge.items.IItemHandler;
+
+        public class SchematicannonBlockEntity {
+            public LinkedHashSet<LazyOptional<IItemHandler>> attachedInventories = new LinkedHashSet<>();
+            private final Level level = new Level();
+            private final BlockPos worldPosition = new BlockPos(1);
+
+            public void findInventories() {
+                attachedInventories.clear();
+                for (Direction facing : Direction.values()) {
+                    if (!level.isLoaded(worldPosition.relative(facing)))
+                        continue;
+                    BlockEntity blockEntity = level.getBlockEntity(worldPosition.relative(facing));
+                    if (blockEntity != null) {
+                        LazyOptional<IItemHandler> capability = blockEntity.getCapability(Capabilities.ItemHandler.BLOCK, facing.getOpposite());
+                        if (capability.isPresent()) {
+                            attachedInventories.add(capability);
+                        }
+                    }
+                }
+            }
+        }
+        """
 
     private fun schematicannonDriftSource(compatPackage: String, extraUse: String): String =
         """

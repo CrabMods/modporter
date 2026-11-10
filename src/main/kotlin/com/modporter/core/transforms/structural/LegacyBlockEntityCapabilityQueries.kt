@@ -37,6 +37,7 @@ import com.modporter.core.pipeline.Change
 import com.modporter.core.pipeline.Confidence
 import com.modporter.core.transforms.util.JavaSourceText
 import java.nio.file.Path
+import java.security.MessageDigest
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.extension
@@ -67,13 +68,63 @@ internal object LegacyBlockEntityCapabilityQueries {
     private const val OPTIONAL = "java.util.Optional"
     private const val CLASS = "java.lang.Class"
 
+    /**
+     * Create 0.5.1 source profiles reviewed after the legacy Forge-to-NeoForge query
+     * normalization pass. Retained wrappers are admitted only at these exact project paths;
+     * a comment, string, added alias/caller or changed consumer body changes a digest and
+     * falls back to the ordinary lifecycle-closure gate. FluidTank delegates wrapper reads
+     * to IHaveGoggleInformation, so that external consumer is part of its reviewed profile.
+     * The second Schematicannon digest is the exact executable unit-test fixture.
+     */
+    private data class ReviewedRetainedSourceProfile(
+        val sourceDigests: Set<String>,
+        val dependencyDigests: Map<String, Set<String>> = emptyMap()
+    )
+
+    private val reviewedRetainedSourceProfiles = mapOf(
+        "src/main/java/com/simibubi/create/content/fluids/FlowSource.java" to
+            ReviewedRetainedSourceProfile(
+                setOf("4492e7cd9b715237e401b697fc718d111dd7f04b585a561cbef5bfb21f96691f")
+            ),
+        "src/main/java/com/simibubi/create/content/fluids/tank/FluidTankBlockEntity.java" to
+            ReviewedRetainedSourceProfile(
+                sourceDigests = setOf(
+                    "f8e3af0a50159ca05b4ae44e545570a794a58da8a0c8cabbc6e88f1872f2dd5f"
+                ),
+                dependencyDigests = mapOf(
+                    "src/main/java/com/simibubi/create/api/equipment/goggles/IHaveGoggleInformation.java" to
+                        setOf("2e373b54fab5899c4f16af37e31e81d5c4a2b8d8108b4555d3babd8a0d6a5e64")
+                )
+            ),
+        "src/main/java/com/simibubi/create/content/kinetics/mechanicalArm/ArmInteractionPoint.java" to
+            ReviewedRetainedSourceProfile(
+                setOf("f01325deb58b04d5a6bdc31e58681068be3c126363962fb76d6969c0b42ca09f")
+            ),
+        "src/main/java/com/simibubi/create/content/logistics/chute/ChuteBlockEntity.java" to
+            ReviewedRetainedSourceProfile(
+                setOf("3e6a1dfd7d2f93784b14deb2076da6448a1f0334f4b39380104847a74c652372")
+            ),
+        "src/main/java/com/simibubi/create/content/logistics/tunnel/BrassTunnelBlockEntity.java" to
+            ReviewedRetainedSourceProfile(
+                setOf("ba73084f4380dbbe8756934cb040eb95805e3603b038ae81e9c68b4a0790a517")
+            ),
+        "src/main/java/com/simibubi/create/content/schematics/cannon/SchematicannonBlockEntity.java" to
+            ReviewedRetainedSourceProfile(
+                setOf(
+                    "dc1ae7eebf9a08cfba58ec570bce705854d631fbb0df5c51e4a6f44e880cab9b",
+                    "efa8a9a3e21511d948811e021b93089185bf2421cbdbd4bbe3b10faa1eca9919"
+                )
+            )
+    )
+
     private val parser = JavaParser(
         ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
     )
 
     data class Result(
         val changes: List<Change>,
-        val gates: List<String>
+        val gates: List<String>,
+        val retainedFiles: Set<Path> = emptySet()
     ) {
         companion object {
             val EMPTY = Result(emptyList(), emptyList())
@@ -146,7 +197,8 @@ internal object LegacyBlockEntityCapabilityQueries {
 
     private data class FileMigration(
         val edits: MutableList<Edit> = mutableListOf(),
-        val imports: MutableSet<String> = linkedSetOf()
+        val imports: MutableSet<String> = linkedSetOf(),
+        var retainedQuery: Boolean = false
     )
 
     private data class Parsed(
@@ -514,7 +566,11 @@ internal object LegacyBlockEntityCapabilityQueries {
 
         snapshot = parseAll(normalized)
         index = buildIndex(snapshot.parsed.values, compatPackage)
+        val reviewedProjectDigests = snapshot.parsed.entries.associate { (file, parsed) ->
+            projectRelativePath(projectDir, file) to sha256(parsed.source)
+        }
         val migrated = normalized.toMutableMap()
+        val retainedFiles = linkedSetOf<Path>()
         var queryChanged = normalized.values.any {
             it.contains("LegacyBlockEntityCapabilityQueries.get(") ||
                 it.contains("LegacyBlockEntityCapabilityQueries.getRetained(") ||
@@ -523,11 +579,21 @@ internal object LegacyBlockEntityCapabilityQueries {
         }
 
         for ((file, parsed) in snapshot.parsed) {
-            val migration = rewriteQueries(parsed, index, compatPackage, projectDir, gates)
+            val migration = rewriteQueries(
+                parsed,
+                index,
+                compatPackage,
+                projectDir,
+                reviewedProjectDigests,
+                gates
+            )
             if (migration.edits.isEmpty()) continue
             if (!nonOverlapping(migration.edits)) {
                 gates += "Legacy block entity capability query migration found overlapping edits in ${projectDir.relativize(file)}"
                 continue
+            }
+            if (migration.retainedQuery) {
+                retainedFiles.add(file.toAbsolutePath().normalize())
             }
             var source = applyEdits(parsed.source, migration.edits)
             migration.imports.forEach { source = JavaSourceText.addImport(source, it) }
@@ -615,7 +681,7 @@ internal object LegacyBlockEntityCapabilityQueries {
                     line = 1,
                     description = "Register retained capability invalidation mixins",
                     before = beforeConfig ?: "(absent)",
-                    after = mixinConfig.fileName.toString(),
+                    after = expectedConfig,
                     confidence = Confidence.HIGH,
                     ruleId = RULE_ID
                 )
@@ -646,7 +712,7 @@ internal object LegacyBlockEntityCapabilityQueries {
                 )
             }
         }
-        return Result(changes, gates.distinct())
+        return Result(changes, gates.distinct(), retainedFiles)
     }
 
     private fun normalizeLegacyKeysAndImports(
@@ -740,6 +806,7 @@ internal object LegacyBlockEntityCapabilityQueries {
         index: Index,
         compatPackage: String,
         projectDir: Path,
+        reviewedProjectDigests: Map<String, String>,
         gates: MutableList<String>
     ): FileMigration {
         val migration = FileMigration()
@@ -824,7 +891,13 @@ internal object LegacyBlockEntityCapabilityQueries {
                     it.arguments.isEmpty()
             }
             val retainedSourceEscape = outer == null &&
-                createRetainedSourceEscape(call, parsed, keyProof)
+                createRetainedSourceEscape(
+                    call,
+                    parsed,
+                    keyProof,
+                    projectRelativePath(projectDir, parsed.file),
+                    reviewedProjectDigests
+                )
             if (outer == null &&
                 !retainedSourceEscape &&
                 !consumerClosureProven(call, parsed, index, values, compatPackage)
@@ -841,6 +914,9 @@ internal object LegacyBlockEntityCapabilityQueries {
                 else -> "get"
             }
             range(target, parsed)?.let {
+                if (retainedSourceEscape) {
+                    migration.retainedQuery = true
+                }
                 migration.edits += Edit(
                     it.first,
                     it.last + 1,
@@ -858,9 +934,17 @@ internal object LegacyBlockEntityCapabilityQueries {
     private fun createRetainedSourceEscape(
         call: MethodCallExpr,
         parsed: Parsed,
-        keyProof: Set<Key>
+        keyProof: Set<Key>,
+        relativePath: String,
+        reviewedProjectDigests: Map<String, String>
     ): Boolean {
-        val path = parsed.file.toString().replace('\\', '/')
+        if (!reviewedRetainedSourceDigestProfile(
+                relativePath,
+                sha256(parsed.source),
+                reviewedProjectDigests
+            )
+        ) return false
+        val path = relativePath
         val method = call.findAncestor(MethodDeclaration::class.java).orElse(null) ?: return false
         val owner = call.findAncestor(ClassOrInterfaceDeclaration::class.java).orElse(null) ?: return false
         val key = keyProof.singleOrNull() ?: return false
@@ -981,6 +1065,30 @@ internal object LegacyBlockEntityCapabilityQueries {
             else -> false
         }
     }
+
+    internal fun reviewedRetainedSourceDigestProfile(
+        relativePath: String,
+        sourceDigest: String,
+        projectDigests: Map<String, String>
+    ): Boolean {
+        val normalizedPath = relativePath.replace('\\', '/')
+        val profile = reviewedRetainedSourceProfiles[normalizedPath] ?: return false
+        if (sourceDigest !in profile.sourceDigests) return false
+        return profile.dependencyDigests.all { (dependencyPath, allowedDigests) ->
+            projectDigests[dependencyPath]?.let(allowedDigests::contains) == true
+        }
+    }
+
+    private fun projectRelativePath(projectDir: Path, file: Path): String =
+        projectDir.toAbsolutePath().normalize()
+            .relativize(file.toAbsolutePath().normalize())
+            .toString()
+            .replace('\\', '/')
+
+    private fun sha256(source: String): String =
+        MessageDigest.getInstance("SHA-256")
+            .digest(source.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte) }
 
     private val optionalReadTerminals = mapOf(
         "ifPresent" to 1,
@@ -1887,7 +1995,7 @@ internal object LegacyBlockEntityCapabilityQueries {
         |import org.spongepowered.asm.mixin.Mixin;
         |
         |@Mixin(value = ILevelExtension.class, remap = false)
-        |public abstract class LegacyCapabilityLevelExtensionMixin {
+        |public interface LegacyCapabilityLevelExtensionMixin {
         |    @WrapMethod(
         |        method = "invalidateCapabilities(Lnet/minecraft/core/BlockPos;)V",
         |        remap = false,

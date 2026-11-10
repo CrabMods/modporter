@@ -37,7 +37,11 @@ class Pipeline(
                 logger.info { "Running pass ${pass.order}: ${pass.name}" }
 
                 val result = if (dryRun) {
-                    pass.analyze(passDir)
+                    if (pass is PlannedChangesAwarePass) {
+                        pass.analyze(passDir, results.toList())
+                    } else {
+                        pass.analyze(passDir)
+                    }
                 } else {
                     pass.apply(passDir)
                 }

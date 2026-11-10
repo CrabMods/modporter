@@ -32,7 +32,7 @@ class BuildSystemPass(
     val mappingsPrefix: String = "/mappings/forge2neo",
     private val dependencyResolverFactory: (offlineMode: Boolean, mappingsPrefix: String) -> DependencyResolver =
         { offline, prefix -> DependencyResolver(offlineMode = offline, mappingsPrefix = prefix) }
-) : Pass {
+) : PlannedChangesAwarePass {
     override val name = "Build System"
     override val order = 4
     override val migratesBuildRoot = true
@@ -47,6 +47,14 @@ class BuildSystemPass(
     private val removedDependencyPackages = linkedSetOf<String>()
 
     override fun analyze(projectDir: Path): PassResult = processBuildFiles(projectDir, dryRun = true)
+
+    override fun analyze(projectDir: Path, precedingResults: List<PassResult>): PassResult =
+        processBuildFiles(
+            projectDir,
+            dryRun = true,
+            plannedChanges = precedingResults.flatMap { it.changes }
+        )
+
     override fun apply(projectDir: Path): PassResult = processBuildFiles(projectDir, dryRun = false)
 
     /**
@@ -148,9 +156,10 @@ class BuildSystemPass(
     private fun processBuildFiles(
         projectDir: Path,
         dryRun: Boolean,
-        dependencyOnly: DependencyOnlyContext? = null
+        dependencyOnly: DependencyOnlyContext? = null,
+        plannedChanges: List<Change> = emptyList()
     ): PassResult {
-        val result = processBuildFilesBeforeRuntime(projectDir, dryRun, dependencyOnly)
+        val result = processBuildFilesBeforeRuntime(projectDir, dryRun, dependencyOnly, plannedChanges)
         if (dependencyOnly != null || result.errors.isNotEmpty()) return result
         val normalized = try {
             val capabilities = FinalCapabilityCompatMigration.migrate(projectDir, dryRun)
@@ -172,7 +181,8 @@ class BuildSystemPass(
     private fun processBuildFilesBeforeRuntime(
         projectDir: Path,
         dryRun: Boolean,
-        dependencyOnly: DependencyOnlyContext?
+        dependencyOnly: DependencyOnlyContext?,
+        plannedChanges: List<Change>
     ): PassResult {
         val moduleDir = GradleModLayout.modModule(projectDir)
         if (moduleDir == projectDir) {
@@ -180,7 +190,8 @@ class BuildSystemPass(
                 projectDir,
                 dryRun,
                 standalone = true,
-                dependencyOnly = dependencyOnly
+                dependencyOnly = dependencyOnly,
+                plannedChanges = plannedChanges
             )
         }
         // A multi-project build: the mod module is migrated like a project of its own, the root keeps
@@ -189,7 +200,8 @@ class BuildSystemPass(
             moduleDir,
             dryRun,
             standalone = false,
-            dependencyOnly = dependencyOnly
+            dependencyOnly = dependencyOnly,
+            plannedChanges = plannedChanges
         )
         val changes = module.changes.toMutableList()
         val errors = module.errors.toMutableList()
@@ -229,7 +241,8 @@ class BuildSystemPass(
         projectDir: Path,
         dryRun: Boolean,
         standalone: Boolean,
-        dependencyOnly: DependencyOnlyContext?
+        dependencyOnly: DependencyOnlyContext?,
+        plannedChanges: List<Change>
     ): PassResult {
         val changes = mutableListOf<Change>()
         val errors = mutableListOf<String>()
@@ -602,7 +615,7 @@ class BuildSystemPass(
         }
 
         try {
-            changes.addAll(registerExistingMixinConfigs(projectDir, dryRun))
+            changes.addAll(registerExistingMixinConfigs(projectDir, dryRun, plannedChanges))
         } catch (e: Exception) {
             errors.add("Failed to register existing mixin configs: ${e.message}")
         }
@@ -4717,31 +4730,35 @@ neoForge {
         ))
     }
 
-    private fun registerExistingMixinConfigs(projectDir: Path, dryRun: Boolean): List<Change> {
+    private fun registerExistingMixinConfigs(
+        projectDir: Path,
+        dryRun: Boolean,
+        plannedChanges: List<Change>
+    ): List<Change> {
         val resourcesDir = projectDir.resolve("src/main/resources")
         if (!resourcesDir.exists()) return emptyList()
+        val ownedResourcesDir = resourcesDir.toAbsolutePath().normalize()
+        val configsByPath = linkedMapOf<Path, String>()
 
-        val configNames = java.nio.file.Files.walk(resourcesDir).use { paths ->
-            paths
-                // Forge MDK projects name the config mixins.<modid>.json (ShowerCore) as often as <modid>.mixins.json;
-                // the content check below decides, the name only narrows the walk
-                .filter { it.isRegularFile() && it.fileName.toString().let { name -> name.endsWith(".json") && name.contains("mixin", ignoreCase = true) } }
-                .map { mixinConfig ->
-                    val source = mixinConfig.readText()
-                    val isConfig = Regex(""""package"\s*:\s*"[^"]+"""").containsMatchIn(source) &&
-                        Regex(""""(?:mixins|client|server)"\s*:\s*\[""").containsMatchIn(source)
-                    if (!isConfig) {
-                        null
-                    } else {
-                        resourcesDir.relativize(mixinConfig).joinToString("/")
-                    }
+        Files.walk(resourcesDir).use { paths ->
+            paths.filter { it.isRegularFile() && it.extension.equals("json", ignoreCase = true) }
+                .forEach { config ->
+                    configsByPath[config.toAbsolutePath().normalize()] = config.readText()
                 }
-                .filter { it != null }
-                .map { it!! }
-                .distinct()
-                .sorted()
-                .toList()
         }
+        plannedChanges.forEach { change ->
+            val ownedPath = ownedPlannedResourcePath(projectDir, ownedResourcesDir, change.file) ?: return@forEach
+            if (!ownedPath.extension.equals("json", ignoreCase = true)) return@forEach
+            if (!isStructuredMixinConfig(change.after)) return@forEach
+            configsByPath[ownedPath] = change.after
+        }
+
+        val configNames = configsByPath.entries.asSequence()
+            .filter { (_, source) -> isStructuredMixinConfig(source) }
+            .map { (path, _) -> ownedResourcesDir.relativize(path).joinToString("/") }
+            .distinct()
+            .sorted()
+            .toList()
         if (configNames.isEmpty()) return emptyList()
 
         return ensureNeoForgeModsTomlMixinEntries(
@@ -4752,6 +4769,39 @@ neoForge {
             ruleId = "build-register-existing-mixin-config"
         )
     }
+
+    private fun ownedPlannedResourcePath(
+        projectDir: Path,
+        ownedResourcesDir: Path,
+        file: Path
+    ): Path? {
+        val candidates = if (file.isAbsolute) {
+            listOf(file)
+        } else {
+            listOf(file, projectDir.resolve(file))
+        }
+        return candidates.asSequence()
+            .map { it.toAbsolutePath().normalize() }
+            .distinct()
+            .firstOrNull { candidate ->
+                candidate != ownedResourcesDir && candidate.startsWith(ownedResourcesDir)
+            }
+    }
+
+    private fun isStructuredMixinConfig(source: String): Boolean = runCatching {
+        val root = Json.parseToJsonElement(source).jsonObject
+        val packageName = root["package"]?.jsonPrimitive
+        if (packageName == null || !packageName.isString || packageName.content.isBlank()) {
+            return@runCatching false
+        }
+        val memberLists = listOf("mixins", "client", "server").mapNotNull(root::get)
+        memberLists.isNotEmpty() && memberLists.all { members ->
+            members.jsonArray.all { member ->
+                val name = member.jsonPrimitive
+                name.isString && name.content.isNotBlank()
+            }
+        }
+    }.getOrDefault(false)
 
     private fun ensureNeoForgeModsTomlMixinEntry(projectDir: Path, configName: String, dryRun: Boolean): List<Change> {
         return ensureNeoForgeModsTomlMixinEntries(
@@ -11237,6 +11287,7 @@ import java.util.function.Supplier;
  * NeoForge 1.21 removed LazyOptional; new capabilities should use RegisterCapabilitiesEvent directly.
  */
 public final class LazyOptional<T> {
+    private static final LazyOptional<?> EMPTY = new LazyOptional<>(null);
     private final Supplier<? extends T> supplier;
     private final java.util.Set<Consumer<LazyOptional<T>>> listeners = new java.util.HashSet<>();
     private boolean valid = true;
@@ -11248,15 +11299,15 @@ public final class LazyOptional<T> {
     }
 
     public static <T> LazyOptional<T> of(Supplier<? extends T> supplier) {
-        return new LazyOptional<>(supplier);
+        return supplier == null ? empty() : new LazyOptional<>(supplier);
     }
 
     public static <T> LazyOptional<T> ofNullable(T value) {
-        return new LazyOptional<>(() -> value);
+        return value == null ? empty() : of(() -> value);
     }
 
     public static <T> LazyOptional<T> empty() {
-        return new LazyOptional<>(null);
+        return EMPTY.cast();
     }
 
     @SuppressWarnings("unchecked")
@@ -11265,24 +11316,27 @@ public final class LazyOptional<T> {
     }
 
     public void ifPresent(Consumer<? super T> consumer) {
+        java.util.Objects.requireNonNull(consumer);
         T current = orElse(null);
-        if (current != null) {
+        if (valid && current != null) {
             consumer.accept(current);
         }
     }
 
-    public <R> LazyOptional<R> map(Function<? super T, ? extends R> mapper) {
-        return new LazyOptional<>(() -> {
-            T current = orElse(null);
-            return current != null ? mapper.apply(current) : null;
-        });
+    public <R> Optional<R> map(Function<? super T, ? extends R> mapper) {
+        java.util.Objects.requireNonNull(mapper);
+        return isPresent() ? Optional.of(mapper.apply(getValueUnsafe())) : Optional.empty();
     }
 
-    public LazyOptional<T> filter(Predicate<? super T> predicate) {
-        return new LazyOptional<>(() -> {
-            T current = orElse(null);
-            return current != null && predicate.test(current) ? current : null;
-        });
+    public <R> LazyOptional<R> lazyMap(Function<? super T, ? extends R> mapper) {
+        java.util.Objects.requireNonNull(mapper);
+        return isPresent() ? of(() -> mapper.apply(getValueUnsafe())) : empty();
+    }
+
+    public Optional<T> filter(Predicate<? super T> predicate) {
+        java.util.Objects.requireNonNull(predicate);
+        T current = orElse(null);
+        return current != null && predicate.test(current) ? Optional.of(current) : Optional.empty();
     }
 
     public T orElse(T other) {
@@ -11318,7 +11372,15 @@ public final class LazyOptional<T> {
     }
 
     public Optional<T> resolve() {
-        return Optional.ofNullable(orElse(null));
+        return isPresent() ? Optional.of(getValueUnsafe()) : Optional.empty();
+    }
+
+    private T getValueUnsafe() {
+        T current = orElse(null);
+        if (current == null) {
+            throw new IllegalStateException("LazyOptional has no resolved value");
+        }
+        return current;
     }
 
     public boolean isPresent() {

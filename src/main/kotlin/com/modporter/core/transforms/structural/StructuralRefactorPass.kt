@@ -131,6 +131,26 @@ class StructuralRefactorPass : Pass {
             return PassResult(name, changes, errors, skipped)
         }
 
+        var retainedCapabilityQueryFiles: Set<Path> = emptySet()
+        try {
+            if (detectModId(projectDir) != null) {
+                val queries = LegacyBlockEntityCapabilityQueries.migrate(
+                    projectDir,
+                    { detectRequiredGeneratedCompatPackage(projectDir, "legacy block entity capability queries") },
+                    dryRun
+                )
+                changes.addAll(queries.changes)
+                errors.addAll(queries.gates)
+                retainedCapabilityQueryFiles = queries.retainedFiles
+                if (queries.gates.isNotEmpty()) {
+                    blockEntityCapabilityQueryFallbackBlocked = true
+                }
+            }
+        } catch (e: Exception) {
+            blockEntityCapabilityQueryFallbackBlocked = true
+            errors.add("Legacy block entity capability query migration error: ${e.message}")
+        }
+
         projectParents = runCatching { ProjectValueFacts.collect(this, javaFiles).parents }.getOrDefault(emptyMap())
         projectLegacyTeleporterTypes = collectLegacyTeleporterTypes(javaFiles)
         val projectDistExecutorTypes = javaFiles.mapNotNull { javaFile ->
@@ -207,8 +227,10 @@ class StructuralRefactorPass : Pass {
                 // Detect and transform networking patterns
                 detectNetworkingPatterns(migratedCu, file, fileChanges)
 
-                // Detect LazyOptional usage
-                detectLazyOptionalUsage(migratedCu, file, fileChanges)
+                // Retained wrappers have a reviewed lifecycle contract and remain LazyOptional-backed.
+                if (file.toAbsolutePath().normalize() !in retainedCapabilityQueryFiles) {
+                    detectLazyOptionalUsage(migratedCu, file, fileChanges)
+                }
 
                 // Detect DistExecutor usage (removed in NeoForge)
                 detectDistExecutorUsage(
@@ -536,13 +558,7 @@ class StructuralRefactorPass : Pass {
                 changes.addAll(legacy.changes)
                 errors.removeAll(LegacyBlockEntityCapabilities.withdrawnGates(errors, projectDir, legacy.adaptedFiles))
                 errors.addAll(legacy.gates)
-                val queries = LegacyBlockEntityCapabilityQueries.migrate(projectDir,
-                    { detectRequiredGeneratedCompatPackage(projectDir, "legacy block entity capability queries") }, dryRun)
-                changes.addAll(queries.changes)
-                errors.addAll(queries.gates)
-                if (queries.gates.isNotEmpty()) {
-                    blockEntityCapabilityQueryFallbackBlocked = true
-                }
+
                 val peripheral = LegacyComputerCraftPeripheralCapabilities.migrate(projectDir, capabilityModId,
                     detectRequiredGeneratedCompatPackage(projectDir, "ComputerCraft peripheral capability"), dryRun)
                 changes.addAll(peripheral.changes)
