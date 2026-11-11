@@ -484,12 +484,14 @@ class ExportResearchPortTest(unittest.TestCase):
                     with self.assertRaisesRegex(export.ExportError, "published release SHA256SUMS"):
                         export.verify_released_tool(tool, fetch=release_fetcher(release, invalid))
 
-    def test_rejects_tool_outside_04_line(self) -> None:
+    def test_rejects_any_tool_version_outside_exact_reviewed_040(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             jar = Path(temp) / "modporter.jar"
-            write_tool_jar(jar, "0.5.0")
-            with self.assertRaisesRegex(export.ExportError, "released 0.4.x"):
-                export.read_tool_bundle(jar)
+            for version in ("0.5.0", "0.4.1", "0.4.00", "0.4.0-rc1"):
+                with self.subTest(version=version):
+                    write_tool_jar(jar, version)
+                    with self.assertRaisesRegex(export.ExportError, "released 0.4.0 JAR"):
+                        export.read_tool_bundle(jar)
 
     def test_supported_request_is_exactly_pinned(self) -> None:
         spec = export.SUPPORTED_PORTS["constructionwand"]

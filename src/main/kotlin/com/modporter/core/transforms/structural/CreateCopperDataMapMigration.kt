@@ -7,9 +7,11 @@ import com.github.javaparser.ast.CompilationUnit
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
 import com.github.javaparser.ast.body.ConstructorDeclaration
 import com.github.javaparser.ast.body.MethodDeclaration
+import com.github.javaparser.ast.body.TypeDeclaration
 import com.github.javaparser.ast.expr.Expression
 import com.github.javaparser.ast.expr.LambdaExpr
 import com.github.javaparser.ast.expr.MethodCallExpr
+import com.github.javaparser.ast.expr.MethodReferenceExpr
 import com.github.javaparser.ast.stmt.ExpressionStmt
 import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter
 import com.modporter.core.pipeline.Change
@@ -745,28 +747,122 @@ internal object CreateCopperDataMapMigration {
             method.nameAsString != "onCtor" ||
             !method.isStatic ||
             normalizeJava(method.type.toString()) != "void" ||
-            method.parameters.isNotEmpty() ||
             statement.parentNode.orElse(null) !== method.body.orElse(null)
         ) {
             abort("CopperRegistries.inject is outside Create's proved onCtor body")
         }
-        val constructorCalls = owner.constructors.flatMap { createConstructor ->
-            createConstructor.findAll(MethodCallExpr::class.java).filter { call ->
-                call.nameAsString == "onCtor" &&
-                    call.arguments.isEmpty() &&
-                    call.scope.map { normalizeJava(it.toString()) == "Create" }.orElse(true)
-            }.filter { call ->
-                call.findAncestor(ConstructorDeclaration::class.java).orElse(null) ===
-                    createConstructor &&
-                    call.findAncestor(ExpressionStmt::class.java).map { callStatement ->
-                        callStatement.parentNode.orElse(null) === createConstructor.body &&
-                            normalizeJava(callStatement.expression.toString()) ==
-                            normalizeJava(call.toString())
-                    }.orElse(false)
+        if (method.parameters.isEmpty()) {
+            val constructorCalls = owner.constructors.flatMap { createConstructor ->
+                createConstructor.findAll(MethodCallExpr::class.java).filter { call ->
+                    call.nameAsString == "onCtor" &&
+                        call.arguments.isEmpty() &&
+                        call.scope.map { normalizeJava(it.toString()) == "Create" }.orElse(true)
+                }.filter { call ->
+                    call.findAncestor(ConstructorDeclaration::class.java).orElse(null) ===
+                        createConstructor &&
+                        call.findAncestor(ExpressionStmt::class.java).map { callStatement ->
+                            callStatement.parentNode.orElse(null) === createConstructor.body &&
+                                normalizeJava(callStatement.expression.toString()) ==
+                                normalizeJava(call.toString())
+                        }.orElse(false)
+                }
             }
+            if (constructorCalls.size != 1) {
+                abort(
+                    "Create's proved onCtor body is not called once by a direct " +
+                        "constructor statement"
+                )
+            }
+            return
         }
-        if (constructorCalls.size != 1) {
-            abort("Create's proved onCtor body is not called once by a direct constructor statement")
+
+        requireEventBusOnCtorForwarding(owner, method)
+    }
+
+    private fun requireEventBusOnCtorForwarding(
+        owner: ClassOrInterfaceDeclaration,
+        method: MethodDeclaration
+    ) {
+        val unit = owner.findCompilationUnit().orElse(null)
+            ?: abort("Create's event-bus onCtor source has no compilation unit")
+        val onCtorMethods = owner.methods.filter { it.nameAsString == "onCtor" }
+        val parameter = method.parameters.singleOrNull()
+        if (onCtorMethods.size != 1 || onCtorMethods.single() !== method ||
+            method.modifiers.map { it.keyword.asString() }.toSet() !=
+            setOf("public", "static") ||
+            method.annotations.isNotEmpty() ||
+            method.typeParameters.isNotEmpty() ||
+            method.thrownExceptions.isNotEmpty() ||
+            parameter == null ||
+            normalizeJava(parameter.type.toString()) != "IEventBus" ||
+            parameter.nameAsString != "modEventBus" ||
+            parameter.modifiers.isNotEmpty() ||
+            parameter.annotations.isNotEmpty() ||
+            parameter.isVarArgs
+        ) {
+            abort("Create's event-bus onCtor method changed from the proved source")
+        }
+
+        val eventBusImports = unit.imports.filter {
+            !it.isAsterisk && it.name.identifier == "IEventBus"
+        }
+        if (eventBusImports.size != 1 ||
+            eventBusImports.single().isStatic ||
+            eventBusImports.single().nameAsString != "net.neoforged.bus.api.IEventBus" ||
+            unit.findAll(TypeDeclaration::class.java).any {
+                it.nameAsString == "IEventBus"
+            } ||
+            owner.typeParameters.any { it.nameAsString == "IEventBus" } ||
+            method.typeParameters.any { it.nameAsString == "IEventBus" }
+        ) {
+            abort("Create's event-bus onCtor does not use the proved NeoForge IEventBus import")
+        }
+
+        if (owner.constructors.size != 1) {
+            abort("Create's event-bus onCtor constructor graph changed from the proved source")
+        }
+        val createConstructor = owner.constructors.single()
+        if (createConstructor.modifiers.map { it.keyword.asString() }.toSet() !=
+            setOf("public") ||
+            createConstructor.annotations.isNotEmpty() ||
+            createConstructor.typeParameters.isNotEmpty() ||
+            createConstructor.thrownExceptions.isNotEmpty() ||
+            createConstructor.parameters.map {
+                normalizeJava(it.type.toString()) to it.nameAsString
+            } != listOf(
+                "IEventBus" to "modEventBus",
+                "ModContainer" to "modContainer"
+            ) ||
+            createConstructor.parameters.any {
+                it.modifiers.isNotEmpty() || it.annotations.isNotEmpty() || it.isVarArgs
+            }
+        ) {
+            abort("Create's event-bus onCtor constructor changed from the proved source")
+        }
+
+        val constructorCalls = owner.findAll(MethodCallExpr::class.java).filter { call ->
+            call.nameAsString == "onCtor"
+        }
+        if (constructorCalls.size != 1 ||
+            owner.findAll(MethodReferenceExpr::class.java).any { it.identifier == "onCtor" }
+        ) {
+            abort("Create's event-bus onCtor is not called exactly once without an alias")
+        }
+        val call = constructorCalls.single()
+        val callStatement = call.findAncestor(ExpressionStmt::class.java).orElse(null)
+        if (call.scope.isPresent || call.typeArguments.isPresent ||
+            call.arguments.size != 1 ||
+            normalizeJava(call.arguments.single().toString()) != "modEventBus" ||
+            call.findAncestor(ConstructorDeclaration::class.java).orElse(null) !==
+            createConstructor ||
+            callStatement == null ||
+            callStatement.parentNode.orElse(null) !== createConstructor.body ||
+            normalizeJava(callStatement.expression.toString()) != normalizeJava(call.toString())
+        ) {
+            abort(
+                "Create's event-bus onCtor is not an unconditional direct constructor " +
+                    "forwarding call"
+            )
         }
     }
 

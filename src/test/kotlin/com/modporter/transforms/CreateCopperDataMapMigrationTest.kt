@@ -144,6 +144,99 @@ class CreateCopperDataMapMigrationTest {
     }
 
     @Test
+    fun `migrates the exact normalized event bus onCtor forwarding shape`() {
+        val fixture = fixture(directory, injectInEventBusOnCtor = true)
+
+        val result = CreateCopperDataMapMigration.migrate(directory, dryRun = false)
+
+        assertTrue(result.gates.isEmpty(), result.gates.joinToString())
+        assertEquals(5, result.changes.size)
+        assertFalse(fixture.create.readText().contains("CopperRegistries"))
+        val second = CreateCopperDataMapMigration.migrate(directory, dryRun = false)
+        assertTrue(second.gates.isEmpty(), second.gates.joinToString())
+        assertTrue(second.changes.isEmpty(), second.changes.joinToString())
+    }
+
+    @Test
+    fun `event bus onCtor rejects wrong imports types and SDK shadows`() {
+        val rewrites: List<Pair<String, (String) -> String>> = listOf(
+            "wrong-import" to { source ->
+                source.replace(
+                    "import net.neoforged.bus.api.IEventBus;",
+                    "import example.shadow.IEventBus;"
+                )
+            },
+            "wrong-type" to { source ->
+                source.replace(
+                    "public static void onCtor(IEventBus modEventBus)",
+                    "public static void onCtor(Object modEventBus)"
+                )
+            },
+            "sdk-shadow" to { source ->
+                source.replace(
+                    "public class Create {",
+                    "public class Create {\n    private interface IEventBus {}"
+                )
+            }
+        )
+
+        rewrites.forEach { (caseName, rewrite) ->
+            assertEventBusOnCtorRejected(directory.resolve(caseName), rewrite)
+        }
+    }
+
+    @Test
+    fun `event bus onCtor rejects unproved forwarding call graphs and overloads`() {
+        val rewrites: List<Pair<String, (String) -> String>> = listOf(
+            "wrong-argument" to { source ->
+                source.replace("onCtor(modEventBus);", "onCtor(modContainer);")
+            },
+            "aliased-argument" to { source ->
+                source.replace(
+                    "onCtor(modEventBus);",
+                    "IEventBus forwardedBus = modEventBus;\n        onCtor(forwardedBus);"
+                )
+            },
+            "duplicate-call" to { source ->
+                source.replace(
+                    "onCtor(modEventBus);",
+                    "onCtor(modEventBus);\n        onCtor(modEventBus);"
+                )
+            },
+            "qualified-extra-call" to { source ->
+                source.replace(
+                    "onCtor(modEventBus);",
+                    "onCtor(modEventBus);\n        Create.onCtor(modEventBus);"
+                )
+            },
+            "method-reference" to { source ->
+                source.replace(
+                    "onCtor(modEventBus);",
+                    "java.util.function.Consumer<IEventBus> callback = Create::onCtor;\n" +
+                        "        onCtor(modEventBus);"
+                )
+            },
+            "nested-call" to { source ->
+                source.replace(
+                    "onCtor(modEventBus);",
+                    "if (modEventBus != null) {\n            onCtor(modEventBus);\n        }"
+                )
+            },
+            "overloaded-method" to { source ->
+                source.replace(
+                    "public static void onCtor(IEventBus modEventBus) {",
+                    "public static void onCtor() {}\n\n" +
+                        "    public static void onCtor(IEventBus modEventBus) {"
+                )
+            }
+        )
+
+        rewrites.forEach { (caseName, rewrite) ->
+            assertEventBusOnCtorRejected(directory.resolve(caseName), rewrite)
+        }
+    }
+
+    @Test
     fun `incompatible provider ownership blocks every family write`() {
         val fixture = fixture(directory)
         fixture.provider.parent.createDirectories()
@@ -184,7 +277,31 @@ class CreateCopperDataMapMigrationTest {
         assertFalse(fixture.provider.exists())
     }
 
-    private fun fixture(root: Path, injectInOnCtor: Boolean = false): Fixture {
+    private fun assertEventBusOnCtorRejected(
+        root: Path,
+        rewrite: (String) -> String
+    ) {
+        val fixture = fixture(root, injectInEventBusOnCtor = true)
+        val original = fixture.create.readText()
+        val rewritten = rewrite(original)
+        assertFalse(original == rewritten, "Regression rewrite did not change Create.java")
+        fixture.create.writeText(rewritten)
+        val before = fixture.snapshots()
+
+        val result = CreateCopperDataMapMigration.migrate(root, dryRun = false)
+
+        assertTrue(result.changes.isEmpty(), result.changes.joinToString())
+        assertTrue(result.gates.isNotEmpty(), "Expected Create event-bus admission refusal")
+        assertEquals(before, fixture.snapshots())
+        assertFalse(fixture.provider.exists())
+    }
+
+    private fun fixture(
+        root: Path,
+        injectInOnCtor: Boolean = false,
+        injectInEventBusOnCtor: Boolean = false
+    ): Fixture {
+        require(!(injectInOnCtor && injectInEventBusOnCtor))
         val registries = root.resolve(
             "src/main/java/com/simibubi/create/foundation/block/CopperRegistries.java"
         )
@@ -240,44 +357,74 @@ class CreateCopperDataMapMigrationTest {
             """.trimIndent() + "\n"
         )
         create.writeText(
-            if (injectInOnCtor) {
-                """
-                package com.simibubi.create;
+            when {
+                injectInEventBusOnCtor -> {
+                    """
+                    package com.simibubi.create;
 
-                import com.simibubi.create.foundation.block.CopperRegistries;
+                    import com.simibubi.create.foundation.block.CopperRegistries;
 
-                public class Create {
-                    public Create() {
-                        before();
-                        onCtor();
-                        after();
+                    import net.neoforged.bus.api.IEventBus;
+                    import net.neoforged.fml.ModContainer;
+
+                    public class Create {
+                        public Create(IEventBus modEventBus, ModContainer modContainer) {
+                            before();
+                            onCtor(modEventBus);
+                            after();
+                        }
+
+                        public static void onCtor(IEventBus modEventBus) {
+                            CopperRegistries.inject();
+                        }
+
+                        private void before() {}
+                        private void after() {}
                     }
-
-                    public static void onCtor() {
-                        CopperRegistries.inject();
-                    }
-
-                    private void before() {}
-                    private void after() {}
+                    """.trimIndent() + "\n"
                 }
-                """.trimIndent() + "\n"
-            } else {
-                """
-                package com.simibubi.create;
 
-                import com.simibubi.create.foundation.block.CopperRegistries;
+                injectInOnCtor -> {
+                    """
+                    package com.simibubi.create;
 
-                public class Create {
-                    public Create() {
-                        before();
-                        CopperRegistries.inject();
-                        after();
+                    import com.simibubi.create.foundation.block.CopperRegistries;
+
+                    public class Create {
+                        public Create() {
+                            before();
+                            onCtor();
+                            after();
+                        }
+
+                        public static void onCtor() {
+                            CopperRegistries.inject();
+                        }
+
+                        private void before() {}
+                        private void after() {}
                     }
-
-                    private void before() {}
-                    private void after() {}
+                    """.trimIndent() + "\n"
                 }
-                """.trimIndent() + "\n"
+
+                else -> {
+                    """
+                    package com.simibubi.create;
+
+                    import com.simibubi.create.foundation.block.CopperRegistries;
+
+                    public class Create {
+                        public Create() {
+                            before();
+                            CopperRegistries.inject();
+                            after();
+                        }
+
+                        private void before() {}
+                        private void after() {}
+                    }
+                    """.trimIndent() + "\n"
+                }
             }
         )
         datagen.writeText(

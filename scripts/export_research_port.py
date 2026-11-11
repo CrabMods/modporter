@@ -30,6 +30,7 @@ from urllib.request import Request, urlopen
 
 ISSUES_URL = "https://github.com/CrabMods/modporter/issues"
 TOOL_URL = "https://github.com/CrabMods/modporter"
+REQUIRED_TOOL_VERSION = "0.4.0"
 VALIDATION_SCOPE = "bootstrap / inventory / logs; not item behavior verified"
 DESCRIPTION_PREFIX = (
     "Unofficial developer research candidate generated with ModPorter. "
@@ -370,9 +371,10 @@ def read_tool_bundle(jar: Path) -> ToolBundle:
                 if line.strip() and not line.lstrip().startswith(("#", "!")) and "=" in line
             )
             version = properties.get("version", "").strip()
-            if not re.fullmatch(r"0\.4\.\d+", version):
+            if version != REQUIRED_TOOL_VERSION:
                 raise ExportError(
-                    f"unsupported ModPorter version {version!r}; expected a released 0.4.x JAR"
+                    f"unsupported ModPorter version {version!r}; "
+                    f"expected the released {REQUIRED_TOOL_VERSION} JAR reviewed for these candidates"
                 )
             apache_license = archive.read("META-INF/modporter/LICENSE")
             if (
