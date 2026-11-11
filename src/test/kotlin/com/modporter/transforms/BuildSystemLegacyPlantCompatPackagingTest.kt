@@ -221,9 +221,22 @@ class BuildSystemLegacyPlantCompatPackagingTest {
             assertEquals(role, entry["role"].asString)
             assertEquals(entry["sha256"].asString, sha256(generated.readBytes()))
             if (!path.startsWith("META-INF/modporter/legacy-plant-compat/")) {
-                assertArrayEquals(classpathResource(path), generated.readBytes())
+                val resource = if (path == "META-INF/modporter/NOTICE")
+                    "compat/legacy-plant-compat-v1.NOTICE" else path
+                assertArrayEquals(classpathResource(resource), generated.readBytes())
             }
         }
+
+        // The canonical 1.0.2 component's JAR and provenance must remain stable when the
+        // enclosing tool's distribution NOTICE gains unrelated source attributions.
+        assertEquals(
+            "05c1da26d6fb49a00b5b9bbbd3d6547933b1d11e93a571e0f80232f78b3af960",
+            sha256(resourceRoot.resolve("META-INF/modporter/NOTICE").readBytes())
+        )
+        assertEquals(
+            "05c1da26d6fb49a00b5b9bbbd3d6547933b1d11e93a571e0f80232f78b3af960",
+            materials.getValue("META-INF/modporter/NOTICE")["sha256"].asString
+        )
 
         val buildRecipe = resourceRoot.resolve(
             "META-INF/modporter/legacy-plant-compat/build.gradle.recipe"

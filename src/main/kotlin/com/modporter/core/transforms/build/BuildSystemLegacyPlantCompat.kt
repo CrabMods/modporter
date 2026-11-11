@@ -182,7 +182,9 @@ internal object BuildSystemLegacyPlantCompat {
                 "Apache-2.0 license for ModPorter helper sources"
             ),
             "META-INF/modporter/NOTICE" to RuntimeMaterial(
-                requiredResourceText("/META-INF/modporter/NOTICE"),
+                // This versioned component's binary identity includes its original NOTICE.
+                // Tool-level attribution changes must not mutate the frozen runtime package.
+                requiredResourceText("/compat/legacy-plant-compat-v1.NOTICE"),
                 "ModPorter distribution notice"
             ),
             "META-INF/modporter/third-party/minecraftforge/LICENSE.txt" to RuntimeMaterial(
