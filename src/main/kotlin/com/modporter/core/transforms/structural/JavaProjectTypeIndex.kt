@@ -1603,7 +1603,15 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
                 scope.arguments.getOrNull(parameterIndex)
                     ?: throw IllegalStateException("Raw Map has no exact lambda parameter type for '$parentCall'")
             parentCall.nameAsString == "ifPresent" && argumentIndex == 0 &&
-                (scope.name == "java.util.Optional" || GENERATED_COMPAT_LAZY_OPTIONAL.matches(scope.name)) &&
+                (
+                    scope.name == "java.util.Optional" ||
+                        GENERATED_COMPAT_LAZY_OPTIONAL.matches(scope.name) ||
+                        (
+                            scope.name in EXTERNAL_LAZY_OPTIONAL_TYPES &&
+                                parentCall.arguments.size == 1 &&
+                                loadType(scope.name) == null
+                        )
+                ) &&
                 parameterIndex == 0 -> scope.arguments.singleOrNull()
             parentCall.nameAsString in setOf("map", "flatMap", "filter") && argumentIndex == 0 &&
                 scope.name == "java.util.Optional" && parameterIndex == 0 -> scope.arguments.singleOrNull()
@@ -2696,6 +2704,12 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         private val JAVA_IDENTIFIER = Regex("[A-Za-z_$][A-Za-z0-9_$]*")
         private val GENERATED_COMPAT_LAZY_OPTIONAL = Regex(
             """com\.modporter\.generated\.(?:[A-Za-z_$][A-Za-z0-9_$]*\.)+compat\.LazyOptional"""
+        )
+        // Text Replacement repackages Forge to the NeoForge intermediate consumed before Build relocation.
+        // Exact project-source definitions take precedence over this external fallback.
+        private val EXTERNAL_LAZY_OPTIONAL_TYPES = setOf(
+            "net.minecraftforge.common.util.LazyOptional",
+            "net.neoforged.neoforge.common.util.LazyOptional"
         )
         private val primitiveTypes = setOf("boolean", "byte", "char", "double", "float", "int", "long", "short", "void")
         private val knownExternalTypes = mapOf(

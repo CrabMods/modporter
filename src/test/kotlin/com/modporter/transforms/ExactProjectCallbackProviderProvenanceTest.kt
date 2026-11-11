@@ -1,16 +1,20 @@
 package com.modporter.transforms
 
 import com.github.javaparser.JavaParser
+import com.github.javaparser.ast.expr.MethodCallExpr
+import com.modporter.core.transforms.structural.JavaProjectTypeIndex
 import com.modporter.core.transforms.structural.LegacyNbtProviderMethodMigration
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
+import kotlin.io.path.readBytes
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ExactProjectCallbackProviderProvenanceTest {
@@ -512,6 +516,136 @@ class ExactProjectCallbackProviderProvenanceTest {
     }
 
     @Test
+    fun `NeoForge intermediate LazyOptional callback uses generic element before Build relocation`() {
+        assertExternalLazyOptionalCallbackThreadsExplicitProvider(
+            "net.neoforged.neoforge.common.util.LazyOptional"
+        )
+    }
+
+    @Test
+    fun `Forge LazyOptional callback uses generic element before package replacement`() {
+        assertExternalLazyOptionalCallbackThreadsExplicitProvider(
+            "net.minecraftforge.common.util.LazyOptional"
+        )
+    }
+
+    @Test
+    fun `raw NeoForge intermediate LazyOptional callback refuses outer world fallback`() {
+        val relay = defaultRelay() + "\n\n" + """
+            class LegacyCapability {
+                static LazyOptional query(LivingEntity entity) {
+                    return null;
+                }
+            }
+        """.trimIndent()
+        val file = writeSource(
+            relay,
+            """
+            void place(Level source, LivingEntity entity, CompoundTag tag) {
+                sample.LegacyCapability.query(entity)
+                    .ifPresent(value -> value.readInventory(tag));
+            }
+            """.trimIndent()
+        )
+        addImport(file, "net.neoforged.neoforge.common.util.LazyOptional")
+        val original = file.readText()
+
+        val error = assertFailsWith<IllegalStateException> {
+            LegacyNbtProviderMethodMigration().migrate(tempDir, dryRun = false)
+        }
+
+        assertTrue(error.message.orEmpty().contains("callback dispatch"), error.message)
+        assertEquals(original, file.readText())
+    }
+
+    @Test
+    fun `two argument NeoForge intermediate ifPresent refuses without writing`() {
+        val relay = defaultRelay() + "\n\n" + """
+            class CodecValue {
+                void readInventory(CompoundTag tag, HolderLookup.Provider registries) {
+                }
+            }
+            class LegacyCapability {
+                static LazyOptional<CodecValue> query(LivingEntity entity) {
+                    return null;
+                }
+            }
+        """.trimIndent()
+        val file = writeSource(
+            relay,
+            """
+            void place(Level source, LivingEntity entity, CompoundTag tag) {
+                sample.LegacyCapability.query(entity)
+                    .ifPresent(
+                        value -> value.readInventory(tag),
+                        ignored -> { }
+                    );
+            }
+            """.trimIndent()
+        )
+        addImport(file, "net.neoforged.neoforge.common.util.LazyOptional")
+        val original = file.readBytes()
+        assertNull(preBuildCallbackReceiverType(file))
+
+        val changes = LegacyNbtProviderMethodMigration().migrate(
+            tempDir,
+            dryRun = false,
+            allowContextProviderExpressions = false
+        )
+
+        assertTrue(changes.isEmpty())
+        assertTrue(original.contentEquals(file.readBytes()))
+    }
+
+    @Test
+    fun `project source shadows the NeoForge LazyOptional delivery contract`() {
+        val relay = defaultRelay() + "\n\n" + """
+            class CodecValue {
+                void readInventory(CompoundTag tag, HolderLookup.Provider registries) {
+                }
+            }
+            class LegacyCapability {
+                static LazyOptional<CodecValue> query(LivingEntity entity) {
+                    return null;
+                }
+            }
+        """.trimIndent()
+        val file = writeSource(
+            relay,
+            """
+            void place(Level source, LivingEntity entity, CompoundTag tag) {
+                sample.LegacyCapability.query(entity)
+                    .ifPresent(value -> value.readInventory(tag));
+            }
+            """.trimIndent()
+        )
+        addImport(file, "net.neoforged.neoforge.common.util.LazyOptional")
+        val shadow = tempDir.resolve(
+            "src/main/java/net/neoforged/neoforge/common/util/LazyOptional.java"
+        )
+        shadow.parent.createDirectories()
+        shadow.writeText(
+            """
+            package net.neoforged.neoforge.common.util;
+
+            public final class LazyOptional<T> {
+                public void ifPresent(Runnable callback) {
+                    callback.run();
+                }
+            }
+            """.trimIndent()
+        )
+        val original = file.readText()
+
+        val error = assertFailsWith<IllegalStateException> {
+            LegacyNbtProviderMethodMigration().migrate(tempDir, dryRun = false)
+        }
+
+        assertTrue(error.message.orEmpty().contains("callback dispatch"), error.message)
+        assertEquals(original, file.readText())
+    }
+
+    @Test
     fun `null does not match a primitive project parameter`() {
         val relay = defaultRelay() + "\n\n" + """
             class CodecValue {
@@ -704,6 +838,69 @@ class ExactProjectCallbackProviderProvenanceTest {
         assertTrue(JavaParser().parse(migrated).isSuccessful, migrated)
         assertTrue(LegacyNbtProviderMethodMigration().migrate(tempDir, dryRun = false).isEmpty())
         assertEquals(migrated, file.readText())
+    }
+
+    private fun assertExternalLazyOptionalCallbackThreadsExplicitProvider(lazyOptionalType: String) {
+        val relay = defaultRelay() + "\n\n" + """
+            class CodecValue {
+                void readInventory(CompoundTag tag, HolderLookup.Provider registries) {
+                }
+            }
+            class LegacyCapability {
+                static LazyOptional<CodecValue> query(
+                        LivingEntity entity, net.minecraft.core.Direction side) {
+                    return null;
+                }
+            }
+        """.trimIndent()
+        val file = writeSource(
+            relay,
+            """
+            void place(HolderLookup.Provider registries, CompoundTag tag) {
+                sample.LegacyCapability.query(null, null)
+                    .ifPresent(value -> value.readInventory(tag));
+            }
+            """.trimIndent()
+        )
+        addImport(file, lazyOptionalType)
+        assertEquals("sample.CodecValue", preBuildCallbackReceiverType(file))
+
+        LegacyNbtProviderMethodMigration().migrate(
+            tempDir,
+            dryRun = false,
+            allowContextProviderExpressions = false
+        )
+        val migrated = file.readText()
+
+        assertTrue(migrated.contains("value.readInventory(tag, registries)"), migrated)
+        assertTrue(JavaParser().parse(migrated).isSuccessful, migrated)
+        assertTrue(
+            LegacyNbtProviderMethodMigration().migrate(
+                tempDir,
+                dryRun = false,
+                allowContextProviderExpressions = false
+            ).isEmpty()
+        )
+        assertEquals(migrated, file.readText())
+    }
+
+    private fun preBuildCallbackReceiverType(file: Path): String? {
+        val sourceRoot = tempDir.resolve("src/main/java")
+        val index = JavaProjectTypeIndex.build(sourceRoot)
+        val call = index.unit(file).findAll(MethodCallExpr::class.java)
+            .single { it.nameAsString == "readInventory" }
+        assertEquals("value", call.scope.orElseThrow().toString())
+        return index.methodCallReceiverType(call)
+    }
+
+    private fun addImport(file: Path, qualifiedName: String) {
+        val source = file.readText()
+        file.writeText(
+            source.replaceFirst(
+                "import java.util.Optional;\n",
+                "import java.util.Optional;\nimport $qualifiedName;\n"
+            )
+        )
     }
 
     private fun defaultRelay(): String = """
