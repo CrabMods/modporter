@@ -3011,22 +3011,32 @@ internal fun StructuralRefactorPass.migrateLegacyEntityTypeSpawnCompoundTagSourc
     return if (changed) result else source
 }
 
-internal fun StructuralRefactorPass.enclosingMethodRange(source: String, index: Int): IntRange? {
-    val methodPattern = Regex(
-        """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private|static|final|synchronized)\s+)*(?:<[^>{};]+>\s*)?[A-Za-z_$][\w$<>\[\].?,\s]*\s+[A-Za-z_$][\w$]*\s*\([^;{}]*\)\s*(?:throws\s+[^{]+)?\{"""
-    )
-    var best: IntRange? = null
-    methodPattern.findAll(source).forEach { match ->
-        val openBrace = source.indexOf('{', match.range.last)
-        val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
-        if (closeBrace > openBrace && index in (openBrace + 1) until closeBrace) {
-            val candidate = (openBrace + 1) until closeBrace
-            if (best == null || candidate.count() < best!!.count()) {
-                best = candidate
-            }
-        }
+private object EnclosingMethodBodyRangesSourceCache {
+    private var source: String? = null
+    private var ranges: List<IntRange> = emptyList()
+
+    @Synchronized
+    fun getOrCompute(currentSource: String, compute: () -> List<IntRange>): List<IntRange> {
+        if (source == currentSource) return ranges
+        val result = java.util.Collections.unmodifiableList(compute())
+        source = currentSource
+        ranges = result
+        return result
     }
-    return best
+}
+
+internal fun StructuralRefactorPass.enclosingMethodRange(source: String, index: Int): IntRange? {
+    val ranges = EnclosingMethodBodyRangesSourceCache.getOrCompute(source) {
+        val methodPattern = Regex(
+        """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private|static|final|synchronized)\s+)*(?:<[^>{};]+>\s*)?[A-Za-z_$][\w$<>\[\].?,\s]*\s+[A-Za-z_$][\w$]*\s*\([^;{}]*\)\s*(?:throws\s+[^{]+)?\{"""
+        )
+        methodPattern.findAll(source).mapNotNull { match ->
+            val openBrace = source.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+            ((openBrace + 1) until closeBrace).takeIf { closeBrace > openBrace }
+        }.toList()
+    }
+    return ranges.filter { index in it }.minByOrNull { it.count() }
 }
 
 internal fun StructuralRefactorPass.enclosingMethodText(source: String, index: Int): String? {
@@ -3712,6 +3722,7 @@ internal fun StructuralRefactorPass.registryAccessExpressionAt(
 }
 
 internal fun StructuralRefactorPass.sourceProvenLocalRegistryAccessExpressionAt(source: String, offset: Int): String? {
+    if (!source.contains("Level")) return null
     val methodRange = enclosingMethodRange(source, offset) ?: return null
     val methodText = source.substring(methodRange)
     val offsetInMethod = offset - methodRange.first

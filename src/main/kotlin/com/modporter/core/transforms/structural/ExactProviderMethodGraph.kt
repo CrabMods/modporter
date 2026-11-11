@@ -467,6 +467,8 @@ internal fun StructuralRefactorPass.collectExactItemStackNbtMethodsNeedingHolder
     }
 
     val directCandidateOwners = candidates.mapTo(linkedSetOf()) { it.owner }
+    val receiverOwners = ProviderReceiverOwnerIndex(this)
+    val executableSources = mutableMapOf<String, String>()
 
     fun receiverOwnerAt(
         source: String,
@@ -474,27 +476,7 @@ internal fun StructuralRefactorPass.collectExactItemStackNbtMethodsNeedingHolder
         receiver: String,
         offset: Int
     ): String? {
-        val normalized = receiver.trim()
-        val typeBlocks = javaTypeBlocks(source, executableCode)
-        if (normalized == "this") {
-            return typeBlocks.lastOrNull { offset in it.bodyStart..it.end }?.name
-        }
-        if (normalized in directCandidateOwners) return normalized
-        val ownerAlternation = directCandidateOwners.joinToString("|") { Regex.escape(it) }
-        if (ownerAlternation.isBlank()) return null
-        val variableTypes = Regex(
-            """\b($ownerAlternation)\s+([A-Za-z_$][\w$]*)\b"""
-        ).findAll(executableCode)
-            .associate { it.groupValues[2] to it.groupValues[1] }
-        val getterTypes = Regex(
-            """(?m)\b(?:public|protected|private)\s+($ownerAlternation)\s+([A-Za-z_$][\w$]*)\s*\(\s*\)"""
-        ).findAll(executableCode)
-            .associate { "${it.groupValues[2]}()" to it.groupValues[1] }
-        variableTypes[normalized]?.let { return it }
-        variableTypes[normalized.substringAfterLast('.')]?.let { return it }
-        getterTypes[normalized]?.let { return it }
-        getterTypes[normalized.substringAfterLast('.')]?.let { return it }
-        return null
+        return receiverOwners.ownerAt(source, executableCode, receiver, offset, directCandidateOwners)
     }
 
     fun legacyINBTSerializableProviderCallSite(source: String, offset: Int): Boolean {
@@ -656,7 +638,7 @@ internal fun StructuralRefactorPass.collectExactItemStackNbtMethodsNeedingHolder
         for (javaFile in javaFiles) {
             val source = sourcesByFile.getValue(javaFile)
             if (!source.contains(token)) continue
-            val executableCode = maskJavaCommentsAndLiterals(source)
+            val executableCode = executableSources.getOrPut(source) { maskJavaCommentsAndLiterals(source) }
             var cursor = 0
             while (true) {
                 val tokenIndex = executableCode.indexOf(token, cursor)

@@ -471,6 +471,241 @@ class ExactProjectCallbackProviderProvenanceTest {
         assertTrue(error.message.orEmpty().contains("helper cycle is unresolved"), error.message)
         assertEquals(original, file.readText())
     }
+    @Test
+    fun `generated LazyOptional non BlockEntity callback uses outer world through exact FQN and null reference`() {
+        val relay = defaultRelay() + "\n\n" + """
+            class CodecValue {
+                void readInventory(CompoundTag tag, HolderLookup.Provider registries) {
+                }
+            }
+            class LegacyCapability {
+                static LazyOptional<CodecValue> query(
+                        LivingEntity entity, net.minecraft.core.Direction side) {
+                    return null;
+                }
+            }
+        """.trimIndent()
+        val file = writeSource(
+            relay,
+            """
+            void place(Level source, CompoundTag tag) {
+                sample.LegacyCapability.query(null, null)
+                    .ifPresent(value -> value.readInventory(tag));
+            }
+            """.trimIndent()
+        )
+        val lazyOptionalImport = "import com.modporter.generated.example.compat.LazyOptional;\n"
+        file.writeText(
+            file.readText().replaceFirst(
+                "import java.util.Optional;\n",
+                "import java.util.Optional;\n$lazyOptionalImport$lazyOptionalImport"
+            )
+        )
+
+        LegacyNbtProviderMethodMigration().migrate(tempDir, dryRun = false)
+        val migrated = file.readText()
+
+        assertTrue(migrated.contains("value.readInventory(tag, source.registryAccess())"), migrated)
+        assertTrue(JavaParser().parse(migrated).isSuccessful, migrated)
+        assertTrue(LegacyNbtProviderMethodMigration().migrate(tempDir, dryRun = false).isEmpty())
+        assertEquals(migrated, file.readText())
+    }
+
+    @Test
+    fun `null does not match a primitive project parameter`() {
+        val relay = defaultRelay() + "\n\n" + """
+            class CodecValue {
+                void readInventory(CompoundTag tag, HolderLookup.Provider registries) {
+                }
+            }
+            class LegacyCapability {
+                static com.modporter.generated.example.compat.LazyOptional<CodecValue> query(
+                        LivingEntity entity, int side) {
+                    return null;
+                }
+            }
+        """.trimIndent()
+        val file = writeSource(
+            relay,
+            """
+            void place(Level source, LivingEntity entity, CompoundTag tag) {
+                sample.LegacyCapability.query(entity, null)
+                    .ifPresent(value -> value.readInventory(tag));
+            }
+            """.trimIndent()
+        )
+        val original = file.readText()
+
+        val error = assertFailsWith<IllegalStateException> {
+            LegacyNbtProviderMethodMigration().migrate(tempDir, dryRun = false)
+        }
+
+        assertTrue(error.message.orEmpty().contains("callback dispatch"), error.message)
+        assertEquals(original, file.readText())
+    }
+
+    @Test
+    fun `null keeps unrelated reference overloads ambiguous`() {
+        val relay = defaultRelay() + "\n\n" + """
+            class CodecValue {
+                void readInventory(CompoundTag tag, HolderLookup.Provider registries) {
+                }
+            }
+            class LegacyCapability {
+                static com.modporter.generated.example.compat.LazyOptional<CodecValue> query(
+                        LivingEntity entity, net.minecraft.core.Direction side) {
+                    return null;
+                }
+                static com.modporter.generated.example.compat.LazyOptional<CodecValue> query(
+                        LivingEntity entity, Level side) {
+                    return null;
+                }
+            }
+        """.trimIndent()
+        val file = writeSource(
+            relay,
+            """
+            void place(Level source, LivingEntity entity, CompoundTag tag) {
+                sample.LegacyCapability.query(entity, null)
+                    .ifPresent(value -> value.readInventory(tag));
+            }
+            """.trimIndent()
+        )
+        val original = file.readText()
+
+        val error = assertFailsWith<IllegalStateException> {
+            LegacyNbtProviderMethodMigration().migrate(tempDir, dryRun = false)
+        }
+
+        assertTrue(error.message.orEmpty().contains("Ambiguous typed method 'query/2'"), error.message)
+        assertEquals(original, file.readText())
+    }
+
+    @Test
+    fun `raw generated LazyOptional callback refuses outer world fallback`() {
+        val relay = defaultRelay() + "\n\n" + """
+            class LegacyCapability {
+                static com.modporter.generated.example.compat.LazyOptional query(LivingEntity entity) {
+                    return null;
+                }
+            }
+        """.trimIndent()
+        val file = writeSource(
+            relay,
+            """
+            void place(Level source, LivingEntity entity, CompoundTag tag) {
+                sample.LegacyCapability.query(entity)
+                    .ifPresent(value -> value.readInventory(tag));
+            }
+            """.trimIndent()
+        )
+        val original = file.readText()
+
+        val error = assertFailsWith<IllegalStateException> {
+            LegacyNbtProviderMethodMigration().migrate(tempDir, dryRun = false)
+        }
+
+        assertTrue(error.message.orEmpty().contains("callback dispatch"), error.message)
+        assertEquals(original, file.readText())
+    }
+
+    @Test
+    fun `unknown external callback wrapper refuses outer world fallback`() {
+        val relay = defaultRelay() + "\n\n" + """
+            class CodecValue {
+                void readInventory(CompoundTag tag, HolderLookup.Provider registries) {
+                }
+            }
+            class LegacyCapability {
+                static third.party.LazyOptional<CodecValue> query(LivingEntity entity) {
+                    return null;
+                }
+            }
+        """.trimIndent()
+        val file = writeSource(
+            relay,
+            """
+            void place(Level source, LivingEntity entity, CompoundTag tag) {
+                sample.LegacyCapability.query(entity)
+                    .ifPresent(value -> value.readInventory(tag));
+            }
+            """.trimIndent()
+        )
+        val original = file.readText()
+
+        val error = assertFailsWith<IllegalStateException> {
+            LegacyNbtProviderMethodMigration().migrate(tempDir, dryRun = false)
+        }
+
+        assertTrue(error.message.orEmpty().contains("callback dispatch"), error.message)
+        assertEquals(original, file.readText())
+    }
+
+    @Test
+    fun `project field shadowing a package head blocks exact FQN type fallback`() {
+        val relay = defaultRelay() + "\n\n" + """
+            class CodecValue {
+                void readInventory(CompoundTag tag, HolderLookup.Provider registries) {
+                }
+            }
+            class LegacyCapability {
+                static com.modporter.generated.example.compat.LazyOptional<CodecValue> query(
+                        LivingEntity entity, net.minecraft.core.Direction side) {
+                    return null;
+                }
+            }
+        """.trimIndent()
+        val file = writeSource(
+            relay,
+            """
+            Object sample;
+            void place(Level source, LivingEntity entity, CompoundTag tag) {
+                sample.LegacyCapability.query(entity, null)
+                    .ifPresent(value -> value.readInventory(tag));
+            }
+            """.trimIndent()
+        )
+        val original = file.readText()
+
+        val error = assertFailsWith<IllegalStateException> {
+            LegacyNbtProviderMethodMigration().migrate(tempDir, dryRun = false)
+        }
+
+        assertTrue(error.message.orEmpty().contains("callback dispatch"), error.message)
+        assertEquals(original, file.readText())
+    }
+
+    @Test
+    fun `LecternBlock absence witness permits exact interface callback dispatch`() {
+        val relay = """
+            interface LecternRelay<T extends BlockEntity> {
+                @SuppressWarnings("unchecked")
+                default void withBlockEntityDo(BlockGetter world, BlockPos pos, Consumer<T> action) {
+                    action.accept((T) world.getBlockEntity(pos));
+                }
+            }
+        """.trimIndent()
+        val file = writeSource(
+            relay,
+            """
+            void place(Level source, BlockPos pos, CompoundTag tag) {
+                withBlockEntityDo(source, pos, unit -> unit.readInventory(tag));
+            }
+            """.trimIndent(),
+            fixtureDeclaration =
+                "class CallbackFixture extends net.minecraft.world.level.block.LecternBlock " +
+                    "implements LecternRelay<DataEntity>"
+        )
+
+        LegacyNbtProviderMethodMigration().migrate(tempDir, dryRun = false)
+        val migrated = file.readText()
+
+        assertTrue(migrated.contains("unit.readInventory(tag, source.registryAccess())"), migrated)
+        assertTrue(JavaParser().parse(migrated).isSuccessful, migrated)
+        assertTrue(LegacyNbtProviderMethodMigration().migrate(tempDir, dryRun = false).isEmpty())
+        assertEquals(migrated, file.readText())
+    }
+
     private fun defaultRelay(): String = """
         interface Relay<T extends BlockEntity> {
             default void dispatchLocated(BlockPos marker, Consumer<T> receiver, BlockGetter lookup) {
