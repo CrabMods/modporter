@@ -6384,16 +6384,172 @@ internal fun StructuralRefactorPass.migrateAbstractNestedPayloadBaseInterfaces(s
 
 internal fun StructuralRefactorPass.migrateGeneratedLazyOptionalImportSource(source: String, generatedCompatPackage: () -> String): String {
     val executableCode = maskJavaCommentsAndLiterals(source)
+    val generatedImportPattern = Regex(
+        """(?m)^[ \t]*(import)\b[ \t\r\n\f]+(com[ \t\r\n\f]*\.[ \t\r\n\f]*modporter[ \t\r\n\f]*\.[ \t\r\n\f]*generated[ \t\r\n\f]*\.[ \t\r\n\f]*[A-Za-z_$][\w$]*(?:[ \t\r\n\f]*\.[ \t\r\n\f]*[A-Za-z_$][\w$]*)*[ \t\r\n\f]*\.[ \t\r\n\f]*compat[ \t\r\n\f]*\.[ \t\r\n\f]*LazyOptional)[ \t\r\n\f]*(;)"""
+    )
+    val generatedImports = generatedImportPattern.findAll(executableCode)
+        .map { match -> match.groupValues[2].filterNot { it.isWhitespace() } }
+        .distinct()
+        .toList()
     if (!Regex("""\bLazyOptional\s*<""").containsMatchIn(executableCode) ||
-        Regex("""(?m)^[ \t]*import\s+com\.modporter\.generated\.[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.compat\.LazyOptional;\s*$""")
-            .containsMatchIn(executableCode) ||
-        Regex("""(?m)^package\s+com\.modporter\.generated\.[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.compat\s*;""")
+        Regex("""(?m)^[ \t]*package[ \t]+com\.modporter\.generated\.[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.compat[ \t]*;""")
             .containsMatchIn(executableCode)) {
         return source
     }
+
+    val legacyQualifiedNames = listOf(
+        "net.minecraftforge.common.util.LazyOptional",
+        "net.neoforged.neoforge.common.util.LazyOptional",
+        "com.modporter.compat.LazyOptional"
+    )
+
+    fun qualifiedNamePattern(qualifiedName: String): String = qualifiedName
+        .split('.')
+        .joinToString("""[ \t\r\n\f]*\.[ \t\r\n\f]*""") { Regex.escape(it) }
+
+    fun executableImportOccurrences(input: String, qualifiedName: String): List<Pair<IntRange, IntRange>> {
+        val masked = maskJavaCommentsAndLiterals(input)
+        return Regex(
+            """(?m)^[ \t]*(import)\b[ \t\r\n\f]+(${qualifiedNamePattern(qualifiedName)})[ \t\r\n\f]*(;)"""
+        ).findAll(masked).mapNotNull { match ->
+            val importKeyword = match.groups[1]?.range ?: return@mapNotNull null
+            val importedName = match.groups[2]?.range ?: return@mapNotNull null
+            val semicolon = match.groups[3]?.range ?: return@mapNotNull null
+            (importKeyword.first..semicolon.last) to importedName
+        }.toList()
+    }
+
+    fun codeOnlyReplacement(
+        input: String,
+        masked: String,
+        range: IntRange,
+        replacement: String = ""
+    ): String {
+        var inserted = replacement.isEmpty()
+        return buildString {
+            range.forEach { index ->
+                if (masked[index].isWhitespace()) {
+                    append(input[index])
+                } else if (!inserted) {
+                    append(replacement)
+                    inserted = true
+                }
+            }
+            if (!inserted) append(replacement)
+        }
+    }
+
+    fun applyEdits(input: String, edits: List<Pair<IntRange, String>>): String =
+        edits.sortedByDescending { it.first.first }.fold(input) { result, (range, replacement) ->
+            result.replaceRange(range.first, range.last + 1, replacement)
+        }
+
+    fun removeExecutableImports(input: String, qualifiedName: String, keepFirst: Boolean = false): String {
+        val occurrences = executableImportOccurrences(input, qualifiedName).let { matches ->
+            if (keepFirst) matches.drop(1) else matches
+        }
+        if (occurrences.isEmpty()) return input
+        val masked = maskJavaCommentsAndLiterals(input)
+        val edits = occurrences.map { (declarationRange, _) ->
+            declarationRange to codeOnlyReplacement(input, masked, declarationRange)
+        }
+        return applyEdits(input, edits)
+    }
+
+    fun removeKnownLegacyImports(input: String): String {
+        var result = input
+        legacyQualifiedNames.forEach { qualifiedName ->
+            result = removeExecutableImports(result, qualifiedName)
+        }
+        return result
+    }
+
+    fun deduplicateGeneratedImport(input: String, qualifiedName: String): String =
+        removeExecutableImports(input, qualifiedName, keepFirst = true)
+
+    fun insertionPointAfterTrailingComments(input: String, startIndex: Int): Int? {
+        var index = startIndex
+        while (index < input.length) {
+            when {
+                input.startsWith("//", index) -> {
+                    val lineFeed = input.indexOf('\n', index + 2)
+                    return if (lineFeed >= 0) lineFeed + 1 else input.length
+                }
+                input.startsWith("/*", index) -> {
+                    val commentEnd = input.indexOf("*/", index + 2)
+                    if (commentEnd < 0) return null
+                    index = commentEnd + 2
+                }
+                input[index] == '\r' ->
+                    return if (index + 1 < input.length && input[index + 1] == '\n') index + 2 else index + 1
+                input[index] == '\n' -> return index + 1
+                input[index] == ' ' || input[index] == '\t' || input[index] == '\u000C' -> index++
+                else -> return index
+            }
+        }
+        return input.length
+    }
+
+    fun insertImportAfterDeclarationLine(input: String, semicolonIndex: Int, importLine: String, newline: String): String {
+        val insertionPoint = insertionPointAfterTrailingComments(input, semicolonIndex + 1) ?: return input
+        val prefix = input.substring(0, insertionPoint)
+        val separator = if (prefix.isEmpty() || prefix.endsWith('\n') || prefix.endsWith('\r')) "" else newline
+        return prefix + separator + importLine + newline + input.substring(insertionPoint)
+    }
+
+    fun addGeneratedImport(input: String, qualifiedName: String): String {
+        if (executableImportOccurrences(input, qualifiedName).isNotEmpty()) return input
+        val masked = maskJavaCommentsAndLiterals(input)
+        val newline = if (input.contains("\r\n")) "\r\n" else "\n"
+        val importLine = "import $qualifiedName;"
+        val lastImport = Regex(
+            """(?m)^[ \t]*(import)\b[ \t\r\n\f]+(?:static\b[ \t\r\n\f]+)?[A-Za-z_$][\w$]*(?:[ \t\r\n\f]*\.[ \t\r\n\f]*(?:[A-Za-z_$][\w$]*|\*))*[ \t\r\n\f]*(;)"""
+        ).findAll(masked).lastOrNull()
+        val importSemicolon = lastImport?.groups?.get(2)?.range?.last
+        if (importSemicolon != null) {
+            return insertImportAfterDeclarationLine(input, importSemicolon, importLine, newline)
+        }
+
+        val packageDeclaration = Regex(
+            """(?m)^[ \t]*(package)\b[ \t\r\n\f]+[A-Za-z_$][\w$]*(?:[ \t\r\n\f]*\.[ \t\r\n\f]*[A-Za-z_$][\w$]*)*[ \t\r\n\f]*(;)"""
+        ).find(masked)
+        val packageSemicolon = packageDeclaration?.groups?.get(2)?.range?.last
+        if (packageSemicolon != null) {
+            return insertImportAfterDeclarationLine(input, packageSemicolon, importLine, newline)
+        }
+        return importLine + newline + input
+    }
+
+    if (generatedImports.isNotEmpty()) {
+        var result = removeKnownLegacyImports(source)
+        generatedImports.forEach { qualifiedName ->
+            result = deduplicateGeneratedImport(result, qualifiedName)
+        }
+        return result
+    }
+
     val compatPackage = generatedCompatPackage()
-    if (compatPackage.isBlank() || source.contains("import $compatPackage.LazyOptional;")) return source
-    return addImportIfMissing(source, "$compatPackage.LazyOptional")
+    if (compatPackage.isBlank()) return source
+    val generatedImport = "$compatPackage.LazyOptional"
+    if (executableImportOccurrences(source, generatedImport).isNotEmpty()) {
+        return deduplicateGeneratedImport(removeKnownLegacyImports(source), generatedImport)
+    }
+
+    val legacyOccurrences = legacyQualifiedNames
+        .flatMap { qualifiedName -> executableImportOccurrences(source, qualifiedName) }
+        .sortedBy { (declarationRange, _) -> declarationRange.first }
+    if (legacyOccurrences.isNotEmpty()) {
+        val masked = maskJavaCommentsAndLiterals(source)
+        val edits = buildList {
+            val (_, importedNameRange) = legacyOccurrences.first()
+            add(importedNameRange to codeOnlyReplacement(source, masked, importedNameRange, generatedImport))
+            legacyOccurrences.drop(1).forEach { (declarationRange, _) ->
+                add(declarationRange to codeOnlyReplacement(source, masked, declarationRange))
+            }
+        }
+        return deduplicateGeneratedImport(applyEdits(source, edits), generatedImport)
+    }
+    return addGeneratedImport(source, generatedImport)
 }
 
 internal fun StructuralRefactorPass.removeUnusedLazyOptionalFields(

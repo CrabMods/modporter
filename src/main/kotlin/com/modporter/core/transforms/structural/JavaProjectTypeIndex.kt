@@ -31,6 +31,7 @@ import com.github.javaparser.ast.expr.Expression
 import com.github.javaparser.ast.expr.FieldAccessExpr
 import com.github.javaparser.ast.expr.LambdaExpr
 import com.github.javaparser.ast.expr.MethodCallExpr
+import com.github.javaparser.ast.expr.MethodReferenceExpr
 import com.github.javaparser.ast.expr.NameExpr
 import com.github.javaparser.ast.expr.ObjectCreationExpr
 import com.github.javaparser.ast.expr.PatternExpr
@@ -95,6 +96,25 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         val name: String,
         val arguments: List<TypeRef> = emptyList(),
         val arrayDepth: Int = 0
+    )
+
+    private sealed interface ExactExternalFunctionalParameterSource {
+        data class ReceiverTypeArgument(val index: Int) : ExactExternalFunctionalParameterSource
+        data class IterableCallArgument(
+            val argumentIndex: Int,
+            val allowPureIterable: Boolean = true
+        ) : ExactExternalFunctionalParameterSource
+        data class ExactType(val name: String) : ExactExternalFunctionalParameterSource
+    }
+
+    private data class ExactExternalFunctionalParameterContract(
+        val owner: String,
+        val methodName: String,
+        val methodArity: Int,
+        val callbackArgumentIndex: Int,
+        val functionalArity: Int,
+        val lambdaParameterIndex: Int,
+        val parameterSource: ExactExternalFunctionalParameterSource
     )
 
     private sealed interface ResolvedArgumentValue {
@@ -1217,6 +1237,25 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
                 ?: throw IllegalStateException("Raw Map receiver has no exact value type for '$call'")
             return TypeRef("java.util.Collection", listOf(valueType))
         }
+        if (scope.name == "java.util.Map" && call.nameAsString == "entrySet" && call.arguments.isEmpty()) {
+            val keyType = scope.arguments.getOrNull(0)
+                ?: throw IllegalStateException("Raw Map receiver has no exact key type for '$call'")
+            val valueType = scope.arguments.getOrNull(1)
+                ?: throw IllegalStateException("Raw Map receiver has no exact value type for '$call'")
+            return TypeRef(
+                "java.util.Set",
+                listOf(TypeRef("java.util.Map.Entry", listOf(keyType, valueType)))
+            )
+        }
+        if (scope.name == "java.util.Map.Entry" && call.arguments.isEmpty()) {
+            when (call.nameAsString) {
+                "getKey" -> return scope.arguments.getOrNull(0)
+                    ?: throw IllegalStateException("Raw Map.Entry receiver has no exact key type for '$call'")
+                "getValue" -> return scope.arguments.getOrNull(1)
+                    ?: throw IllegalStateException("Raw Map.Entry receiver has no exact value type for '$call'")
+            }
+        }
+        exactExternalMethodReturnType(scope, call, owner, substitutions)?.let { return it }
         if (scope.name == "java.util.Optional" && call.nameAsString == "get" && call.arguments.isEmpty()) {
             return scope.arguments.singleOrNull()
                 ?: throw IllegalStateException("Raw Optional receiver has no exact value type for '$call'")
@@ -1592,9 +1631,20 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         val scope = if (scopeExpression == null) {
             TypeRef(owner.qualifiedName, owner.typeParameters.mapNotNull(substitutions::get))
         } else {
-            resolveExpression(scopeExpression, parentCall, owner, substitutions) ?: return null
+            resolveExpression(scopeExpression, parentCall, owner, substitutions)
+                ?: resolveTypeScope(scopeExpression, owner, substitutions)
+                ?: return null
         }
-        val external = when {
+        val exactExternal = exactExternalFunctionalParameterType(
+            scope,
+            parentCall,
+            argumentIndex,
+            lambda.parameters.size,
+            parameterIndex,
+            owner,
+            substitutions
+        )
+        val external = exactExternal ?: when {
             parentCall.nameAsString == "forEach" && argumentIndex == 0 &&
                 scope.name in setOf("java.lang.Iterable", "java.util.Collection", "java.util.List") ->
                 scope.arguments.singleOrNull()
@@ -1626,6 +1676,91 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             substitutions,
             emptySet()
         )
+    }
+
+    private fun exactExternalFunctionalParameterType(
+        receiver: TypeRef,
+        call: MethodCallExpr,
+        callbackArgumentIndex: Int,
+        functionalArity: Int,
+        lambdaParameterIndex: Int,
+        owner: TypeInfo,
+        substitutions: Map<String, TypeRef>
+    ): TypeRef? {
+        val matches = exactExternalFunctionalParameterContracts.filter { contract ->
+            contract.owner == receiver.name &&
+                contract.methodName == call.nameAsString &&
+                contract.methodArity == call.arguments.size &&
+                contract.callbackArgumentIndex == callbackArgumentIndex &&
+                contract.functionalArity == functionalArity &&
+                contract.lambdaParameterIndex == lambdaParameterIndex
+        }
+        if (matches.isEmpty()) return null
+        if (loadType(receiver.name) != null) return null
+        if (matches.size > 1) {
+            throw IllegalStateException(
+                "Ambiguous exact external functional parameter contracts for " +
+                    "${receiver.name}.${call.nameAsString}/${call.arguments.size}"
+            )
+        }
+        val contract = matches.singleOrNull() ?: return null
+        return when (val source = contract.parameterSource) {
+            is ExactExternalFunctionalParameterSource.ReceiverTypeArgument ->
+                receiver.arguments.getOrNull(source.index)
+                    ?: throw IllegalStateException(
+                        "Raw ${receiver.name} has no exact lambda parameter type for '$call'"
+                    )
+            is ExactExternalFunctionalParameterSource.IterableCallArgument -> {
+                val argument = call.arguments.getOrNull(source.argumentIndex) ?: return null
+                val argumentType = resolveExpression(argument, call, owner, substitutions) ?: return null
+                if (argumentType.name !in EXACT_EXTERNAL_ITERABLE_TYPES) return null
+                if (argumentType.name == GUAVA_IMMUTABLE_LIST && loadType(argumentType.name) != null) return null
+                if (!source.allowPureIterable && argumentType.name == "java.lang.Iterable") return null
+                argumentType.arguments.singleOrNull()
+                    ?: throw IllegalStateException(
+                        "Raw ${argumentType.name} has no exact iterable element type for '$call'"
+                    )
+            }
+            is ExactExternalFunctionalParameterSource.ExactType -> TypeRef(source.name)
+        }
+    }
+
+    private fun exactExternalMethodReturnType(
+        receiver: TypeRef,
+        call: MethodCallExpr,
+        owner: TypeInfo,
+        substitutions: Map<String, TypeRef>
+    ): TypeRef? {
+        if (receiver.name != CATNIP_COUPLE || loadType(receiver.name) != null) return null
+        if (call.nameAsString != "map" || call.arguments.size != 1) return null
+        val inputType = receiver.arguments.singleOrNull()
+            ?: throw IllegalStateException("Raw ${receiver.name} has no exact map input type for '$call'")
+        val reference = call.arguments.single() as? MethodReferenceExpr ?: return null
+        val referenceOwner = resolveExpression(reference.scope, reference, owner, substitutions)
+            ?: resolveTypeScope(reference.scope, owner, substitutions)
+            ?: return null
+        if (referenceOwner != inputType) return null
+        val outputType = exactProjectMethodReferenceReturnType(reference, referenceOwner) ?: return null
+        return TypeRef(CATNIP_COUPLE, listOf(outputType))
+    }
+
+    private fun exactProjectMethodReferenceReturnType(
+        reference: MethodReferenceExpr,
+        receiver: TypeRef
+    ): TypeRef? {
+        if (reference.identifier == "new") return null
+        val info = loadType(receiver.name) ?: return null
+        val substitutions = substitutions(info, receiver)
+        val matches = methods(info).filter { method ->
+            method.nameAsString == reference.identifier && !method.isStatic && method.parameters.isEmpty()
+        }
+        if (matches.size > 1) {
+            throw IllegalStateException(
+                "Ambiguous zero-argument project method reference '${reference.identifier}' on ${receiver.name}"
+            )
+        }
+        val method = matches.singleOrNull() ?: return null
+        return resolveLexicalType(parseType(method.typeAsString), method, info, substitutions)
     }
 
     private fun resolveProjectFunctionalParameterBinding(
@@ -3026,6 +3161,112 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             "VirtualMachineError",
             "Void"
         ).associateWith { "java.lang.$it" }
+        // java.base Map/Map.Entry generic signatures were read from Adoptium 8u472 rt.jar:
+        // Map.class SHA-256 902b845ca852c7524528fe1162f5c37430b18203da008b03def216b9113015f6;
+        // Map$Entry.class SHA-256 9996625359014bdf0a5cfc612dffc377b8d9cbd7be7966c08e8df92b954de79b.
+        private const val GUAVA_IMMUTABLE_LIST = "com.google.common.collect.ImmutableList"
+        private val EXACT_EXTERNAL_ITERABLE_TYPES = setOf(
+            "java.lang.Iterable",
+            "java.util.Collection",
+            "java.util.List",
+            "java.util.Set",
+            GUAVA_IMMUTABLE_LIST
+        )
+
+        // net.createmod.ponder:ponder-neoforge:1.0.87+mc1.21.1
+        // JAR SHA-256 d6b7fdf94359f73dc1fee730eded898d51b3bf0d626710753253becd8e4e6bef;
+        // Couple.class SHA-256 7f88d8f248964d49fa3e2ce30b8170812fbaa7943db3f90e4de03e847caad9a0;
+        // NBTHelper.class SHA-256 e654636a4b9ef362cd46e12a0646d77b37cd2287ca33278e71a725ca419a88c5.
+        // Each entry maps only the exact proven callback parameter to its generic source.
+        private const val CATNIP_COUPLE = "net.createmod.catnip.data.Couple"
+        private const val CATNIP_NBT_HELPER = "net.createmod.catnip.nbt.NBTHelper"
+        private val exactExternalFunctionalParameterContracts = listOf(
+            ExactExternalFunctionalParameterContract(
+                CATNIP_COUPLE, "map", 1, 0, 1, 0,
+                ExactExternalFunctionalParameterSource.ReceiverTypeArgument(0)
+            ),
+            ExactExternalFunctionalParameterContract(
+                CATNIP_COUPLE, "mapNotNull", 1, 0, 1, 0,
+                ExactExternalFunctionalParameterSource.ReceiverTypeArgument(0)
+            ),
+            ExactExternalFunctionalParameterContract(
+                CATNIP_COUPLE, "mapWithContext", 1, 0, 2, 0,
+                ExactExternalFunctionalParameterSource.ReceiverTypeArgument(0)
+            ),
+            ExactExternalFunctionalParameterContract(
+                CATNIP_COUPLE, "mapWithParams", 2, 0, 2, 0,
+                ExactExternalFunctionalParameterSource.ReceiverTypeArgument(0)
+            ),
+            ExactExternalFunctionalParameterContract(
+                CATNIP_COUPLE, "mapNotNullWithParam", 2, 0, 2, 0,
+                ExactExternalFunctionalParameterSource.ReceiverTypeArgument(0)
+            ),
+            ExactExternalFunctionalParameterContract(
+                CATNIP_COUPLE, "both", 1, 0, 1, 0,
+                ExactExternalFunctionalParameterSource.ReceiverTypeArgument(0)
+            ),
+            ExactExternalFunctionalParameterContract(
+                CATNIP_COUPLE, "either", 1, 0, 1, 0,
+                ExactExternalFunctionalParameterSource.ReceiverTypeArgument(0)
+            ),
+            ExactExternalFunctionalParameterContract(
+                CATNIP_COUPLE, "replace", 1, 0, 1, 0,
+                ExactExternalFunctionalParameterSource.ReceiverTypeArgument(0)
+            ),
+            ExactExternalFunctionalParameterContract(
+                CATNIP_COUPLE, "replaceWithContext", 1, 0, 2, 0,
+                ExactExternalFunctionalParameterSource.ReceiverTypeArgument(0)
+            ),
+            ExactExternalFunctionalParameterContract(
+                CATNIP_COUPLE, "replaceWithParams", 2, 0, 2, 0,
+                ExactExternalFunctionalParameterSource.ReceiverTypeArgument(0)
+            ),
+            ExactExternalFunctionalParameterContract(
+                CATNIP_COUPLE, "forEach", 1, 0, 1, 0,
+                ExactExternalFunctionalParameterSource.ReceiverTypeArgument(0)
+            ),
+            ExactExternalFunctionalParameterContract(
+                CATNIP_COUPLE, "forEachWithContext", 1, 0, 2, 0,
+                ExactExternalFunctionalParameterSource.ReceiverTypeArgument(0)
+            ),
+            ExactExternalFunctionalParameterContract(
+                CATNIP_COUPLE, "forEachWithParams", 2, 0, 2, 0,
+                ExactExternalFunctionalParameterSource.ReceiverTypeArgument(0)
+            ),
+            ExactExternalFunctionalParameterContract(
+                CATNIP_COUPLE, "serializeEach", 1, 0, 1, 0,
+                ExactExternalFunctionalParameterSource.ReceiverTypeArgument(0)
+            ),
+            ExactExternalFunctionalParameterContract(
+                CATNIP_NBT_HELPER, "writeCompoundList", 2, 1, 1, 0,
+                ExactExternalFunctionalParameterSource.IterableCallArgument(0)
+            ),
+            // NeoForge 21.1.230 merged SDK SHA-256 2faf217a53ff44583a6df6ba9d6f8a19f8e531c405eebd373eaaea6c08a37f3f.
+            // NonNullList<E> extends AbstractList<E>; Iterable.forEach consumes Consumer<? super E>.
+            // FriendlyByteBuf.writeCollection(Collection<T>, StreamEncoder<? super FriendlyByteBuf,T>),
+            // inherited unchanged by RegistryFriendlyByteBuf. The implicit encoder buffer is FriendlyByteBuf.
+            ExactExternalFunctionalParameterContract(
+                "net.minecraft.core.NonNullList", "forEach", 1, 0, 1, 0,
+                ExactExternalFunctionalParameterSource.ReceiverTypeArgument(0)
+            ),
+            ExactExternalFunctionalParameterContract(
+                "net.minecraft.network.FriendlyByteBuf", "writeCollection", 2, 1, 2, 1,
+                ExactExternalFunctionalParameterSource.IterableCallArgument(0, allowPureIterable = false)
+            ),
+            ExactExternalFunctionalParameterContract(
+                "net.minecraft.network.RegistryFriendlyByteBuf", "writeCollection", 2, 1, 2, 1,
+                ExactExternalFunctionalParameterSource.IterableCallArgument(0, allowPureIterable = false)
+            ),
+            ExactExternalFunctionalParameterContract(
+                "net.minecraft.network.FriendlyByteBuf", "writeCollection", 2, 1, 2, 0,
+                ExactExternalFunctionalParameterSource.ExactType("net.minecraft.network.FriendlyByteBuf")
+            ),
+            ExactExternalFunctionalParameterContract(
+                "net.minecraft.network.RegistryFriendlyByteBuf", "writeCollection", 2, 1, 2, 0,
+                ExactExternalFunctionalParameterSource.ExactType("net.minecraft.network.FriendlyByteBuf")
+            )
+        )
+
         private val knownFields = mapOf(
             "net.minecraft.client.gui.screens.inventory.AbstractContainerScreen" to mapOf(
                 "menu" to TypeRef("T"),

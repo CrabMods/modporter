@@ -157,6 +157,7 @@
       "catnip-"
     ],
     "allowedFiles": [
+      "src/main/kotlin/com/modporter/core/transforms/structural/JavaProjectTypeIndex.kt",
       "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalProviderContracts.kt",
       "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalTagContracts.kt",
       "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalTypeContracts.kt",
@@ -175,7 +176,7 @@
       "src/main/resources/mappings/forge2neo/library-provider-carriers.json",
       "src/main/resources/mappings/forge2neo/library-provider-parameters.json"
     ],
-    "rationale": "Catnip is a published helper library used by source projects; migration contracts target its public API surface rather than a benchmark mod."
+    "rationale": "Catnip is a published helper library used by source projects; migration contracts target its public API surface rather than a benchmark mod. The shared Java type index hosts version-pinned generic API signature facts with source-shadow and raw-type refusal; it does not contain benchmark-mod rules."
   },
   {
     "id": "ponder",
@@ -185,6 +186,7 @@
     ],
     "ruleIdPrefixes": [],
     "allowedFiles": [
+      "src/main/kotlin/com/modporter/core/transforms/structural/JavaProjectTypeIndex.kt",
       "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalProviderContracts.kt",
       "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalTypeContracts.kt",
       "src/main/kotlin/com/modporter/core/transforms/structural/ExactProjectProviderCallMigration.kt",
@@ -193,7 +195,7 @@
       "src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt",
       "src/main/kotlin/com/modporter/core/transforms/build/DependencyResolver.kt"
     ],
-    "rationale": "Ponder exposes a public scene API whose world facade owns the target registry provider; the contract applies to every Ponder consumer.",
+    "rationale": "Ponder exposes a public scene API whose world facade owns the target registry provider; the contract applies to every Ponder consumer. The shared Java type index hosts version-pinned generic API signature facts with source-shadow and raw-type refusal; it does not contain benchmark-mod rules.",
     "coordinatePrefixes": [
       "net.createmod.ponder:"
     ]
