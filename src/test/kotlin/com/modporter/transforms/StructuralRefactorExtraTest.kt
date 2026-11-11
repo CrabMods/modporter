@@ -42552,6 +42552,7 @@ bus.addListener(ActualListenerRegistry::register);
                 }
 
                 public ItemStack drop(Flask flask) {
+                    if (this.level == null) throw new IllegalStateException("Cannot drop before world attachment");
                     return flask.toItem();
                 }
 
@@ -42655,7 +42656,7 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(migrated.contains("flask.toNBT(registries)"), migrated)
         assertTrue(migrated.contains("ItemStack toItem(HolderLookup.Provider registries)"), migrated)
         assertTrue(migrated.contains("public ItemStack drop(Flask flask)"), migrated)
-        assertTrue(migrated.contains("return flask.toItem(this.getLevel().registryAccess());"), migrated)
+        assertTrue(migrated.contains("return flask.toItem(this.level.registryAccess());"), migrated)
         assertTrue(migrated.contains("return new PoolEntry(tag, registries);"), migrated)
         assertTrue(migrated.contains("stack.saveOptional(registries);"), migrated)
         assertFalse(migrated.contains("new PoolEntry(tag, HolderLookup.Provider registries)"), migrated)

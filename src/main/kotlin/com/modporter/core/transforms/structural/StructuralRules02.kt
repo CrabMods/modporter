@@ -6682,6 +6682,12 @@ internal data class JavaInheritanceIndex(
         val visited = mutableSetOf<String>()
         while (current.isNotBlank() && visited.add(current)) {
             registryAccessFieldByClass[current]?.let { return it }
+            // The pinned Minecraft BlockEntity owns a nullable Level field.
+            // The context resolver must still prove this.level non-null at
+            // the actual use before obtaining its registry provider.
+            if (current == "BlockEntity" && current !in directSuperByClass) {
+                return JavaRegistryAccessField("this.level", false)
+            }
             current = directSuperByClass[current]?.substringAfterLast('.') ?: return null
         }
         return null
@@ -6844,11 +6850,26 @@ internal fun StructuralRefactorPass.collectJavaClassNamesExtending(
         .map { it.name }
         .toSet()
 
-internal fun StructuralRefactorPass.collectJavaClassDeclarations(source: String): List<JavaClassDeclaration> {
+private object JavaClassDeclarationsSourceCache {
+    private var source: String? = null
+    private var declarations: List<JavaClassDeclaration> = emptyList()
+
+    @Synchronized
+    fun getOrCompute(currentSource: String, compute: () -> List<JavaClassDeclaration>): List<JavaClassDeclaration> {
+        if (source == currentSource) return declarations
+        val result = java.util.Collections.unmodifiableList(compute())
+        source = currentSource
+        declarations = result
+        return result
+    }
+}
+
+internal fun StructuralRefactorPass.collectJavaClassDeclarations(source: String): List<JavaClassDeclaration> =
+    JavaClassDeclarationsSourceCache.getOrCompute(source) {
     val classPattern = Regex(
         """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed)\s+)*class\s+([A-Za-z_$][\w$]*)(?:\s*<[^>{}]+>)?(?:\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?))?\b[^{]*\{"""
     )
-    return classPattern.findAll(source).mapNotNull { match ->
+    classPattern.findAll(source).mapNotNull { match ->
         val openBrace = source.indexOf('{', match.range.last)
         val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
         if (openBrace < 0 || closeBrace < 0) {
