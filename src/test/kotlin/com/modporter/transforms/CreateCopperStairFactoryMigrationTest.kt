@@ -137,6 +137,36 @@ class CreateCopperStairFactoryMigrationTest {
     }
 
     @Test
+    fun `admits the exact fully qualified support owners in dry run and idempotently`() {
+        val root = directory.resolve("fully-qualified")
+        val fixture = fixture(root, includeReflection = true)
+        installFullyQualifiedSupport(fixture)
+        val originalCopper = fixture.copper.readText()
+
+        val dryRun = CreateCopperStairFactoryMigration.migrate(
+            StructuralRefactorPass(),
+            root,
+            dryRun = true
+        )
+
+        assertTrue(dryRun.gates.isEmpty(), dryRun.gates.joinToString())
+        assertEquals(3, dryRun.changes.size)
+        assertEquals(originalCopper, fixture.copper.readText())
+        assertFalse(fixture.stair.exists())
+        assertFalse(fixture.weathering.exists())
+
+        val result = migrate(root)
+        assertTrue(result.gates.isEmpty(), result.gates.joinToString())
+        assertEquals(3, result.changes.size)
+        assertTrue(fixture.stair.exists())
+        assertTrue(fixture.weathering.exists())
+
+        val second = migrate(root)
+        assertTrue(second.gates.isEmpty(), second.gates.joinToString())
+        assertTrue(second.changes.isEmpty(), second.changes.joinToString())
+    }
+
+    @Test
     fun `repairs the exact intermediate after reflection cleanup without evaluating supplier`() {
         val root = directory.resolve("stripped")
         val fixture = fixture(root, includeReflection = false)
@@ -374,6 +404,104 @@ class CreateCopperStairFactoryMigrationTest {
                 fixture.replaceCreateRegistrate(
                     "registerCTBehviour(entry, behavior)",
                     "mutate(entry)"
+                )
+            },
+            Rejection("simple-dist-owner-missing") { fixture ->
+                fixture.replaceCreateRegistrate(
+                    "import com.modporter.generated.create.compat.DistExecutor;\n",
+                    ""
+                )
+            },
+            Rejection("simple-registry-owner-missing") { fixture ->
+                fixture.replaceCreateRegistrate(
+                    "import net.createmod.catnip.registry.RegisteredObjectsHelper;\n",
+                    ""
+                )
+            },
+            Rejection("fqn-dist-owner-missing") { fixture ->
+                installFullyQualifiedSupport(fixture, writeDistOwner = false)
+            },
+            Rejection("fqn-dist-owner-double-run") { fixture ->
+                installFullyQualifiedSupport(fixture)
+                fixture.replaceDistExecution(
+                    "target.get().run();",
+                    "target.get().run();\n            target.get().run();"
+                )
+            },
+            Rejection("fqn-dist-owner-side-effect") { fixture ->
+                installFullyQualifiedSupport(fixture)
+                fixture.replaceDistExecution(
+                    "target.get().run();",
+                    "System.out.println(dist);\n            target.get().run();"
+                )
+            },
+            Rejection("fqn-dist-duplicate-owner") { fixture ->
+                installFullyQualifiedSupport(fixture)
+                fixture.writeJava(
+                    "src/main/java/alternate/AlternateDistOwner.java",
+                    """
+                    package com.modporter.generated.create.compat;
+                    final class DistExecution {}
+                    """.trimIndent()
+                )
+            },
+            Rejection("fqn-dist-prefix-shadow") { fixture ->
+                installFullyQualifiedSupport(fixture)
+                fixture.replaceCreateRegistrate(
+                    "public class CreateRegistrate {",
+                    "public class CreateRegistrate {\n" +
+                        "    private static Object com;"
+                )
+            },
+            Rejection("fqn-registry-prefix-shadow") { fixture ->
+                installFullyQualifiedSupport(fixture)
+                fixture.replaceCreateRegistrate(
+                    "public class CreateRegistrate {",
+                    "public class CreateRegistrate {\n" +
+                        "    private static Object net;"
+                )
+            },
+            Rejection("fqn-dist-static-prefix-import") { fixture ->
+                installFullyQualifiedSupport(fixture)
+                fixture.replaceCreateRegistrate(
+                    "import java.util.function.Supplier;",
+                    "import java.util.function.Supplier;\nimport static example.Scope.com;"
+                )
+            },
+            Rejection("fqn-registry-wildcard-import") { fixture ->
+                installFullyQualifiedSupport(fixture)
+                fixture.replaceCreateRegistrate(
+                    "import java.util.function.Supplier;",
+                    "import java.util.function.Supplier;\nimport example.*;"
+                )
+            },
+            Rejection("fqn-registry-project-shadow") { fixture ->
+                installFullyQualifiedSupport(fixture)
+                fixture.writeJava(
+                    "src/main/java/alternate/AlternateRegistryOwner.java",
+                    """
+                    package net.createmod.catnip.registry;
+                    final class RegisteredObjectsHelper {
+                        static Object getKeyOrThrow(Object entry) {
+                            return entry;
+                        }
+                    }
+                    """.trimIndent()
+                )
+            },
+            Rejection("fqn-registry-wrong-owner") { fixture ->
+                installFullyQualifiedSupport(fixture)
+                fixture.replaceCreateRegistrate(
+                    "net.createmod.catnip.registry.RegisteredObjectsHelper" +
+                        ".getKeyOrThrow(entry)",
+                    "net.createmod.catnip.registry.OtherHelper.getKeyOrThrow(entry)"
+                )
+            },
+            Rejection("fqn-registry-extra-argument") { fixture ->
+                installFullyQualifiedSupport(fixture)
+                fixture.replaceCreateRegistrate(
+                    "RegisteredObjectsHelper.getKeyOrThrow(entry)",
+                    "RegisteredObjectsHelper.getKeyOrThrow(entry, true)"
                 )
             },
             Rejection("extra-subclass") { fixture ->
@@ -840,10 +968,76 @@ class CreateCopperStairFactoryMigrationTest {
             allBlocks,
             tagGen,
             createRegistrate,
+            root.resolve(
+                "src/main/java/com/modporter/generated/create/compat/DistExecution.java"
+            ),
             copper.parent.resolve("CreateCopperStairBlock.java"),
             copper.parent.resolve("CreateWeatheringCopperStairBlock.java")
         )
     }
+
+    private fun installFullyQualifiedSupport(
+        fixture: Fixture,
+        writeDistOwner: Boolean = true
+    ) {
+        fixture.replaceCreateRegistrate(
+            "import net.createmod.catnip.registry.RegisteredObjectsHelper;\n",
+            ""
+        )
+        fixture.replaceCreateRegistrate(
+            "import com.modporter.generated.create.compat.DistExecutor;\n",
+            ""
+        )
+        fixture.replaceCreateRegistrate(
+            "DistExecutor.unsafeRunWhenOn(Dist.CLIENT, toRun)",
+            "com.modporter.generated.create.compat.DistExecution" +
+                ".runWhenOn(Dist.CLIENT, toRun)"
+        )
+        fixture.replaceCreateRegistrate(
+            "RegisteredObjectsHelper.getKeyOrThrow(entry)",
+            "net.createmod.catnip.registry.RegisteredObjectsHelper" +
+                ".getKeyOrThrow(entry)"
+        )
+        if (writeDistOwner) {
+            fixture.distExecution.parent.createDirectories()
+            fixture.distExecution.writeText(distExecutionSource())
+        }
+    }
+
+    private fun distExecutionSource(): String = """
+        package com.modporter.generated.create.compat;
+
+        import java.util.concurrent.Callable;
+        import java.util.function.Supplier;
+        import net.neoforged.api.distmarker.Dist;
+        import net.neoforged.fml.loading.FMLLoader;
+
+        /** Typed replacement for the remaining Forge DistExecutor expression contracts. */
+        public final class DistExecution {
+            private DistExecution() {
+            }
+
+            public static void runWhenOn(Dist dist, Supplier<? extends Runnable> target) {
+                if (FMLLoader.getDist() == dist) {
+                    target.get().run();
+                }
+            }
+
+            public static <T> T callWhenOn(
+                Dist dist,
+                Supplier<? extends Callable<T>> target
+            ) {
+                if (FMLLoader.getDist() != dist) {
+                    return null;
+                }
+                try {
+                    return target.get().call();
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        }
+        """.trimIndent() + "\n"
 
     private fun compact(source: String): String =
         source.replace(Regex("""\s+"""), " ")
@@ -863,6 +1057,7 @@ class CreateCopperStairFactoryMigrationTest {
         val allBlocks: Path,
         val tagGen: Path,
         val createRegistrate: Path,
+        val distExecution: Path,
         val stair: Path,
         val weathering: Path
     ) {
@@ -882,6 +1077,17 @@ class CreateCopperStairFactoryMigrationTest {
 
         fun replaceCreateRegistrate(old: String, new: String) {
             replace(createRegistrate, old, new)
+        }
+
+        fun replaceDistExecution(old: String, new: String) {
+            replace(distExecution, old, new)
+        }
+
+        fun writeJava(relative: String, source: String): Path {
+            val path = root.resolve(relative)
+            path.parent.createDirectories()
+            path.writeText(source + "\n")
+            return path
         }
 
         private fun replace(path: Path, old: String, new: String) {

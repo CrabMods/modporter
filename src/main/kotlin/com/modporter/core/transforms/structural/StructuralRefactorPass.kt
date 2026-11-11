@@ -1506,6 +1506,10 @@ class StructuralRefactorPass : Pass {
             if (LegacyMigrationArtifactInventoryHandoff.isPublished(projectDir)) {
                 changes.addAll(LegacyLootingPolicyMigration.migrate(this, projectDir, dryRun))
             }
+            // Preserve the standalone exact-target migration after the sealed policy has
+            // either completed or proved that this project has no owned policy graph.
+            // An exception above prevents this fallback from touching refused legacy input.
+            changes.addAll(migrateExactLootingMixinTargets(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Legacy looting migration error: ${e.message}")
         }

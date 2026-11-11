@@ -18,11 +18,30 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import org.junit.jupiter.api.io.TempDir
 
 class CreateFlapDisplaySerializationMigrationTest {
+    @TempDir lateinit var directory: Path
+
+    @Test
+    fun `preserves the different provider names assigned to each source method`() {
+        val project = newProject("provider-names")
+        val source = writeSource(
+            project,
+            legacySource().replace("registries", "registries1")
+                .replace("write(HolderLookup.Provider registries1)",
+                    "write(HolderLookup.Provider writeRegistries)")
+        )
+        val result = CreateFlapDisplaySerializationMigration.migrate(project, false)
+        assertTrue(result.gates.isEmpty(), result.gates.joinToString())
+        assertTrue(source.readText().contains("toJson(component, writeRegistries)"))
+        assertTrue(source.readText().contains("fromJson(text, registries1)"))
+        assertTrue(CreateFlapDisplaySerializationMigration.migrate(project, false).changes.isEmpty())
+    }
+
     @Test
     fun `migrates the exact converted flap display boundary to native 1_21 semantics`() {
-        val project = Files.createTempDirectory("create-flap-display")
+        val project = newProject("create-flap-display")
         val source = writeSource(project, legacySource())
 
         val result = CreateFlapDisplaySerializationMigration.migrate(project, dryRun = false)
@@ -57,7 +76,7 @@ class CreateFlapDisplaySerializationMigrationTest {
 
     @Test
     fun `empty update clears a preexisting component while malformed JSON remains parser owned`() {
-        val project = Files.createTempDirectory("create-flap-display-null-contract")
+        val project = newProject("create-flap-display-null-contract")
         val source = writeSource(project, legacySource())
 
         val result = CreateFlapDisplaySerializationMigration.migrate(project, dryRun = false)
@@ -137,7 +156,7 @@ class CreateFlapDisplaySerializationMigrationTest {
 
     @Test
     fun `dry run reports the migration without writing`() {
-        val project = Files.createTempDirectory("create-flap-display-dry")
+        val project = newProject("create-flap-display-dry")
         val source = writeSource(project, legacySource())
         val before = source.readText()
 
@@ -150,7 +169,7 @@ class CreateFlapDisplaySerializationMigrationTest {
 
     @Test
     fun `refuses a partial target write and legacy update without writing`() {
-        val project = Files.createTempDirectory("create-flap-display-partial")
+        val project = newProject("create-flap-display-partial")
         val source = writeSource(
             project,
             legacySource().replace(
@@ -169,7 +188,7 @@ class CreateFlapDisplaySerializationMigrationTest {
 
     @Test
     fun `refuses an altered update graph without writing`() {
-        val project = Files.createTempDirectory("create-flap-display-altered")
+        val project = newProject("create-flap-display-altered")
         val source = writeSource(
             project,
             legacySource().replace(
@@ -188,7 +207,7 @@ class CreateFlapDisplaySerializationMigrationTest {
 
     @Test
     fun `refuses a load boundary that lost its missing Text guard`() {
-        val project = Files.createTempDirectory("create-flap-display-load")
+        val project = newProject("create-flap-display-load")
         val source = writeSource(
             project,
             legacySource().replace(
@@ -207,6 +226,8 @@ class CreateFlapDisplaySerializationMigrationTest {
         assertTrue(result.gates.single().contains("load is not the expected"))
         assertEquals(before, source.readText())
     }
+
+    private fun newProject(name: String): Path = directory.resolve(name).also { it.createDirectories() }
 
     private fun writeSource(project: Path, content: String): Path {
         val source = project.resolve(

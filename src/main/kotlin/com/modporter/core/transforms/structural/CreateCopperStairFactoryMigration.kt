@@ -1058,20 +1058,10 @@ internal object CreateCopperStairFactoryMigration {
         val hasKnownDist =
             "net.minecraftforge.api.distmarker.Dist" in registrateImports ||
                 "net.neoforged.api.distmarker.Dist" in registrateImports
-        val hasKnownDistExecutor =
-            "net.minecraftforge.fml.DistExecutor" in registrateImports ||
-                "net.neoforged.fml.DistExecutor" in registrateImports ||
-                "com.modporter.generated.create.compat.DistExecutor" in registrateImports
-        val hasKnownRegistryLookup =
-            "net.createmod.catnip.platform.CatnipServices" in registrateImports ||
-                "net.createmod.catnip.registry.RegisteredObjectsHelper" in registrateImports
-        if (!registrateImports.containsAll(requiredRegistrateImports) ||
-            !hasKnownDist ||
-            !hasKnownDistExecutor ||
-            !hasKnownRegistryLookup
-        ) {
+        if (!registrateImports.containsAll(requiredRegistrateImports) || !hasKnownDist) {
             abort("CreateRegistrate CT helper type ownership changed")
         }
+        val sourceRoot = projectDir.resolve("src/main/java")
         val connectedTextures = registrateOwner.methods.singleOrNull {
             it.nameAsString == "connectedTextures"
         } ?: abort("CreateRegistrate must own one connectedTextures")
@@ -1096,45 +1086,236 @@ internal object CreateCopperStairFactoryMigration {
             setOf("protected", "static") ||
             onClient.parameters.map { normalizeJava(it.type.toString()) } !=
             listOf("Supplier<Runnable>") ||
-            normalizeJava(onClient.type.toString()) != "void" ||
-            normalizeJava(onClient.body.map { it.toString() }.orElse("")) !=
-            "{DistExecutor.unsafeRunWhenOn(Dist.CLIENT,toRun);}"
+            normalizeJava(onClient.type.toString()) != "void"
         ) {
             abort("CreateRegistrate.onClient execution boundary changed")
+        }
+        val onClientBody = normalizeJava(onClient.body.map { it.toString() }.orElse(""))
+        when (onClientBody) {
+            "{DistExecutor.unsafeRunWhenOn(Dist.CLIENT,toRun);}" -> {
+                val hasKnownDistExecutor =
+                    "net.minecraftforge.fml.DistExecutor" in registrateImports ||
+                        "net.neoforged.fml.DistExecutor" in registrateImports ||
+                        "com.modporter.generated.create.compat.DistExecutor" in registrateImports
+                if (!hasKnownDistExecutor) {
+                    abort("CreateRegistrate.onClient DistExecutor ownership changed")
+                }
+            }
+
+            "{com.modporter.generated.create.compat.DistExecution.runWhenOn(" +
+                "Dist.CLIENT,toRun);}" -> {
+                requireUnshadowedPackagePrefix(
+                    registrateUnit,
+                    registrateOwner,
+                    onClient,
+                    "com"
+                )
+                requireDistExecutionOwnership(parser, sourceRoot)
+            }
+
+            else -> abort("CreateRegistrate.onClient execution boundary changed")
         }
 
         val registerCt = registrateOwner.methods.singleOrNull {
             it.nameAsString == "registerCTBehviour"
         } ?: abort("CreateRegistrate must own one registerCTBehviour")
-        val registerBodies = setOf(
-            normalizeJava(
-                """{
-                    ConnectedTextureBehaviour behavior = behaviorSupplier.get();
-                    CreateClient.MODEL_SWAPPER.getCustomBlockModels().register(
-                        CatnipServices.REGISTRIES.getKeyOrThrow(entry),
-                        model -> new CTModel(model, behavior));
-                }"""
-            ),
-            normalizeJava(
-                """{
-                    ConnectedTextureBehaviour behavior = behaviorSupplier.get();
-                    CreateClient.MODEL_SWAPPER.getCustomBlockModels().register(
-                        RegisteredObjectsHelper.getKeyOrThrow(entry),
-                        model -> new CTModel(model, behavior));
-                }"""
-            )
-        )
         if (registerCt.modifiers.map { it.keyword.asString() }.toSet() !=
             setOf("private", "static") ||
             registerCt.parameters.map { normalizeJava(it.type.toString()) } !=
             listOf("Block", "Supplier<ConnectedTextureBehaviour>") ||
-            normalizeJava(registerCt.type.toString()) != "void" ||
-            normalizeJava(registerCt.body.map { it.toString() }.orElse("")) !in
-            registerBodies
+            normalizeJava(registerCt.type.toString()) != "void"
         ) {
             abort("CreateRegistrate CT registration is no longer model-only")
         }
+        val catnipServicesBody = normalizeJava(
+            """{
+                ConnectedTextureBehaviour behavior = behaviorSupplier.get();
+                CreateClient.MODEL_SWAPPER.getCustomBlockModels().register(
+                    CatnipServices.REGISTRIES.getKeyOrThrow(entry),
+                    model -> new CTModel(model, behavior));
+            }"""
+        )
+        val registeredObjectsBody = normalizeJava(
+            """{
+                ConnectedTextureBehaviour behavior = behaviorSupplier.get();
+                CreateClient.MODEL_SWAPPER.getCustomBlockModels().register(
+                    RegisteredObjectsHelper.getKeyOrThrow(entry),
+                    model -> new CTModel(model, behavior));
+            }"""
+        )
+        val qualifiedRegisteredObjectsBody = normalizeJava(
+            """{
+                ConnectedTextureBehaviour behavior = behaviorSupplier.get();
+                CreateClient.MODEL_SWAPPER.getCustomBlockModels().register(
+                    net.createmod.catnip.registry.RegisteredObjectsHelper.getKeyOrThrow(entry),
+                    model -> new CTModel(model, behavior));
+            }"""
+        )
+        when (normalizeJava(registerCt.body.map { it.toString() }.orElse(""))) {
+            catnipServicesBody -> {
+                if ("net.createmod.catnip.platform.CatnipServices" !in registrateImports) {
+                    abort("CreateRegistrate CT registry ownership changed")
+                }
+            }
+
+            registeredObjectsBody -> {
+                if ("net.createmod.catnip.registry.RegisteredObjectsHelper" !in
+                    registrateImports
+                ) {
+                    abort("CreateRegistrate CT registry ownership changed")
+                }
+            }
+
+            qualifiedRegisteredObjectsBody -> {
+                requireUnshadowedPackagePrefix(
+                    registrateUnit,
+                    registrateOwner,
+                    registerCt,
+                    "net"
+                )
+                requireNoProjectOwner(
+                    parser,
+                    sourceRoot,
+                    "net.createmod.catnip.registry",
+                    "RegisteredObjectsHelper"
+                )
+            }
+
+            else -> abort("CreateRegistrate CT registration is no longer model-only")
+        }
     }
+
+    private fun requireUnshadowedPackagePrefix(
+        unit: CompilationUnit,
+        owner: ClassOrInterfaceDeclaration,
+        method: MethodDeclaration,
+        prefix: String
+    ) {
+        val ownerFieldShadow = owner.fields
+            .flatMap { it.variables }
+            .any { it.nameAsString == prefix }
+        val ownerTypeShadow = owner.members
+            .filterIsInstance<ClassOrInterfaceDeclaration>()
+            .any { it.nameAsString == prefix }
+        val methodValueShadow =
+            method.findAll(Parameter::class.java).any { it.nameAsString == prefix } ||
+                method.findAll(VariableDeclarator::class.java)
+                    .any { it.nameAsString == prefix }
+        val importedPrefixShadow = unit.imports.any {
+            it.isAsterisk || it.nameAsString.substringAfterLast('.') == prefix
+        }
+        val topLevelTypeShadow = unit.types.any { it.nameAsString == prefix }
+        if (ownerFieldShadow || ownerTypeShadow || methodValueShadow ||
+            importedPrefixShadow || topLevelTypeShadow
+        ) {
+            abort("CreateRegistrate package prefix '$prefix' is value- or type-shadowed")
+        }
+    }
+
+    private fun requireDistExecutionOwnership(parser: JavaParser, sourceRoot: Path) {
+        val expectedPath = sourceRoot.resolve(
+            "com/modporter/generated/create/compat/DistExecution.java"
+        )
+        if (!expectedPath.isRegularFile() ||
+            !sameJava(expectedPath.readText(), distExecutionSource())
+        ) {
+            abort("Generated DistExecution owner or execution semantics changed")
+        }
+        val expectedOwner = expectedPath.toAbsolutePath().normalize()
+        val owners = projectOwners(
+            parser,
+            sourceRoot,
+            "com.modporter.generated.create.compat",
+            "DistExecution"
+        ).map { it.toAbsolutePath().normalize() }
+        if (owners != listOf(expectedOwner)) {
+            abort(
+                "Generated DistExecution has conflicting project owners: " +
+                    owners.joinToString()
+            )
+        }
+    }
+
+    private fun requireNoProjectOwner(
+        parser: JavaParser,
+        sourceRoot: Path,
+        packageName: String,
+        className: String
+    ) {
+        val owners = projectOwners(parser, sourceRoot, packageName, className)
+        if (owners.isNotEmpty()) {
+            abort("Project source shadows $packageName.$className: ${owners.joinToString()}")
+        }
+    }
+
+    private fun projectOwners(
+        parser: JavaParser,
+        sourceRoot: Path,
+        packageName: String,
+        className: String
+    ): List<Path> {
+        if (!Files.isDirectory(sourceRoot)) return emptyList()
+        val packagePattern = Regex(
+            """(?m)^\s*package\s+${Regex.escape(packageName)}\s*;"""
+        )
+        val owners = mutableListOf<Path>()
+        Files.walk(sourceRoot).use { paths ->
+            paths.filter { it.isRegularFile() && it.name.endsWith(".java") }
+                .forEach { path ->
+                    val source = path.readText()
+                    val executable = JavaSourceText.maskCommentsAndLiterals(source)
+                    if (packagePattern.containsMatchIn(executable)) {
+                        val unit = parse(parser, source, path)
+                        if (unit.packageDeclaration
+                                .map { it.nameAsString }
+                                .orElse("") == packageName &&
+                            unit.types.any { it.nameAsString == className }
+                        ) {
+                            owners.add(path)
+                        }
+                    }
+                }
+        }
+        return owners.sortedBy { it.toString() }
+    }
+
+    private fun distExecutionSource(): String = """
+        package com.modporter.generated.create.compat;
+
+        import java.util.concurrent.Callable;
+        import java.util.function.Supplier;
+        import net.neoforged.api.distmarker.Dist;
+        import net.neoforged.fml.loading.FMLLoader;
+
+        /** Typed replacement for the remaining Forge DistExecutor expression contracts. */
+        public final class DistExecution {
+            private DistExecution() {
+            }
+
+            public static void runWhenOn(
+                Dist dist,
+                Supplier<? extends Runnable> target
+            ) {
+                if (FMLLoader.getDist() == dist) {
+                    target.get().run();
+                }
+            }
+
+            public static <T> T callWhenOn(
+                Dist dist,
+                Supplier<? extends Callable<T>> target
+            ) {
+                if (FMLLoader.getDist() != dist) {
+                    return null;
+                }
+                try {
+                    return target.get().call();
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        }
+        """.trimIndent() + "\n"
 
     private fun exactOwner(
         unit: CompilationUnit,

@@ -5514,8 +5514,8 @@ internal fun StructuralRefactorPass.migrateLegacyLootFunctionSource(source: Stri
         return source
     }
 
-    var result = migrateExactLootingMixinTarget(source)
-    var changed = result != source
+    var result = source
+    var changed = false
     val needsProvider =
         result.contains("EnchantWithLevelsFunction.enchantWithLevels(") ||
             result.contains("new SetEnchantmentsFunction.Builder") ||
@@ -5701,6 +5701,7 @@ internal fun StructuralRefactorPass.migrateLegacyLootFunctionSource(source: Stri
 }
 
 private fun StructuralRefactorPass.migrateExactLootingMixinTarget(source: String): String {
+    if (!source.contains("LootingEnchantFunction") || !source.contains("@Mixin")) return source
     val parser = JavaParser(
         ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
     )
@@ -5738,6 +5739,36 @@ private fun StructuralRefactorPass.migrateExactLootingMixinTarget(source: String
         unit.addImport(targetFunction)
     }
     return LexicalPreservingPrinter.print(unit)
+}
+
+internal fun StructuralRefactorPass.migrateExactLootingMixinTargets(
+    projectDir: Path,
+    dryRun: Boolean
+): List<Change> {
+    val srcDir = projectDir.resolve("src/main/java")
+    if (!srcDir.exists()) return emptyList()
+
+    val changes = mutableListOf<Change>()
+    walkJavaSourceRoots(srcDir)
+        .filter { it.toString().endsWith(".java") }
+        .forEach { javaFile ->
+            val source = javaFile.readText()
+            val migrated = migrateExactLootingMixinTarget(source)
+            if (migrated == source) return@forEach
+            if (!dryRun) {
+                javaFile.writeText(migrated)
+            }
+            changes += Change(
+                file = javaFile,
+                line = 0,
+                description = "Migrate exact LootingEnchantFunction mixin target in ${javaFile.fileName}",
+                before = "@Mixin(LootingEnchantFunction.class)",
+                after = "@Mixin(EnchantedCountIncreaseFunction.class)",
+                confidence = Confidence.HIGH,
+                ruleId = "struct-looting-function-mixin-target"
+            )
+        }
+    return changes
 }
 
 internal fun StructuralRefactorPass.migrateLegacySetNbtContainerContentsSource(source: String): String? {

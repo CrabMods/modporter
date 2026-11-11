@@ -514,6 +514,10 @@ class LegacyLootingPolicyMigrationTest {
         val originalPolicy = project.resolve(
             "src/main/java/org/example/salvage/DropEvents.java"
         ).readBytes()
+        val countMixin = project.resolve(
+            "src/main/java/org/example/salvage/mixin/BonusCountMixin.java"
+        )
+        val originalCountMixin = countMixin.readBytes()
         project.resolve("src/main/java/org/example/salvage/LateConsumer.java").writeText(
             "package org.example.salvage; final class LateConsumer {}"
         )
@@ -526,6 +530,8 @@ class LegacyLootingPolicyMigrationTest {
         project.resolve(
             "src/main/java/org/example/salvage/DropEvents.java"
         ).readBytes().contentEquals(originalPolicy) shouldBe true
+        countMixin.readBytes().contentEquals(originalCountMixin) shouldBe true
+        countMixin.readText() shouldContain "@Mixin(LootingEnchantFunction.class)"
         project.resolve(
             "src/main/java/org/example/salvage/mixin/ModporterLegacyLootingMobMixin.java"
         ).exists() shouldBe false

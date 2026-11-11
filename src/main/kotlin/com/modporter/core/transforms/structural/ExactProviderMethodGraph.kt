@@ -291,7 +291,9 @@ internal fun StructuralRefactorPass.collectExactItemStackNbtMethodsNeedingHolder
             val ownerExtendsItemStackHandler = classDeclarationsByName[owner.nameAsString]?.let {
                 javaClassExtendsAny(it, setOf("ItemStackHandler"), javaInheritanceIndex)
             } == true
-            val directNbtProviderDemand = methodTextNeedsHolderLookupProvider(
+            val flapComponentDemand =
+                CreateFlapDisplaySerializationMigration.providerDemandCall(method, javaProjectTypeIndex)
+            val directNbtProviderDemand = flapComponentDemand != null || methodTextNeedsHolderLookupProvider(
                 methodText,
                 itemStackNames,
                 itemStackCollectionNames,
@@ -349,6 +351,7 @@ internal fun StructuralRefactorPass.collectExactItemStackNbtMethodsNeedingHolder
                     )
             }
             val directProviderDemandOffsets = buildList<Node> {
+                flapComponentDemand?.let { add(it) }
                 addAll(nativeDemandCalls)
                 addAll(providerAwareDemandCalls)
                 addAll(providerDemandingConstructorsInMethod)

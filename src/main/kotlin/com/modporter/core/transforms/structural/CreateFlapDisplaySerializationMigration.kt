@@ -7,6 +7,7 @@ import com.github.javaparser.ast.CompilationUnit
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
 import com.github.javaparser.ast.body.MethodDeclaration
 import com.github.javaparser.ast.expr.MethodCallExpr
+import com.github.javaparser.ast.expr.NameExpr
 import com.github.javaparser.ast.expr.StringLiteralExpr
 import com.github.javaparser.ast.stmt.BlockStmt
 import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter
@@ -42,8 +43,44 @@ internal object CreateFlapDisplaySerializationMigration {
         "net.minecraft.network.chat.ComponentSerialization.CODEC" +
             ".encodeStart(com.mojang.serialization.JsonOps.INSTANCE, component)" +
             ".getOrThrow().toString()"
-    private const val TARGET_WRITE =
-        "Component.Serializer.toJson(component, registries)"
+    private fun targetWrite(write: MethodDeclaration): String =
+        "Component.Serializer.toJson(component, ${providerName(write)})"
+
+    /** Seeds the existing closed provider graph before a provider-less JSON fallback hides demand. */
+    internal fun providerDemandCall(
+        method: MethodDeclaration,
+        index: JavaProjectTypeIndex
+    ): MethodCallExpr? {
+        val owner = method.findAncestor(ClassOrInterfaceDeclaration::class.java).orElse(null)
+            ?: return null
+        if (owner.fullyQualifiedName.orElse("") != "$PACKAGE_NAME.$CLASS_NAME" ||
+            method.nameAsString != "write" || method.parameters.isNotEmpty() ||
+            index.declaredType(method.type, method) != "net.minecraft.nbt.CompoundTag" ||
+            index.hasSourceTypeDefinition("net.minecraft.nbt.CompoundTag") ||
+            index.hasSourceTypeDefinition("net.minecraft.network.chat.Component")
+        ) return null
+        val component = owner.fields.flatMap { it.variables }
+            .singleOrNull { it.nameAsString == "component" } ?: return null
+        if (index.declaredType(component.type, component) !=
+            "net.minecraft.network.chat.Component"
+        ) return null
+        val writes = method.findAll(MethodCallExpr::class.java).filter {
+            it.nameAsString == "putString" && it.arguments.size == 2 &&
+                (it.arguments[0] as? StringLiteralExpr)?.value == "Text" &&
+                it.findAncestor(MethodDeclaration::class.java).orElse(null) === method
+        }
+        val tagWrite = writes.singleOrNull() ?: return null
+        val tag = tagWrite.scope.orElse(null) ?: return null
+        if (!index.isExpressionExactlyExternalType(tag, tagWrite, "net.minecraft.nbt.CompoundTag")) return null
+        val value = tagWrite.arguments[1] as? MethodCallExpr ?: return null
+        if (normalize(value.toString()) !in setOf(
+                normalize(LEGACY_WRITE), "Component.Serializer.toJson(component)"
+            )
+        ) return null
+        val reference = value.findAll(NameExpr::class.java)
+            .singleOrNull { it.nameAsString == "component" } ?: return null
+        return value.takeIf { index.isExactInstanceFieldReference(reference) }
+    }
 
     data class Result(val changes: List<Change>, val gates: List<String>) {
         companion object {
@@ -184,7 +221,7 @@ internal object CreateFlapDisplaySerializationMigration {
         val normalized = normalize(body.toString())
         val guard = "if(!tag.contains(\"Text\"))returnsection;"
         val read =
-            "section.component=Component.Serializer.fromJson(tag.getString(\"Text\"),registries);"
+            "section.component=Component.Serializer.fromJson(tag.getString(\"Text\"),${providerName(load)});"
         if (!normalized.contains(guard) || !normalized.contains(read)) {
             abort("$CLASS_NAME.load is not the expected provider-aware native boundary")
         }
@@ -205,16 +242,17 @@ internal object CreateFlapDisplaySerializationMigration {
         if (calls.size != 1) return Mode.OTHER
         return when (normalize(calls.single().arguments[1].toString())) {
             normalize(LEGACY_WRITE) -> Mode.LEGACY
-            normalize(TARGET_WRITE) -> Mode.TARGET
+            normalize(targetWrite(write)) -> Mode.TARGET
             else -> Mode.OTHER
         }
     }
 
     private fun classifyUpdate(update: MethodDeclaration): Mode {
+        val provider = providerName(update)
         val body = update.body.orElse(null) ?: return Mode.OTHER
         val statements = body.statements.map { normalize(it.toString()) }
         val legacy = listOf(
-            "component=Component.Serializer.fromJson(tag.getString(\"Text\"),registries);",
+            "component=Component.Serializer.fromJson(tag.getString(\"Text\"),$provider);",
             "if(cyclingOptions==null)cyclingOptions=getFlapCycle(cycle);",
             "refresh(tag.getBoolean(\"Transition\"));"
         )
@@ -222,7 +260,7 @@ internal object CreateFlapDisplaySerializationMigration {
             "Stringtext=tag.getString(\"Text\");",
             "StringtrimmedText=text.trim();",
             "component=trimmedText.isEmpty()||trimmedText.equals(\"null\")?null:" +
-                "Component.Serializer.fromJson(text,registries);",
+                "Component.Serializer.fromJson(text,$provider);",
             "if(cyclingOptions==null)cyclingOptions=getFlapCycle(cycle);",
             "refresh(tag.getBoolean(\"Transition\"));"
         )
@@ -242,7 +280,7 @@ internal object CreateFlapDisplaySerializationMigration {
                 it.arguments.size == 2 &&
                 (it.arguments[0] as? StringLiteralExpr)?.value == "Text"
         }
-        call.setArgument(1, StaticJavaParser.parseExpression(TARGET_WRITE))
+        call.setArgument(1, StaticJavaParser.parseExpression(targetWrite(write)))
     }
 
     private fun migrateUpdate(update: MethodDeclaration) {
@@ -262,7 +300,7 @@ internal object CreateFlapDisplaySerializationMigration {
             2,
             StaticJavaParser.parseStatement(
                 "component = trimmedText.isEmpty() || trimmedText.equals(\"null\") " +
-                    "? null : Component.Serializer.fromJson(text, registries);"
+                    "? null : Component.Serializer.fromJson(text, ${providerName(update)});"
             )
         )
     }
@@ -285,6 +323,11 @@ internal object CreateFlapDisplaySerializationMigration {
 
     private fun normalize(source: String): String =
         source.replace(Regex("""\s+"""), "")
+
+    private fun providerName(method: MethodDeclaration): String =
+        method.parameters.singleOrNull {
+            normalize(it.typeAsString) == "HolderLookup.Provider"
+        }?.nameAsString ?: abort("$CLASS_NAME.${method.nameAsString} has no unique provider")
 
     private fun atomicWrite(path: Path, source: String) {
         val temporary =
