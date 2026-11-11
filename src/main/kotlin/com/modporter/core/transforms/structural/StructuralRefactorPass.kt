@@ -1641,6 +1641,46 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            val handoffs = CreateItemStackDataFamilyMigration.migrateHandoffs(projectDir, dryRun)
+            changes.addAll(handoffs.changes)
+            errors.addAll(handoffs.gates)
+            if (handoffs.gates.isNotEmpty()) return PassResult(name, changes, errors, skipped)
+        } catch (e: Exception) {
+            errors.add("Create item-data handoff migration error: ${e.message}")
+            return PassResult(name, changes, errors, skipped)
+        }
+
+        try {
+            val zapper = CreateZapperDataMigration.migrate(projectDir, dryRun)
+            changes.addAll(zapper.changes)
+            errors.addAll(zapper.gates)
+            if (zapper.gates.isNotEmpty()) return PassResult(name, changes, errors, skipped)
+        } catch (e: Exception) {
+            errors.add("Create Zapper data migration error: ${e.message}")
+            return PassResult(name, changes, errors, skipped)
+        }
+
+        try {
+            val attributes = CreateAttributeFilterDataMigration.migrate(projectDir, dryRun)
+            changes.addAll(attributes.changes)
+            errors.addAll(attributes.gates)
+            if (attributes.gates.isNotEmpty()) return PassResult(name, changes, errors, skipped)
+        } catch (e: Exception) {
+            errors.add("Create attribute-filter data migration error: ${e.message}")
+            return PassResult(name, changes, errors, skipped)
+        }
+
+        try {
+            changes.addAll(CreateEffectComponentSurfaces.migratePotionData(this, projectDir, dryRun))
+            // Resolve source-owned tag uses while the exact legacy PotionUtils contracts are
+            // still available, before their owner is replaced by the generated adapter below.
+            changes.addAll(ExactLegacyCustomDataMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Create potion data boundary migration error: ${e.message}")
+            return PassResult(name, changes, errors, skipped)
+        }
+
+        try {
             changes.addAll(migrateLegacyPotionUtilities(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Legacy potion utility migration error: ${e.message}")
@@ -1702,6 +1742,14 @@ class StructuralRefactorPass : Pass {
         } catch (e: Exception) {
             errors.add("Create pose and loot mixin migration error: ${e.message}")
             return PassResult(name, changes, errors, skipped)
+        }
+
+        // Source-owned families above close aliases unavailable to the first custom-data graph.
+        // Reuse its complete-file proof after all emitters; unknown uses still retain every call.
+        try {
+            changes.addAll(ExactLegacyCustomDataMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Final exact custom data graph migration error: ${e.message}")
         }
 
         return PassResult(name, changes, errors, skipped)

@@ -926,6 +926,111 @@ class ExactLegacyCustomDataMigrationTest {
         assertTrue(migrated.contains("return box.getOrCreateTag().getInt(\"Count\");"), migrated)
     }
 
+    @Test
+    fun `compound tag equality reads its argument after a detached copy and merge`() {
+        val source = writeJava(
+            "TagEquality.java",
+            """
+            package com.example;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            class TagEquality {
+                boolean matches(ItemStack stack, CompoundTag expected) {
+                    CompoundTag tag = stack.getOrCreateTag();
+                    return tag.copy().merge(expected).equals(tag);
+                }
+            }
+            """.trimIndent()
+        )
+        val result = ExactLegacyCustomDataMigration().migrate(tempDir, dryRun = false)
+        assertEquals(1, result.size)
+        val migrated = source.readText()
+        assertTrue(!migrated.contains("getOrCreateTag"), migrated)
+        assertTrue(migrated.contains("return tag.copy().merge(expected).equals(tag);"), migrated)
+        assertTrue(ExactLegacyCustomDataMigration().migrate(tempDir, dryRun = false).isEmpty())
+    }
+
+    @Test
+    fun `equality on an unknown receiver never acquires the compound tag read contract`() {
+        val source = writeJava(
+            "UnknownEquality.java",
+            """
+            package com.example;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            class UnknownEquality {
+                boolean matches(ItemStack stack, Object observer) {
+                    CompoundTag tag = stack.getOrCreateTag();
+                    return observer.equals(tag);
+                }
+            }
+            """.trimIndent()
+        )
+        val before = source.readText()
+        assertTrue(ExactLegacyCustomDataMigration().migrate(tempDir, dryRun = false).isEmpty())
+        assertEquals(before, source.readText())
+    }
+
+    @Test
+    fun `project declared compound tag cannot acquire target copy merge or equality contracts`() {
+        val shadow = tempDir.resolve("src/main/java/net/minecraft/nbt/CompoundTag.java")
+        shadow.parent.createDirectories()
+        shadow.writeText(
+            """
+            package net.minecraft.nbt;
+            public class CompoundTag {
+                public CompoundTag copy() { return this; }
+                public CompoundTag merge(CompoundTag value) { return this; }
+                public boolean equals(Object value) { return false; }
+            }
+            """.trimIndent()
+        )
+        val source = writeJava(
+            "ShadowEquality.java",
+            """
+            package com.example;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            class ShadowEquality {
+                boolean matches(ItemStack stack, CompoundTag expected) {
+                    CompoundTag tag = stack.getOrCreateTag();
+                    return tag.copy().merge(expected).equals(tag);
+                }
+            }
+            """.trimIndent()
+        )
+        val before = source.readText()
+        assertTrue(ExactLegacyCustomDataMigration().migrate(tempDir, dryRun = false).isEmpty())
+        assertEquals(before, source.readText())
+    }
+
+    @Test
+    fun `wrong copy or merge signatures do not prove a compound equality receiver`() {
+        for ((index, expression) in listOf(
+            "tag.copy(expected).merge(expected)",
+            "tag.copy().merge(expected, expected)",
+            "tag.copy().merge(1)"
+        ).withIndex()) {
+            val source = writeJava(
+                "WrongEquality$index.java",
+                """
+                package com.example;
+                import net.minecraft.nbt.CompoundTag;
+                import net.minecraft.world.item.ItemStack;
+                class WrongEquality$index {
+                    boolean matches(ItemStack stack, CompoundTag expected) {
+                        CompoundTag tag = stack.getOrCreateTag();
+                        return $expression.equals(tag);
+                    }
+                }
+                """.trimIndent()
+            )
+            val before = source.readText()
+            assertTrue(ExactLegacyCustomDataMigration().migrate(tempDir, dryRun = false).isEmpty())
+            assertEquals(before, source.readText())
+        }
+    }
+
     private fun writeJava(name: String, source: String): Path {
         val directory = tempDir.resolve("src/main/java/com/example")
         directory.createDirectories()

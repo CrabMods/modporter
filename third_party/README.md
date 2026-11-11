@@ -10,6 +10,15 @@ The files in `jvm/` preserve the license choices, copyright notices, and
 upstream NOTICE text needed by the bundled components. ModPorter's
 Apache-2.0 license does not replace any of these terms.
 
+## Create-derived source
+
+Source-contract snippets, migrated method bodies, and regression fixtures
+derived from Create retain its MIT code license and attribution to The Create
+Team / The Creators of Create. The full upstream license overview is retained
+in `create/LICENSE.md`; independently written ModPorter migration code remains
+Apache-2.0. Create game assets are not redistributed in the source tree or
+fat JAR.
+
 ## Minecraft Forge compatibility source
 
 The distribution contains three modified Forge-derived legacy-plant source

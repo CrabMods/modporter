@@ -50,6 +50,15 @@ internal object ExactExternalTagContracts {
             return Effect.READ
         }
         val receiverType = typeIndex?.methodCallReceiverType(call)
+        if (call.nameAsString == "equals" && call.arguments.size == 1 && argumentIndex == 0 &&
+            "(Ljava/lang/Object;)Z" in
+                com.modporter.mapping.TargetMembers.methodDescriptors(COMPOUND_TAG, "equals") &&
+            call.scope.map {
+                typeIndex?.isExpressionExactlyExternalType(it, call, COMPOUND_TAG) == true
+            }.orElse(false)
+        ) {
+            return Effect.READ
+        }
         val exactItemHandler = call.scope.map { scope ->
             exact.isProvablyType(scope, "ItemStackHandler", ITEM_STACK_HANDLERS)
         }.orElse(false)
@@ -116,6 +125,12 @@ internal object ExactExternalTagContracts {
         ) {
             return null
         }
+        // Ponder 1.0.87+mc1.21.1 NBTHelper.class SHA-256 e654636a4b9ef362cd46e12a0646d77b37cd2287ca33278e71a725ca419a88c5:
+        // readResourceLocation(CompoundTag,String) reads getString(key), then ResourceLocation.parse.
+        if (call.nameAsString == "readResourceLocation" && call.arguments.size == 2 &&
+            typeIndex != null && !typeIndex.hasSourceTypeDefinition(CATNIP_NBT_HELPER) &&
+            typeIndex.argumentsMatchTypes(call, listOf(COMPOUND_TAG, "java.lang.String"))
+        ) return Effect.READ
         return when (call.nameAsString) {
             "readEnum",
             "readCompoundList",

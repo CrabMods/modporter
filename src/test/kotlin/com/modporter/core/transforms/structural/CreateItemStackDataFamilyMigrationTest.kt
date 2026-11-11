@@ -10,6 +10,7 @@ import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.io.TempDir
 
 class CreateItemStackDataFamilyMigrationTest {
@@ -100,6 +101,98 @@ class CreateItemStackDataFamilyMigrationTest {
             assertTrue(path.readBytes().contentEquals(bytes), path.toString())
         }
         assertTrue(transactionArtifacts(fixture.project).isEmpty())
+    }
+
+    @Test
+    fun `dry run admits the captured mixed entry without changing any source byte`() {
+        val fixture = fixture()
+        fixture.entry.writeText(
+            """
+            package com.simibubi.create.content.equipment.clipboard;
+
+            public class ClipboardEntry {
+            	public static void saveAll(List<List<ClipboardEntry>> entries, ItemStack clipboardItem) {
+            		CompoundTag tag = (clipboardItem).getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag();
+            		tag.put("Pages", NBTHelper.writeCompoundList(entries, list -> {
+            			CompoundTag pageTag = new CompoundTag();
+            			pageTag.put("Entries", NBTHelper.writeCompoundList(list, ClipboardEntry::writeNBT));
+            			return pageTag;
+            		}));
+            		if ((tag).isEmpty()) {
+            			(clipboardItem).remove(net.minecraft.core.component.DataComponents.CUSTOM_DATA);
+            		} else {
+            			(clipboardItem).set(net.minecraft.core.component.DataComponents.CUSTOM_DATA,
+            				net.minecraft.world.item.component.CustomData.of(tag));
+            		}
+            	}
+
+            	public CompoundTag writeNBT(HolderLookup.Provider registries) {
+            		CompoundTag nbt = new CompoundTag();
+            		nbt.putString("Text", net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(com.mojang.serialization.JsonOps.INSTANCE, text).getOrThrow().toString());
+            		if (icon.isEmpty())
+            			return nbt;
+            		nbt.put("Icon", icon.saveOptional(registries));
+            		return nbt;
+            	}
+            }
+            """.trimIndent() + "\n"
+        )
+        val originals = fixture.files.associateWith { it.readBytes() }
+
+        val result = CreateItemStackDataFamilyMigration.migrate(
+            fixture.project,
+            dryRun = true
+        )
+
+        assertTrue(result.gates.isEmpty(), result.gates.joinToString())
+        assertEquals(setOf(fixture.entry, fixture.packagePort), result.changes.map { it.file }.toSet())
+        originals.forEach { (path, bytes) ->
+            assertTrue(path.readBytes().contentEquals(bytes), path.toString())
+        }
+        assertTrue(transactionArtifacts(fixture.project).isEmpty())
+    }
+
+    @Test
+    fun `duplicate canonical clipboard owner refuses before any source write`() {
+        val fixture = fixture()
+        val duplicate = fixture.project.resolve(
+            "src/main/java/duplicate/ClipboardEntry.java"
+        )
+        duplicate.parent.createDirectories()
+        duplicate.writeText(fixture.entry.readText())
+        val originals = (fixture.files + listOf(duplicate)).associateWith { it.readBytes() }
+
+        val result = CreateItemStackDataFamilyMigration.migrate(
+            fixture.project,
+            dryRun = false
+        )
+
+        assertTrue(result.changes.isEmpty())
+        assertEquals(1, result.gates.size)
+        assertTrue(result.gates.single().contains("active but incomplete or has an unproved caller"))
+        originals.forEach { (path, bytes) ->
+            assertTrue(path.readBytes().contentEquals(bytes), path.toString())
+        }
+        assertTrue(transactionArtifacts(fixture.project).isEmpty())
+    }
+    @Test
+    fun `shared transaction plans the captured packet and minecart handoffs without writing`() {
+        val configured = System.getenv("MODPORTER_CREATE_ITEM_DATA_REPLAY")
+        assumeTrue(!configured.isNullOrBlank(), "Optional captured-source replay")
+        val sourceRoot = Path.of(configured!!)
+        val project = sourceRoot.parent.parent.parent
+        val originals = java.nio.file.Files.walk(sourceRoot).use { paths ->
+            paths.filter { it.toString().endsWith(".java") }.toList()
+                .associateWith { it.readBytes() }
+        }
+        val result = CreateItemStackDataFamilyMigration.migrateHandoffs(project, dryRun = true)
+        assertTrue(result.gates.isEmpty(), result.gates.joinToString("\n"))
+        assertEquals(setOf("ClipboardScreen.java", "MinecartContraptionItem.java"),
+            result.changes.map { it.file.fileName.toString() }.toSet())
+        assertTrue(result.changes.all { it.ruleId == CreateItemDataHandoffs.RULE_ID })
+        originals.forEach { (file, bytes) ->
+            assertTrue(bytes.contentEquals(file.readBytes()), file.toString())
+        }
     }
 
     private fun fixture(): Fixture {

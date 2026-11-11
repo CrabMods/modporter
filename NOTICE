@@ -7,8 +7,9 @@ Upstream mod source, assets, and third-party libraries retain their own
 copyrights and licenses. Running ModPorter does not relicense an input project
 or grant permission to redistribute its code or assets.
 
-Regression fixtures copied from Create are attributed to The Create Team /
-The Creators of Create. Their code is used under MIT; the upstream license
+Source snippets in migration contracts, generated method templates, and
+regression fixtures derived from Create are attributed to The Create Team /
+The Creators of Create. These portions retain MIT; the upstream license
 overview is in third_party/create/LICENSE.md. Upstream Create assets are not
 redistributed in the source tree or fat JAR. Stock-asset admission tests fetch
 one hash-pinned upstream icon into an ignored, local test cache.

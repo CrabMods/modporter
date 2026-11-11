@@ -10,6 +10,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.io.TempDir
 
 class SourceOwnedFluidIngredientTest {
@@ -85,7 +86,98 @@ class SourceOwnedFluidIngredientTest {
         assertEquals(before, fixture.ingredient.readText())
     }
 
-    private fun writeFixture(project: Path, aliasEscape: Boolean = false): Fixture {
+    @Test
+    fun `fresh deserialized json stack is snapshotted in the same admitted family publication`() {
+        val fixture = writeFixture(directory.resolve("json-capture"), jsonCapture = true)
+        val before = fixture.ingredient.readText()
+        val dryRun = SourceOwnedFluidIngredient.migrate(StructuralRefactorPass(), fixture.project, true)
+        assertTrue(dryRun.gates.isEmpty(), dryRun.gates.joinToString("\n"))
+        assertEquals(1, dryRun.changes.size)
+        assertEquals(before, fixture.ingredient.readText())
+        val result = SourceOwnedFluidIngredient.migrate(StructuralRefactorPass(), fixture.project, false)
+        assertTrue(result.gates.isEmpty(), result.gates.joinToString("\n"))
+        assertEquals(1, result.changes.size)
+        val migrated = fixture.ingredient.readText()
+        assertFalse(migrated.contains("getOrCreateTag"), migrated)
+        assertTrue(migrated.contains("tagToMatch = stack.getOrDefault("), migrated)
+        assertTrue(SourceOwnedFluidIngredient.migrate(StructuralRefactorPass(), fixture.project, false).changes.isEmpty())
+    }
+
+    @Test
+    fun `json capture completes a family whose registry wire methods were already migrated`() {
+        val fixture = writeFixture(directory.resolve("mixed-json"))
+        val first = SourceOwnedFluidIngredient.migrate(StructuralRefactorPass(), fixture.project, false)
+        assertTrue(first.gates.isEmpty(), first.gates.joinToString("\n"))
+        val unit = com.github.javaparser.StaticJavaParser.parse(fixture.ingredient.readText())
+        unit.findAll(com.github.javaparser.ast.body.MethodDeclaration::class.java).single {
+            it.nameAsString == "readInternal" && it.parameters.single().typeAsString == "JsonObject"
+        }.setBody(com.github.javaparser.StaticJavaParser.parseBlock("""
+            {
+                FluidStack stack = FluidHelper.deserializeFluidStack(json);
+                fluid = stack.getFluid();
+                tagToMatch = stack.getOrCreateTag();
+            }
+        """.trimIndent()))
+        fixture.ingredient.writeText(unit.toString())
+        assertTrue(fixture.ingredient.readText().contains("getOrCreateTag"))
+        val result = SourceOwnedFluidIngredient.migrate(StructuralRefactorPass(), fixture.project, false)
+        assertTrue(result.gates.isEmpty(), result.gates.joinToString("\n"))
+        assertEquals(1, result.changes.size)
+        assertFalse(fixture.ingredient.readText().contains("getOrCreateTag"))
+        assertTrue(SourceOwnedFluidIngredient.migrate(StructuralRefactorPass(), fixture.project, false).changes.isEmpty())
+    }
+
+    @Test
+    fun `shared json factory result or altered reader refuses before any family write`() {
+        for (variant in listOf("shared", "post-capture-use")) {
+            val fixture = writeFixture(directory.resolve(variant), jsonCapture = true)
+            if (variant == "shared") {
+                val helper = fixture.project.resolve("src/main/java/com/simibubi/create/foundation/fluid/FluidHelper.java")
+                helper.writeText(helper.readText().replace("return new FluidStack(null, 250);", "return shared;"))
+            } else {
+                fixture.ingredient.writeText(fixture.ingredient.readText().replace(
+                    "tagToMatch = stack.getOrCreateTag();",
+                    "tagToMatch = stack.getOrCreateTag(); stack.set(DataComponents.CUSTOM_DATA, CustomData.EMPTY);"
+                ))
+            }
+            val before = fixture.ingredient.readText()
+            val result = SourceOwnedFluidIngredient.migrate(StructuralRefactorPass(), fixture.project, false)
+            assertTrue(result.changes.isEmpty(), variant)
+            assertTrue(result.gates.isNotEmpty(), variant)
+            assertEquals(before, fixture.ingredient.readText(), variant)
+        }
+    }
+
+    @Test
+    fun `optional actual converted project json capture is planned without writing any source`() {
+        val configured = System.getenv("MODPORTER_CREATE_ITEM_DATA_REPLAY")
+        assumeTrue(!configured.isNullOrBlank(), "Optional actual converted-source replay")
+        val sourceRoot = Path.of(configured!!)
+        val project = sourceRoot.parent.parent.parent
+        val originals = java.nio.file.Files.walk(sourceRoot).use { paths ->
+            paths.filter { it.toString().endsWith(".java") }.toList()
+                .associateWith { java.nio.file.Files.readAllBytes(it) }
+        }
+        val result = SourceOwnedFluidIngredient.migrate(StructuralRefactorPass(), project, true)
+        assertTrue(result.gates.isEmpty(), result.gates.joinToString("\n"))
+        assertEquals(1, result.changes.size)
+        originals.forEach { (file, bytes) ->
+            assertTrue(bytes.contentEquals(java.nio.file.Files.readAllBytes(file)), file.toString())
+        }
+    }
+
+    private fun writeFixture(
+        project: Path,
+        aliasEscape: Boolean = false,
+        jsonCapture: Boolean = false
+    ): Fixture {
+        val jsonReadBody = if (jsonCapture) {
+            """
+                FluidStack stack = FluidHelper.deserializeFluidStack(json);
+                fluid = stack.getFluid();
+                tagToMatch = stack.getOrCreateTag();
+            """.trimIndent()
+        } else "tagToMatch = new CompoundTag();"
         val ingredient = project.resolve(
             "src/main/java/com/simibubi/create/foundation/fluid/FluidIngredient.java"
         )
@@ -141,7 +233,7 @@ class SourceOwnedFluidIngredientTest {
                     }
 
                     protected void readInternal(JsonObject json) {
-                        tagToMatch = new CompoundTag();
+                        $jsonReadBody
                     }
 
                     protected void writeInternal(JsonObject json) {
@@ -170,7 +262,12 @@ class SourceOwnedFluidIngredientTest {
         helper.writeText("""
             package com.simibubi.create.foundation.fluid;
             import net.neoforged.neoforge.fluids.FluidStack;
+            import com.google.gson.JsonObject;
             public class FluidHelper {
+                private static FluidStack shared;
+                public static FluidStack deserializeFluidStack(JsonObject json) {
+                    return new FluidStack(null, 250);
+                }
                 public static FluidStack copyStackWithAmount(FluidStack stack, int amount) {
                     return stack.copy();
                 }

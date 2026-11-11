@@ -2,6 +2,7 @@ package com.modporter.core.transforms.structural
 
 import com.github.javaparser.JavaParser
 import com.github.javaparser.ParserConfiguration
+import com.github.javaparser.StaticJavaParser
 import com.github.javaparser.ast.Node
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
 import com.github.javaparser.ast.body.MethodDeclaration
@@ -107,6 +108,29 @@ internal object CreateEffectComponentSurfaces {
             planDeployerFoodGuard(pass, parser, root),
             planLegacyTextAudit(pass, parser, root)
         )
+        return publishPlans(pass, parser, plans, dryRun)
+    }
+
+    /** Close potion tag aliases before the legacy PotionUtils owner is relocated. */
+    fun migratePotionData(
+        pass: StructuralRefactorPass,
+        projectDir: Path,
+        dryRun: Boolean
+    ): List<Change> {
+        val root = projectDir.resolve("src/main/java")
+        if (!Files.isDirectory(root)) return emptyList()
+        val parser = JavaParser(
+            ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
+        )
+        return publishPlans(pass, parser, listOfNotNull(planPotionFluid(pass, parser, root)), dryRun)
+    }
+
+    private fun publishPlans(
+        pass: StructuralRefactorPass,
+        parser: JavaParser,
+        plans: List<SourcePlan>,
+        dryRun: Boolean
+    ): List<Change> {
         if (plans.isEmpty()) return emptyList()
         check(targetContractsVerified()) {
             "Create effect/component migration target ABI is not the verified 1.21.1 contract"
@@ -142,7 +166,15 @@ internal object CreateEffectComponentSurfaces {
         )
         if (!Files.isRegularFile(file)) return null
         val parsed = parse(pass, parser, file)
-        if (!parsed.source.contains(".removeChildTag(")) return null
+        val appendMethods = parsed.unit.findAll(MethodDeclaration::class.java).filter {
+            it.nameAsString == "appendEffects"
+        }
+        val legacyAppend = appendMethods.any { method ->
+            method.findAll(MethodCallExpr::class.java).any {
+                it.nameAsString == "getOrCreateTag"
+            }
+        }
+        if (!parsed.source.contains(".removeChildTag(") && !legacyAppend) return null
         LexicalPreservingPrinter.setup(parsed.unit)
         var changed = false
         parsed.unit.findAll(MethodCallExpr::class.java).toList().forEach { call ->
@@ -182,13 +214,91 @@ internal object CreateEffectComponentSurfaces {
             statement.replace(block)
             changed = true
         }
+        if (legacyAppend) {
+            val method = appendMethods.singleOrNull()
+                ?: error("PotionFluid has ambiguous appendEffects declarations")
+            val exact = ExactJavaSemantics(parsed.unit)
+            check(method.isPublic && method.isStatic && method.parameters.size == 2 &&
+                exact.exactTypeReference(method.typeAsString, "FluidStack", FLUID_STACK) &&
+                method.parameters[0].nameAsString == "fs" &&
+                exact.exactTypeReference(method.parameters[0].typeAsString, "FluidStack", FLUID_STACK) &&
+                method.parameters[1].nameAsString == "customEffects" &&
+                method.parameters[1].typeAsString == "Collection<MobEffectInstance>" &&
+                exact.exactTypeReference("Collection", "Collection", "java.util.Collection") &&
+                exact.exactTypeReference("MobEffectInstance", "MobEffectInstance", MOB_EFFECT_INSTANCE) &&
+                exact.exactTypeReference("CompoundTag", "CompoundTag", "net.minecraft.nbt.CompoundTag") &&
+                exact.exactTypeReference("ListTag", "ListTag", "net.minecraft.nbt.ListTag")
+            ) { "PotionFluid.appendEffects is outside the exact source-owned signature" }
+            val expected = StaticJavaParser.parseBlock("""
+                {
+                    if (customEffects.isEmpty())
+                        return fs;
+                    CompoundTag compoundnbt = fs.getOrCreateTag();
+                    ListTag listnbt = compoundnbt.getList("CustomPotionEffects", 9);
+                    for (MobEffectInstance effectinstance : customEffects)
+                        listnbt.add(effectinstance.save());
+                    compoundnbt.put("CustomPotionEffects", listnbt);
+                    return fs;
+                }
+            """.trimIndent())
+            check(method.body.orElse(null) == expected) {
+                "PotionFluid.appendEffects has an unproved child alias, write, exit, or consumer"
+            }
+            val index = JavaProjectTypeIndex.build(root)
+            val receiver = method.findAll(NameExpr::class.java).first { it.nameAsString == "fs" }
+            val compound = method.findAll(NameExpr::class.java).first { it.nameAsString == "compoundnbt" }
+            val list = method.findAll(NameExpr::class.java).first { it.nameAsString == "listnbt" }
+            check(index.isExpressionExactlyExternalType(receiver, receiver, FLUID_STACK) &&
+                index.isExpressionExactlyExternalType(compound, compound, "net.minecraft.nbt.CompoundTag") &&
+                index.isExpressionExactlyExternalType(list, list, "net.minecraft.nbt.ListTag") &&
+                TargetMembers.inheritedMethod(
+                    FLUID_STACK, "getOrDefault",
+                    "(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Ljava/lang/Object;"
+                )?.access == "public" &&
+                TargetMembers.inheritedMethod(
+                    FLUID_STACK, "has", "(Lnet/minecraft/core/component/DataComponentType;)Z"
+                )?.access == "public" &&
+                TargetMembers.inheritedMethod(
+                    "net.minecraft.nbt.CompoundTag", "get", "(Ljava/lang/String;)Lnet/minecraft/nbt/Tag;"
+                )?.access == "public"
+            ) { "PotionFluid.appendEffects target types or component read contract are not verified" }
+            // An existing empty list is a live root child, whereas a missing/wrong-kind list
+            // is detached until put. Preserve that distinction and exceptional partial writes.
+            method.setBody(StaticJavaParser.parseBlock("""
+                {
+                    if (customEffects.isEmpty())
+                        return fs;
+                    CompoundTag compoundnbt = fs.getOrDefault(
+                        net.minecraft.core.component.DataComponents.CUSTOM_DATA,
+                        net.minecraft.world.item.component.CustomData.EMPTY).copyTag();
+                    if (!fs.has(net.minecraft.core.component.DataComponents.CUSTOM_DATA))
+                        fs.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA,
+                            net.minecraft.world.item.component.CustomData.of(compoundnbt));
+                    ListTag listnbt = compoundnbt.getList("CustomPotionEffects", 9);
+                    try {
+                        for (MobEffectInstance effectinstance : customEffects) {
+                            listnbt.add(effectinstance.save());
+                            if (compoundnbt.get("CustomPotionEffects") == listnbt)
+                                fs.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA,
+                                    net.minecraft.world.item.component.CustomData.of(compoundnbt));
+                        }
+                        compoundnbt.put("CustomPotionEffects", listnbt);
+                    } finally {
+                        fs.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA,
+                            net.minecraft.world.item.component.CustomData.of(compoundnbt));
+                    }
+                    return fs;
+                }
+            """.trimIndent()))
+            changed = true
+        }
         check(changed) {
             "PotionFluid retains removeChildTag without one exact FluidStack Potion child removal"
         }
         return SourcePlan(
             file, parsed.source, LexicalPreservingPrinter.print(parsed.unit),
-            "FluidStack.removeChildTag(\"Potion\")",
-            "copy, remove, and restore only CUSTOM_DATA.Potion"
+            "FluidStack legacy potion child and live effect-list access",
+            "preserved potion child removal and effect-list reintegration with component writeback"
         )
     }
 

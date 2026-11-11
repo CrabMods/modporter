@@ -21,10 +21,12 @@ import java.util.IdentityHashMap
 import kotlin.io.path.extension
 import kotlin.streams.toList
 
-internal class ExactProjectTagEffects(
-    sourceRoot: Path,
-    private val index: JavaProjectTypeIndex
+internal class ExactProjectTagEffects private constructor(
+    private val sourceRoot: Path,
+    private val index: JavaProjectTypeIndex,
+    private val borrowedArgumentsOnly: Boolean
 ) {
+    constructor(sourceRoot: Path, index: JavaProjectTypeIndex) : this(sourceRoot, index, false)
     private data class MethodKey(val owner: String, val name: String, val arity: Int)
 
     private enum class State {
@@ -36,6 +38,7 @@ internal class ExactProjectTagEffects(
 
     private val methodsByKey: Map<MethodKey, List<MethodDeclaration>>
     private val states = IdentityHashMap<Node, State>()
+    private val borrowAnalysis by lazy { ExactProjectTagEffects(sourceRoot, index, true) }
 
     init {
         val methods = linkedMapOf<MethodKey, MutableList<MethodDeclaration>>()
@@ -66,6 +69,22 @@ internal class ExactProjectTagEffects(
             setOf(COMPOUND_TAG)
         ) ?: return null
         return when (bindingState(parameter, ExactJavaSemantics(method.findCompilationUnit().orElseThrow()))) {
+            State.READ -> ExactExternalTagContracts.Effect.READ
+            State.MUTATE -> ExactExternalTagContracts.Effect.MUTATE
+            else -> null
+        }
+    }
+
+    /** A concrete source body can prove a borrowed tag is read or mutated, never retained. */
+    fun sourceMethodParameterEffect(
+        method: MethodDeclaration,
+        argumentIndex: Int
+    ): ExactExternalTagContracts.Effect? {
+        if (!borrowedArgumentsOnly) return borrowAnalysis.sourceMethodParameterEffect(method, argumentIndex)
+        val parameter = method.parameters.getOrNull(argumentIndex) ?: return null
+        if (index.declaredType(parameter.type, method) != COMPOUND_TAG) return null
+        val unit = method.findCompilationUnit().orElse(null) ?: return null
+        return when (bindingState(parameter, ExactJavaSemantics(unit))) {
             State.READ -> ExactExternalTagContracts.Effect.READ
             State.MUTATE -> ExactExternalTagContracts.Effect.MUTATE
             else -> null
@@ -278,9 +297,48 @@ internal class ExactProjectTagEffects(
         call: MethodCallExpr,
         argumentIndex: Int,
         exact: ExactJavaSemantics
-    ): ExactExternalTagContracts.Effect? =
-        ExactExternalTagContracts.compoundTagArgumentEffect(call, argumentIndex, exact, index)
-            ?: projectTagArgumentEffect(call, argumentIndex)
+    ): ExactExternalTagContracts.Effect? {
+        val external = ExactExternalTagContracts.compoundTagArgumentEffect(call, argumentIndex, exact, index)
+        if (external != null) {
+            return if (borrowedArgumentsOnly) borrowedExternalArgumentEffect(call, argumentIndex, exact)
+            else external
+        }
+        return projectTagArgumentEffect(call, argumentIndex)
+    }
+
+    /** An ordinary READ can decode/retain tag views; a borrow proof needs a non-retaining boundary. */
+    private fun borrowedExternalArgumentEffect(
+        call: MethodCallExpr,
+        argumentIndex: Int,
+        exact: ExactJavaSemantics
+    ): ExactExternalTagContracts.Effect? {
+        if (call.nameAsString == "of" && argumentIndex == 0 && call.arguments.size == 1 &&
+            call.scope.map {
+                exact.exactStaticScope(it, "CustomData", "net.minecraft.world.item.component.CustomData")
+            }.orElse(false) &&
+            !index.hasSourceTypeDefinition("net.minecraft.world.item.component.CustomData")
+        ) return ExactExternalTagContracts.Effect.READ // CustomData.of copies its input tag.
+
+        if (!call.scope.map { exact.exactStaticScope(it, "NBTHelper", CATNIP_NBT_HELPER) }
+                .orElse(false) || index.hasSourceTypeDefinition(CATNIP_NBT_HELPER) || argumentIndex != 0
+        ) return null
+        return when {
+            call.nameAsString == "readResourceLocation" && call.arguments.size == 2 ->
+                ExactExternalTagContracts.Effect.READ // Immutable identifier built from a string.
+            call.nameAsString == "readEnum" && call.arguments.size == 3 ->
+                ExactExternalTagContracts.Effect.READ // Enum identity, not a retained tag view.
+            call.nameAsString == "writeEnum" && call.arguments.size == 3 ->
+                ExactExternalTagContracts.Effect.MUTATE
+            call.nameAsString in setOf("readCompoundList", "iterateCompoundList") &&
+                call.arguments.size == 2 -> {
+                val callback = call.arguments[1] as? LambdaExpr ?: return null
+                val parameter = callback.parameters.singleOrNull() ?: return null
+                // The callback's result/field escapes are checked, including an implicit `tag -> tag`.
+                bindingEffect(parameter, exact)
+            }
+            else -> null
+        }
+    }
 
     private fun projectTagArgumentEffect(
         call: MethodCallExpr,
@@ -301,6 +359,7 @@ internal class ExactProjectTagEffects(
         const val TAG = "net.minecraft.nbt.Tag"
         const val HOLDER_LOOKUP_PROVIDER = "net.minecraft.core.HolderLookup.Provider"
         const val ITEM_STACK = "net.minecraft.world.item.ItemStack"
+        const val CATNIP_NBT_HELPER = "net.createmod.catnip.nbt.NBTHelper"
         val TAG_VALUE_TYPES = setOf(COMPOUND_TAG, LIST_TAG, TAG)
         val NESTED_TAG_GETTERS = setOf("get", "getCompound", "getList")
     }

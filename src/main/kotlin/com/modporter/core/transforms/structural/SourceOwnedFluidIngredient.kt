@@ -93,14 +93,9 @@ internal object SourceOwnedFluidIngredient {
                 """new\s+FluidStack\s*\(\s*fluid\s*,\s*amountRequired\s*,\s*tagToMatch\s*\)"""
             ).containsMatchIn(JavaSourceText.maskCommentsAndLiterals(source))
         )
-        if (residuals.none { it }) {
-            val migrated = source.contains("Registries.FLUID.location()") &&
-                source.contains("getIdOrThrow(fluid)") &&
-                source.contains("CustomData.of(tagToMatch)") &&
-                source.contains("Unknown fluid id ")
-            return if (migrated) Result.EMPTY else Result.EMPTY
-        }
-        if (!residuals.all { it }) {
+        val legacyWireFamily = residuals.any { it }
+        if (!legacyWireFamily && !source.contains(".getOrCreateTag(")) return Result.EMPTY
+        if (legacyWireFamily && !residuals.all { it }) {
             abort("$OWNER has only part of the four-member legacy family")
         }
         if (!targetContractIsVerified()) {
@@ -133,6 +128,20 @@ internal object SourceOwnedFluidIngredient {
             !stackIngredient.isStatic
         ) {
             abort("$OWNER is outside the admitted public source-owned family")
+        }
+
+        if (!legacyWireFamily) {
+            val index = SourceIndex(parsed)
+            val jsonCapture = freshJsonTagCapture(candidate, stackIngredient, index)
+                ?: return Result.EMPTY
+            val factory = owner.methods.singleOrNull {
+                it.nameAsString == "fromFluidStack" && it.isPublic && it.isStatic &&
+                    it.parameters.size == 1
+            } ?: abort("$OWNER has no unique source-owned factory")
+            admitClosedFamily(candidate, owner, factory, index)
+            LexicalPreservingPrinter.setup(candidate.unit)
+            replaceFreshJsonTagCapture(jsonCapture)
+            return publish(candidate, parser, dryRun)
         }
 
         val fromFluidStack = owner.methods.singleOrNull {
@@ -183,6 +192,7 @@ internal object SourceOwnedFluidIngredient {
 
         val index = SourceIndex(parsed)
         admitClosedFamily(candidate, owner, fromFluidStack, index)
+        val jsonCapture = freshJsonTagCapture(candidate, stackIngredient, index)
 
         LexicalPreservingPrinter.setup(candidate.unit)
         getTag.replace(
@@ -223,15 +233,62 @@ internal object SourceOwnedFluidIngredient {
                 return ImmutableList.of(stack);
             }
         """.trimIndent()))
+        jsonCapture?.let(::replaceFreshJsonTagCapture)
+        return publish(candidate, parser, dryRun)
+    }
+
+    private fun freshJsonTagCapture(
+        candidate: ParsedSource,
+        stackIngredient: ClassOrInterfaceDeclaration,
+        index: SourceIndex
+    ): MethodCallExpr? {
+        val methods = stackIngredient.methods.filter { method ->
+            method.nameAsString == "readInternal" && method.parameters.size == 1 &&
+                method.parameters.single().typeAsString == "JsonObject"
+        }
+        val calls = methods.flatMap { it.findAll(MethodCallExpr::class.java) }
+            .filter { it.nameAsString == "getOrCreateTag" && it.arguments.isEmpty() }
+        if (calls.isEmpty()) return null
+        val method = methods.singleOrNull()
+            ?: abort("$OWNER JSON tag capture has ambiguous readers")
+        val call = calls.singleOrNull()
+            ?: abort("$OWNER JSON tag capture is not unique")
+        val expected = StaticJavaParser.parseBlock("""
+            {
+                FluidStack stack = FluidHelper.deserializeFluidStack(json);
+                fluid = stack.getFluid();
+                tagToMatch = stack.getOrCreateTag();
+            }
+        """.trimIndent())
+        if (method.parameters.single().nameAsString != "json" ||
+            method.body.orElse(null) != expected
+        ) abort("$OWNER JSON tag capture is outside the exact fresh-local shape")
+        val receiver = call.scope.orElse(null) as? NameExpr
+            ?: abort("$OWNER JSON tag capture has no local receiver")
+        val use = CallRef(candidate, "$OWNER.FluidStackIngredient", method, call)
+        if (!index.freshAndDead(receiver, use, mutableSetOf())) {
+            abort("$OWNER JSON tag capture may retain mutable tag aliasing")
+        }
+        return call
+    }
+
+    private fun replaceFreshJsonTagCapture(call: MethodCallExpr) {
+        call.replace(StaticJavaParser.parseExpression<Expression>(
+            "stack.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, " +
+                "net.minecraft.world.item.component.CustomData.EMPTY).copyTag()"
+        ))
+    }
+
+    private fun publish(candidate: ParsedSource, parser: JavaParser, dryRun: Boolean): Result {
         val migrated = LexicalPreservingPrinter.print(candidate.unit)
         if (!parser.parse(migrated).isSuccessful) {
             abort("FluidIngredient migration emitted invalid Java")
         }
-        if (!dryRun) path.writeText(migrated)
+        if (!dryRun) candidate.path.writeText(migrated)
         return Result(
             listOf(
                 Change(
-                    file = path,
+                    file = candidate.path,
                     line = 1,
                     description =
                         "Preserve the source-owned FluidIngredient data and registry wire family",

@@ -425,6 +425,11 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
 
     fun methodCallReceiverType(call: MethodCallExpr): String? = methodCallReceiverTypeRef(call)?.name
 
+    fun isExpressionExactlyExternalType(expression: Expression, use: Node, expectedType: String): Boolean =
+        expressionRawType(expression, use) == expectedType && loadType(expectedType) == null
+
+    fun hasSourceTypeDefinition(qualifiedName: String): Boolean = loadType(qualifiedName) != null
+
     fun isTypeAssignableTo(actualType: String, expectedType: String): Boolean =
         isAssignableTo(TypeRef(actualType), expectedType, mutableSetOf())
 
@@ -1731,6 +1736,19 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         owner: TypeInfo,
         substitutions: Map<String, TypeRef>
     ): TypeRef? {
+        if (receiver.name == "net.minecraft.nbt.CompoundTag" && loadType(receiver.name) == null) {
+            // The pinned target's copy and merge return CompoundTag. A project declaration,
+            // wrong arity, or non-CompoundTag merge argument does not acquire this contract.
+            if (call.nameAsString == "copy" && call.arguments.isEmpty() &&
+                "()Lnet/minecraft/nbt/CompoundTag;" in
+                    com.modporter.mapping.TargetMembers.methodDescriptors(receiver.name, "copy")
+            ) return receiver
+            if (call.nameAsString == "merge" && call.arguments.size == 1 &&
+                resolveExpression(call.arguments.single(), call, owner, substitutions)?.name == receiver.name &&
+                "(Lnet/minecraft/nbt/CompoundTag;)Lnet/minecraft/nbt/CompoundTag;" in
+                    com.modporter.mapping.TargetMembers.methodDescriptors(receiver.name, "merge")
+            ) return receiver
+        }
         if (receiver.name != CATNIP_COUPLE || loadType(receiver.name) != null) return null
         if (call.nameAsString != "map" || call.arguments.size != 1) return null
         val inputType = receiver.arguments.singleOrNull()

@@ -1,6 +1,10 @@
 package com.modporter.transforms
 
+import com.github.javaparser.JavaParser
+import com.github.javaparser.ParserConfiguration
 import com.modporter.core.transforms.structural.CreateItemStackDataFamilies
+import java.nio.file.Files
+import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -254,6 +258,10 @@ class CreateItemStackDataFamiliesTest {
         assertTrue(migratedAttribute.contains("""tag.remove("MatchedAttributes");"""), migratedAttribute)
         assertFalse(migratedAttribute.contains("CustomData.of(null)"), migratedAttribute)
         assertFalse(migratedAttribute.contains("tag.clear()"), migratedAttribute)
+        assertEquals(
+            migratedAttribute,
+            CreateItemStackDataFamilies.migrate(migratedAttribute, true)
+        )
     }
 
     @Test
@@ -456,7 +464,7 @@ class CreateItemStackDataFamiliesTest {
             import net.minecraft.SharedConstants;
             public class ClipboardScreen {
             	private void send() {
-            		ClipboardEntry.saveAll(pages, item);
+            		ClipboardEntry.saveAll(pages, item, getMinecraft().level.registryAccess());
             		ClipboardOverrides.switchTo(ClipboardType.WRITTEN, item);
             		if (pages.isEmpty())
             			item.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.of(new CompoundTag()));
@@ -471,7 +479,7 @@ class CreateItemStackDataFamiliesTest {
         val migratedScreen = CreateItemStackDataFamilies.migrate(screen, true)
         assertTrue(
             migratedScreen.contains(
-                "ClipboardEntry.saveAll(pages, item, minecraft.level.registryAccess())"
+                "ClipboardEntry.saveAll(pages, item, getMinecraft().level.registryAccess())"
             ),
             migratedScreen
         )
@@ -480,6 +488,40 @@ class CreateItemStackDataFamiliesTest {
         assertTrue(migratedScreen.contains("""tag.remove("Type");"""), migratedScreen)
         assertTrue(migratedScreen.contains("""tag.remove("Readonly");"""), migratedScreen)
         assertFalse(migratedScreen.contains("CustomData.of(new CompoundTag())"), migratedScreen)
+
+        val entry = """
+            package com.simibubi.create.content.equipment.clipboard;
+            public class ClipboardEntry {
+            	public static void saveAll(List<List<ClipboardEntry>> entries, ItemStack clipboardItem) {
+            		CompoundTag tag = clipboardItem.getOrDefault(DataComponents.CUSTOM_DATA, CustomData.EMPTY).copyTag();
+            		tag.put("Pages", NBTHelper.writeCompoundList(entries, list -> {
+            			CompoundTag pageTag = new CompoundTag();
+            			pageTag.put("Entries", NBTHelper.writeCompoundList(list, ClipboardEntry::writeNBT));
+            			return pageTag;
+            		}));
+            	}
+            	public CompoundTag writeNBT() {
+            		CompoundTag nbt = new CompoundTag();
+            		nbt.putString("Text", net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(com.mojang.serialization.JsonOps.INSTANCE, text).getOrThrow().toString());
+            		if (icon.isEmpty()) return nbt;
+            		nbt.put("Icon", icon.serializeNBT());
+            		return nbt;
+            	}
+            }
+        """.trimIndent()
+        val entryPath =
+            "src/main/java/com/simibubi/create/content/equipment/clipboard/ClipboardEntry.java"
+        val screenPath =
+            "src/main/java/com/simibubi/create/content/equipment/clipboard/ClipboardScreen.java"
+        val capturedCaller = linkedMapOf(entryPath to entry, screenPath to screen)
+        val migratedCaller = CreateItemStackDataFamilies.migrateProject(capturedCaller)
+        assertTrue(migratedCaller !== capturedCaller)
+        assertFalse(CreateItemStackDataFamilies.hasPendingProjectMigration(migratedCaller))
+        assertTrue(
+            migratedCaller.getValue(screenPath).contains(
+                "ClipboardEntry.saveAll(pages, item, getMinecraft().level.registryAccess())"
+            )
+        )
 
         val handler = """
             package com.simibubi.create.content.equipment.clipboard;
@@ -714,5 +756,267 @@ class CreateItemStackDataFamiliesTest {
             migratedBlockEntity,
             CreateItemStackDataFamilies.migrate(migratedBlockEntity, true)
         )
+    }
+
+    @Test
+    fun `generated clipboard writes require exact branches and ignore decoys`() {
+        val exact = """
+            package com.simibubi.create.content.equipment.clipboard;
+            public class ClipboardEditPacket {
+            	void apply(ClipboardBlockEntity cbe, ItemStack itemStack, CompoundTag data) {
+            		String decoy = "cbe.dataContainer.setTag(data.isEmpty() ? null : data);";
+            		// cbe.dataContainer.setTag(data.isEmpty() ? null : data);
+            		data = CreateNBTProcessors.clipboardProcessor(data);
+            		net.minecraft.Util.make(cbe.dataContainer, modPorterCustomDataOwner -> {
+            			net.minecraft.nbt.CompoundTag modPorterCustomDataValue = data.isEmpty() ? null : data;
+            			if (modPorterCustomDataValue == null) {
+            				modPorterCustomDataOwner.remove(net.minecraft.core.component.DataComponents.CUSTOM_DATA);
+            			} else {
+            				modPorterCustomDataOwner.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA,
+            					net.minecraft.world.item.component.CustomData.of(modPorterCustomDataValue));
+            			}
+            		});
+            		net.minecraft.Util.make(itemStack, modPorterCustomDataOwner -> {
+            			net.minecraft.nbt.CompoundTag modPorterCustomDataValue = data.isEmpty() ? null : data;
+            			if (modPorterCustomDataValue == null) {
+            				modPorterCustomDataOwner.remove(net.minecraft.core.component.DataComponents.CUSTOM_DATA);
+            			} else {
+            				modPorterCustomDataOwner.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA,
+            					net.minecraft.world.item.component.CustomData.of(modPorterCustomDataValue));
+            			}
+            		});
+            	}
+            }
+        """.trimIndent()
+
+        val migrated = CreateItemStackDataFamilies.migrate(exact, true)
+        assertTrue(
+            migrated.contains("CustomData.set(DataComponents.CUSTOM_DATA, cbe.dataContainer, data);"),
+            migrated
+        )
+        assertTrue(
+            migrated.contains("CustomData.set(DataComponents.CUSTOM_DATA, itemStack, data);"),
+            migrated
+        )
+        assertTrue(
+            migrated.contains("// cbe.dataContainer.setTag(data.isEmpty() ? null : data);"),
+            migrated
+        )
+        assertTrue(
+            migrated.contains("\"cbe.dataContainer.setTag(data.isEmpty() ? null : data);\""),
+            migrated
+        )
+        assertEquals(migrated, CreateItemStackDataFamilies.migrate(migrated, true))
+
+        val extraEffect = exact.replace(
+            "if (modPorterCustomDataValue == null) {",
+            "audit();\n\t\t\tif (modPorterCustomDataValue == null) {"
+        )
+        assertEquals(extraEffect, CreateItemStackDataFamilies.migrate(extraEffect, true))
+
+        val receiverMismatch = exact.replace(
+            "modPorterCustomDataOwner.remove(net.minecraft.core.component.DataComponents.CUSTOM_DATA);",
+            "itemStack.remove(net.minecraft.core.component.DataComponents.CUSTOM_DATA);"
+        )
+        assertEquals(receiverMismatch, CreateItemStackDataFamilies.migrate(receiverMismatch, true))
+    }
+
+    @Test
+    fun `captured material checklist stage normalizes only the complete generated transaction`() {
+        val bookCopyback = """
+            if ((tag).isEmpty()) {
+                (book).remove(net.minecraft.core.component.DataComponents.CUSTOM_DATA);
+            } else {
+                (book).set(net.minecraft.core.component.DataComponents.CUSTOM_DATA,
+                    net.minecraft.world.item.component.CustomData.of(tag));
+            }
+        """.trimIndent()
+        val clipboardCopyback = """
+            if ((tag).isEmpty()) {
+                (clipboard).remove(net.minecraft.core.component.DataComponents.CUSTOM_DATA);
+            } else {
+                (clipboard).set(net.minecraft.core.component.DataComponents.CUSTOM_DATA,
+                    net.minecraft.world.item.component.CustomData.of(tag));
+            }
+        """.trimIndent()
+        val bookName = """
+            net.minecraft.world.item.component.CustomData.update(
+                net.minecraft.core.component.DataComponents.CUSTOM_DATA, book, modPorterCustomDataRoot -> {
+                    String modPorterCustomDataKey = "display";
+                    net.minecraft.nbt.CompoundTag modPorterCustomDataChild =
+                        modPorterCustomDataRoot.getCompound(modPorterCustomDataKey);
+                    modPorterCustomDataChild.putString("Name",
+                        net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(
+                            com.mojang.serialization.JsonOps.INSTANCE, textComponent).getOrThrow().toString());
+                    modPorterCustomDataRoot.put(modPorterCustomDataKey, modPorterCustomDataChild);
+                });
+        """.trimIndent()
+        val clipboardName = """
+            net.minecraft.world.item.component.CustomData.update(
+                net.minecraft.core.component.DataComponents.CUSTOM_DATA, clipboard, modPorterCustomDataRoot -> {
+                    String modPorterCustomDataKey = "display";
+                    net.minecraft.nbt.CompoundTag modPorterCustomDataChild =
+                        modPorterCustomDataRoot.getCompound(modPorterCustomDataKey);
+                    modPorterCustomDataChild.putString("Name",
+                        net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(
+                            com.mojang.serialization.JsonOps.INSTANCE,
+                            CreateLang.translateDirect("materialChecklist")
+                                .setStyle(Style.EMPTY.withItalic(Boolean.FALSE))).getOrThrow().toString());
+                    modPorterCustomDataRoot.put(modPorterCustomDataKey, modPorterCustomDataChild);
+                });
+        """.trimIndent()
+        fun generatedWrite(receiver: String): String = """
+            net.minecraft.Util.make($receiver, modPorterCustomDataOwner -> {
+                net.minecraft.nbt.CompoundTag modPorterCustomDataValue = tag;
+                if (modPorterCustomDataValue == null) {
+                    modPorterCustomDataOwner.remove(net.minecraft.core.component.DataComponents.CUSTOM_DATA);
+                } else {
+                    modPorterCustomDataOwner.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA,
+                        net.minecraft.world.item.component.CustomData.of(modPorterCustomDataValue));
+                }
+            });
+        """.trimIndent()
+        val source = """
+            package com.simibubi.create.content.schematics.cannon;
+            public class MaterialChecklist {
+            	public ItemStack createWrittenBook() {
+            		ItemStack book = new ItemStack(Items.WRITTEN_BOOK);
+            		CompoundTag tag = (book).getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag();
+            		ListTag pages = new ListTag();
+            		MutableComponent textComponent = Component.empty();
+            		pages.add(StringTag.valueOf(net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(com.mojang.serialization.JsonOps.INSTANCE, textComponent).getOrThrow().toString()));
+            		pages.add(StringTag.valueOf(net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(com.mojang.serialization.JsonOps.INSTANCE, textComponent).getOrThrow().toString()));
+            		pages.add(StringTag.valueOf(net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(com.mojang.serialization.JsonOps.INSTANCE, textComponent).getOrThrow().toString()));
+            		pages.add(StringTag.valueOf(net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(com.mojang.serialization.JsonOps.INSTANCE, textComponent).getOrThrow().toString()));
+            		tag.put("pages", pages);
+            $bookCopyback
+            		tag.putBoolean("readonly", true);
+            $bookCopyback
+            		tag.putString("author", "Schematicannon");
+            $bookCopyback
+            		tag.putString("title", ChatFormatting.BLUE + "Material Checklist");
+            $bookCopyback
+            		textComponent = CreateLang.translateDirect("materialChecklist")
+            			.setStyle(Style.EMPTY.withColor(ChatFormatting.BLUE).withItalic(Boolean.FALSE));
+            $bookName
+            ${generatedWrite("book")}
+            		return book;
+            	}
+            	public ItemStack createWrittenClipboard(HolderLookup.Provider registries) {
+            		ItemStack clipboard = AllBlocks.CLIPBOARD.asStack();
+            		CompoundTag tag = (clipboard).getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag();
+            		List<List<ClipboardEntry>> pages = new ArrayList<>();
+            		ClipboardEntry.saveAll(pages, clipboard, registries);
+            		ClipboardOverrides.switchTo(ClipboardType.WRITTEN, clipboard);
+            $clipboardName
+            		tag.putBoolean("Readonly", true);
+            $clipboardCopyback
+            ${generatedWrite("clipboard")}
+            		return clipboard;
+            	}
+            }
+        """.trimIndent()
+
+        val migrated = CreateItemStackDataFamilies.migrate(source, true)
+        assertTrue(migrated.contains("DataComponents.WRITTEN_BOOK_CONTENT"), migrated)
+        assertTrue(migrated.contains("book.set(DataComponents.CUSTOM_NAME, textComponent);"), migrated)
+        assertTrue(
+            migrated.contains("ClipboardEntry.saveAll(pages, clipboard, registries);"),
+            migrated
+        )
+        assertTrue(migrated.contains("clipboard.set(DataComponents.CUSTOM_NAME"), migrated)
+        assertFalse(migrated.contains("modPorterCustomDataOwner"), migrated)
+        assertFalse(migrated.contains("modPorterCustomDataRoot"), migrated)
+        assertEquals(migrated, CreateItemStackDataFamilies.migrate(migrated, true))
+
+        val alteredBranch = source.replace(
+            "modPorterCustomDataValue = tag;",
+            "modPorterCustomDataValue = tag.copy();"
+        )
+        assertEquals(alteredBranch, CreateItemStackDataFamilies.migrate(alteredBranch, true))
+
+        val alteredBookReceiver = source.replace(
+            "DataComponents.CUSTOM_DATA, book, modPorterCustomDataRoot",
+            "DataComponents.CUSTOM_DATA, otherBook, modPorterCustomDataRoot"
+        )
+        assertEquals(
+            alteredBookReceiver,
+            CreateItemStackDataFamilies.migrate(alteredBookReceiver, true)
+        )
+
+        val alteredClipboardStyle = source.replace(
+            "Style.EMPTY.withItalic(Boolean.FALSE)",
+            "Style.EMPTY.withItalic(Boolean.TRUE)"
+        )
+        assertEquals(
+            alteredClipboardStyle,
+            CreateItemStackDataFamilies.migrate(alteredClipboardStyle, true)
+        )
+    }
+
+    @Test
+    fun `list filter captured handler gains a provider overload once`() {
+        val source = """
+            package com.simibubi.create.content.logistics.filter;
+            public class ListFilterItem extends FilterItem {
+            	@Override
+            	public FilterItemStack makeStackWrapper(ItemStack filter) {
+            		return new ListFilterItemStack(filter);
+            	}
+            	public ItemStackHandler getFilterItemHandler(ItemStack stack) {
+            		ItemStackHandler newInv = new ItemStackHandler(18);
+            		CompoundTag invNBT = stack.getOrDefault(
+            			net.minecraft.core.component.DataComponents.CUSTOM_DATA,
+            			net.minecraft.world.item.component.CustomData.EMPTY).copyTag().getCompound("Items");
+            		if (!invNBT.isEmpty())
+            			newInv.deserializeNBT(invNBT);
+            		return newInv;
+            	}
+            }
+        """.trimIndent()
+        val migrated = CreateItemStackDataFamilies.migrate(source, true)
+        assertTrue(
+            migrated.contains("makeStackWrapper(ItemStack filter, HolderLookup.Provider registries)"),
+            migrated
+        )
+        assertTrue(
+            migrated.contains("getFilterItemHandler(ItemStack stack, HolderLookup.Provider registries)"),
+            migrated
+        )
+        assertTrue(migrated.contains("newInv.deserializeNBT(registries, invNBT);"), migrated)
+        assertEquals(migrated, CreateItemStackDataFamilies.migrate(migrated, true))
+    }
+
+    @Test
+    fun `captured real create item data stage closes in memory when explicitly supplied`() {
+        val configured = System.getenv("MODPORTER_CREATE_ITEM_DATA_REPLAY")
+            ?.takeIf { it.isNotBlank() } ?: return
+        val root = Path.of(configured).toAbsolutePath().normalize()
+        assertTrue(Files.isDirectory(root), root.toString())
+        val sources = linkedMapOf<String, String>()
+        Files.walk(root).use { stream ->
+            stream.filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".java") }
+                .sorted()
+                .forEach { path ->
+                    sources[root.relativize(path).toString().replace('\\', '/')] =
+                        Files.readString(path)
+                }
+        }
+        assertTrue(CreateItemStackDataFamilies.hasPendingProjectMigration(sources))
+
+        val migrated = CreateItemStackDataFamilies.migrateProject(sources)
+        assertTrue(migrated !== sources)
+        assertFalse(CreateItemStackDataFamilies.hasPendingProjectMigration(migrated))
+        val parser = JavaParser(
+            ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
+        )
+        migrated.forEach { (path, source) ->
+            if (source == sources.getValue(path)) return@forEach
+            val parsed = parser.parse(source)
+            assertTrue(parsed.isSuccessful, "$path: ${parsed.problems.joinToString()}")
+        }
+        val rerun = CreateItemStackDataFamilies.migrateProject(migrated)
+        assertTrue(rerun === migrated)
+        assertEquals(migrated, rerun)
     }
 }

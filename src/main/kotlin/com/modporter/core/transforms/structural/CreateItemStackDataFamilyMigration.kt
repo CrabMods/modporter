@@ -13,7 +13,7 @@ import java.nio.file.StandardCopyOption
 import kotlin.io.path.extension
 
 /**
- * Filesystem transaction for [CreateItemStackDataFamilies].
+ * Filesystem transaction shared by [CreateItemStackDataFamilies] and [CreateItemDataHandoffs].
  *
  * The complete Java source map is admitted and migrated once in memory. Every changed source must
  * parse before any stage or backup is created. Publication uses same-directory stage and recovery
@@ -22,6 +22,8 @@ import kotlin.io.path.extension
  */
 internal object CreateItemStackDataFamilyMigration {
     const val RULE_ID = "struct-create-item-stack-data-family"
+
+    private enum class Family { ITEM_DATA, HANDOFFS }
 
     data class Result(val changes: List<Change>, val gates: List<String>) {
         companion object {
@@ -69,8 +71,21 @@ internal object CreateItemStackDataFamilyMigration {
         projectDir: Path,
         dryRun: Boolean,
         fileIo: ProjectFileIo = NioProjectFileIo
+    ): Result = migrateFamily(projectDir, dryRun, fileIo, Family.ITEM_DATA)
+
+    fun migrateHandoffs(
+        projectDir: Path,
+        dryRun: Boolean,
+        fileIo: ProjectFileIo = NioProjectFileIo
+    ): Result = migrateFamily(projectDir, dryRun, fileIo, Family.HANDOFFS)
+
+    private fun migrateFamily(
+        projectDir: Path,
+        dryRun: Boolean,
+        fileIo: ProjectFileIo,
+        family: Family
     ): Result = try {
-        migrateChecked(projectDir.toAbsolutePath().normalize(), dryRun, fileIo)
+        migrateChecked(projectDir.toAbsolutePath().normalize(), dryRun, fileIo, family)
     } catch (abort: AdmissionAbort) {
         Result(
             emptyList(),
@@ -89,7 +104,8 @@ internal object CreateItemStackDataFamilyMigration {
     private fun migrateChecked(
         projectDir: Path,
         dryRun: Boolean,
-        fileIo: ProjectFileIo
+        fileIo: ProjectFileIo,
+        family: Family
     ): Result {
         val files = javaFiles(projectDir)
         if (files.isEmpty()) return Result.EMPTY
@@ -111,8 +127,14 @@ internal object CreateItemStackDataFamilyMigration {
             sources[key] = source
         }
 
-        val pending = CreateItemStackDataFamilies.hasPendingProjectMigration(sources)
-        val migrated = CreateItemStackDataFamilies.migrateProject(sources)
+        val pending = when (family) {
+            Family.ITEM_DATA -> CreateItemStackDataFamilies.hasPendingProjectMigration(sources)
+            Family.HANDOFFS -> CreateItemDataHandoffs.hasPendingProjectMigration(sources)
+        }
+        val migrated = when (family) {
+            Family.ITEM_DATA -> CreateItemStackDataFamilies.migrateProject(sources)
+            Family.HANDOFFS -> CreateItemDataHandoffs.migrateProject(sources)
+        }
         if (migrated === sources) {
             if (pending) {
                 abort(
@@ -152,11 +174,13 @@ internal object CreateItemStackDataFamilyMigration {
             Change(
                 file = path,
                 line = 0,
-                description = "Migrate Create item data as one provider/component source family",
+                description = if (family == Family.HANDOFFS)
+                    "Snapshot source-proven Create packet and consumed contraption data handoffs"
+                else "Migrate Create item data as one provider/component source family",
                 before = "Legacy per-stack NBT and provider-less nested ItemStack calls",
                 after = "Source-proven providers, native components, and lossless copied custom data",
                 confidence = Confidence.HIGH,
-                ruleId = RULE_ID
+                ruleId = if (family == Family.HANDOFFS) CreateItemDataHandoffs.RULE_ID else RULE_ID
             )
         }
         if (dryRun) return Result(changes, emptyList())

@@ -42,7 +42,8 @@ internal object CreateItemStackDataFamilies {
             Regex("""ClipboardEntry\s*\.\s*saveAll\s*\(\s*pages\s*,\s*item\s*\)"""),
             Regex(
                 """ClipboardEntry\s*\.\s*saveAll\s*\(\s*pages\s*,\s*item\s*,\s*""" +
-                    """minecraft\s*\.\s*level\s*\.\s*registryAccess\s*\(\s*\)\s*\)"""
+                    """(?:minecraft|getMinecraft\s*\(\s*\))\s*\.\s*level\s*\.\s*""" +
+                    """registryAccess\s*\(\s*\)\s*\)"""
             )
         ),
         "$CREATE.content.equipment.clipboard.ClipboardValueSettingsHandler" to ClipboardCallShape(
@@ -288,31 +289,57 @@ internal object CreateItemStackDataFamilies {
     }
 
     private fun migrateListFilterItem(source: String): String {
-        if (source.contains("makeStackWrapper(ItemStack filter, HolderLookup.Provider registries)")) {
-            return source
-        }
-        val anchor = Regex(
-            """(?s)(@Override\s+public FilterItemStack makeStackWrapper\(ItemStack filter\)\s*\{\s*return new ListFilterItemStack\(filter\);\s*\})"""
-        )
-        return insertAfterOne(
-            source,
-            anchor,
-            """
+        var result = source
+        if (!result.contains("makeStackWrapper(ItemStack filter, HolderLookup.Provider registries)")) {
+            val anchor = Regex(
+                """(?s)(@Override\s+public FilterItemStack makeStackWrapper\(ItemStack filter\)\s*\{\s*return new ListFilterItemStack\(filter\);\s*\})"""
+            )
+            result = insertAfterOne(
+                result,
+                anchor,
+                """
 
 	@Override
 	public FilterItemStack makeStackWrapper(ItemStack filter, HolderLookup.Provider registries) {
 		return new ListFilterItemStack(filter, registries);
 	}
 """
-        ) ?: source
-    }
+            ) ?: return source
+        }
+        if (!result.contains(
+                "getFilterItemHandler(ItemStack stack, HolderLookup.Provider registries)"
+            )
+        ) {
+            val handler = Regex(
+                """(?s)(\tpublic ItemStackHandler getFilterItemHandler\(ItemStack stack\) \{.*?\r?\n\t\})"""
+            )
+            result = insertAfterOne(
+                result,
+                handler,
+                """
 
+	public ItemStackHandler getFilterItemHandler(ItemStack stack, HolderLookup.Provider registries) {
+		ItemStackHandler newInv = new ItemStackHandler(18);
+		CompoundTag invNBT = stack.getOrDefault(
+			net.minecraft.core.component.DataComponents.CUSTOM_DATA,
+			net.minecraft.world.item.component.CustomData.EMPTY).copyTag().getCompound("Items");
+		if (!invNBT.isEmpty())
+			newInv.deserializeNBT(registries, invNBT);
+		return newInv;
+	}
+"""
+            ) ?: return source
+        }
+        result = JavaSourceText.addImport(result, "net.minecraft.core.HolderLookup")
+        return result
+    }
     private fun migrateFilterItemStack(source: String): String {
-        var result = source
-        result = insertBeforeOne(
-            result,
+        if (filterItemStackMigrated(source)) return source
+
+        var result = replaceOne(
+            source,
             Regex(
-                """(?m)^\s*public static FilterItemStack of\(CompoundTag tag, HolderLookup\.Provider registries\)"""
+                """(?m)^\s*public static FilterItemStack of\(CompoundTag tag(?:, HolderLookup\.Provider registries)?\)"""
             ),
             """
 	public static FilterItemStack of(ItemStack filter, HolderLookup.Provider registries) {
@@ -325,18 +352,18 @@ internal object CreateItemStackDataFamilies {
 		return new FilterItemStack(filter);
 	}
 
-"""
+	public static FilterItemStack of(CompoundTag tag, HolderLookup.Provider registries)"""
         ) ?: return source
         result = replaceOne(
             result,
             Regex(
-                """return of\(\s*ItemStack\.parseOptional\(\s*registries\s*,\s*tag\s*\)\s*\);"""
+                """return of\(\s*(?:ItemStack\.of\(\s*tag\s*\)|ItemStack\.parseOptional\(\s*registries\s*,\s*tag\s*\))\s*\);"""
             ),
             "return of(ItemStack.parseOptional(registries, tag), registries);"
         ) ?: return source
 
         val constructor = Regex(
-            """(?s)\t\tpublic ListFilterItemStack\(ItemStack filter, HolderLookup\.Provider registries\) \{.*?""" +
+            """(?s)\t\tpublic ListFilterItemStack\(ItemStack filter(?:, HolderLookup\.Provider registries)?\) \{.*?""" +
                 """\r?\n\t\t\}\s*\r?\n\t\t@Override\s*\r?\n""" +
                 """\t\tpublic boolean test\(Level world, ItemStack stack, boolean matchNBT\) \{"""
         )
@@ -393,9 +420,9 @@ internal object CreateItemStackDataFamilies {
             ),
             "${'$'}1resolveContainedItems(world.registryAccess());\n\t\t\tfor (FilterItemStack filterItemStack : containedItems)"
         ) ?: return source
+        result = JavaSourceText.addImport(result, "net.minecraft.core.HolderLookup")
         return result
     }
-
     private fun migrateFilterMenu(source: String): String {
         var result = replaceOne(
             source,
@@ -444,8 +471,7 @@ ${'$'}1{
         return replaceOne(
             source,
             body,
-            """
-${'$'}1{
+            """${'$'}1{
 		ListTag attributes = new ListTag();
 		selectedAttributes.forEach(at -> {
 			if (at == null)
@@ -480,7 +506,7 @@ ${'$'}1{
             Regex(
                 """(?s)public static ItemStack containing\(List<ItemStack> stacks\) \{.*?""" +
                     """\r?\n\t\}\s*\r?\n\tpublic static ItemStack containing""" +
-                    """\(ItemStackHandler stacks, HolderLookup\.Provider registries\) \{.*?\r?\n\t\}"""
+                    """\(ItemStackHandler stacks(?:, HolderLookup\.Provider registries)?\) \{.*?\r?\n\t\}"""
             ),
             """
 public static ItemStack containing(List<ItemStack> stacks) {
@@ -505,7 +531,7 @@ public static ItemStack containing(List<ItemStack> stacks) {
         result = replaceOne(
             result,
             Regex(
-                """(?s)public static ItemStackHandler getContents\(ItemStack box, HolderLookup\.Provider registries\) \{.*?\n\t\}"""
+                """(?s)public static ItemStackHandler getContents\(ItemStack box(?:, HolderLookup\.Provider registries)?\) \{.*?\n\t\}"""
             ),
             """
 public static ItemStackHandler getContents(ItemStack box, HolderLookup.Provider registries) {
@@ -532,12 +558,33 @@ public static ItemStackHandler getContents(ItemStack box, HolderLookup.Provider 
             """if (!pStack.has(DataComponents.CONTAINER) && !tag.contains("Items", Tag.TAG_COMPOUND))
 			return;"""
         ) ?: return source
+        result = JavaSourceText.addImport(result, "net.minecraft.core.HolderLookup")
         result = JavaSourceText.addImport(result, "net.minecraft.world.item.component.ItemContainerContents")
         return result
     }
 
     private fun migrateClipboardEntry(source: String): String {
         var result = source
+        result = replaceZeroOrOne(
+            result,
+            Regex(
+                """(?s)\s*if \(\(tag\)\.isEmpty\(\)\) \{\s*""" +
+                    """\(clipboardItem\)\.remove\(net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA\);\s*""" +
+                    """\} else \{\s*\(clipboardItem\)\.set\(net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA,\s*""" +
+                    """net\.minecraft\.world\.item\.component\.CustomData\.of\(tag\)\);\s*\}"""
+            ),
+            ""
+        ) ?: return source
+        result = replaceZeroOrOne(
+            result,
+            Regex("""public CompoundTag writeNBT\(HolderLookup\.Provider registries\)"""),
+            "public CompoundTag writeNBT()"
+        ) ?: return source
+        result = replaceZeroOrOne(
+            result,
+            Regex("""icon\.saveOptional\(registries\)"""),
+            "icon.serializeNBT()"
+        ) ?: return source
         result = replaceOne(
             result,
             Regex(
@@ -579,11 +626,27 @@ public static ItemStackHandler getContents(ItemStack box, HolderLookup.Provider 
     }
 
     private fun migrateClipboardScreen(source: String): String {
-        var result = replaceOne(
-            source,
-            Regex("""ClipboardEntry\.saveAll\(\s*pages\s*,\s*item\s*\)"""),
-            "ClipboardEntry.saveAll(pages, item, minecraft.level.registryAccess())"
-        ) ?: return source
+        val masked = JavaSourceText.maskCommentsAndLiterals(source)
+        val legacyCall = Regex("""ClipboardEntry\.saveAll\(\s*pages\s*,\s*item\s*\)""")
+        val minecraftCall = Regex(
+            """ClipboardEntry\.saveAll\(\s*pages\s*,\s*item\s*,\s*""" +
+                """minecraft\.level\.registryAccess\(\s*\)\s*\)"""
+        )
+        val getMinecraftCall = Regex(
+            """ClipboardEntry\.saveAll\(\s*pages\s*,\s*item\s*,\s*""" +
+                """getMinecraft\(\s*\)\.level\.registryAccess\(\s*\)\s*\)"""
+        )
+        val callCount = legacyCall.findAll(masked).count() +
+            minecraftCall.findAll(masked).count() + getMinecraftCall.findAll(masked).count()
+        if (callCount != 1) return source
+        var result = source
+        if (legacyCall.containsMatchIn(masked)) {
+            result = replaceOne(
+                result,
+                legacyCall,
+                "ClipboardEntry.saveAll(pages, item, minecraft.level.registryAccess())"
+            ) ?: return source
+        }
         result = replaceOne(
             result,
             Regex("""SharedConstants\.isAllowedChatCharacter\(\s*pCodePoint\s*\)"""),
@@ -609,8 +672,35 @@ public static ItemStackHandler getContents(ItemStack box, HolderLookup.Provider 
     }
 
     private fun migrateClipboardEditPacket(source: String): String {
-        var result = replaceOne(
-            source,
+        var result = source
+        val generatedCbeWrite = Regex(
+            """(?s)net\.minecraft\.Util\.make\(cbe\.dataContainer,\s*modPorterCustomDataOwner\s*->\s*\{\s*""" +
+                """net\.minecraft\.nbt\.CompoundTag\s+modPorterCustomDataValue\s*=\s*data\.isEmpty\(\)\s*\?\s*null\s*:\s*data;\s*""" +
+                """if \(modPorterCustomDataValue == null\) \{\s*""" +
+                """modPorterCustomDataOwner\.remove\(net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA\);\s*""" +
+                """\} else \{\s*modPorterCustomDataOwner\.set\(net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA,\s*""" +
+                """net\.minecraft\.world\.item\.component\.CustomData\.of\(modPorterCustomDataValue\)\);\s*\}\s*\}\);"""
+        )
+        result = replaceZeroOrOne(
+            result,
+            generatedCbeWrite,
+            "cbe.dataContainer.setTag(data.isEmpty() ? null : data);"
+        ) ?: return source
+        val generatedItemWrite = Regex(
+            """(?s)net\.minecraft\.Util\.make\(itemStack,\s*modPorterCustomDataOwner\s*->\s*\{\s*""" +
+                """net\.minecraft\.nbt\.CompoundTag\s+modPorterCustomDataValue\s*=\s*data\.isEmpty\(\)\s*\?\s*null\s*:\s*data;\s*""" +
+                """if \(modPorterCustomDataValue == null\) \{\s*""" +
+                """modPorterCustomDataOwner\.remove\(net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA\);\s*""" +
+                """\} else \{\s*modPorterCustomDataOwner\.set\(net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA,\s*""" +
+                """net\.minecraft\.world\.item\.component\.CustomData\.of\(modPorterCustomDataValue\)\);\s*\}\s*\}\);"""
+        )
+        result = replaceZeroOrOne(
+            result,
+            generatedItemWrite,
+            "itemStack.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.of(data.isEmpty() ? null : data));"
+        ) ?: return source
+        result = replaceOne(
+            result,
             Regex("""data = CreateNBTProcessors\.clipboardProcessor\(data\);"""),
             """data = CreateNBTProcessors.clipboardProcessor(data);
 			if (data == null)
@@ -632,10 +722,17 @@ public static ItemStackHandler getContents(ItemStack box, HolderLookup.Provider 
         result = JavaSourceText.addImport(result, "net.minecraft.world.item.component.CustomData")
         return result
     }
-
     private fun migrateClipboardValueSettingsHandler(source: String): String {
-        var result = replaceOne(
+        var result = replaceZeroOrOne(
             source,
+            Regex(
+                """ClipboardEntry\.saveAll\(\s*listTo\s*,\s*itemStack\s*,\s*""" +
+                    """event\.getEntity\(\)\.registryAccess\(\)\s*\)"""
+            ),
+            "ClipboardEntry.saveAll(listTo, itemStack)"
+        ) ?: return source
+        result = replaceOne(
+            result,
             Regex(
                 """mc\.player\.getMainHandItem\(\)\s*\r?\n\s*\.getTagElement\("CopiedValues"\)"""
             ),
@@ -681,6 +778,134 @@ public static ItemStackHandler getContents(ItemStack box, HolderLookup.Provider 
 
     private fun migrateMaterialChecklist(source: String): String {
         var result = source
+        result = replaceZeroOrOne(
+            result,
+            Regex(
+                """CompoundTag tag = \(book\)\.getOrDefault\(""" +
+                    """net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA,\s*""" +
+                    """net\.minecraft\.world\.item\.component\.CustomData\.EMPTY\)\.copyTag\(\);"""
+            ),
+            "CompoundTag tag = book.getOrDefault(" +
+                "net.minecraft.core.component.DataComponents.CUSTOM_DATA, " +
+                "net.minecraft.world.item.component.CustomData.EMPTY).copyTag();"
+        ) ?: return source
+        result = replaceZeroOrOne(
+            result,
+            Regex(
+                """CompoundTag tag = \(clipboard\)\.getOrDefault\(""" +
+                    """net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA,\s*""" +
+                    """net\.minecraft\.world\.item\.component\.CustomData\.EMPTY\)\.copyTag\(\);"""
+            ),
+            "CompoundTag tag = clipboard.getOrDefault(" +
+                "net.minecraft.core.component.DataComponents.CUSTOM_DATA, " +
+                "net.minecraft.world.item.component.CustomData.EMPTY).copyTag();"
+        ) ?: return source
+        result = replaceZeroOrOne(
+            result,
+            Regex(
+                """ClipboardEntry\.saveAll\(\s*pages\s*,\s*clipboard\s*,\s*registries\s*\)"""
+            ),
+            "ClipboardEntry.saveAll(pages, clipboard)"
+        ) ?: return source
+
+        val generatedBookCopyback = Regex(
+            """(?s)if \(\(tag\)\.isEmpty\(\)\) \{\s*""" +
+                """\(book\)\.remove\(net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA\);\s*""" +
+                """\} else \{\s*\(book\)\.set\(""" +
+                """net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA,\s*""" +
+                """net\.minecraft\.world\.item\.component\.CustomData\.of\(tag\)\);\s*\}"""
+        )
+        if (codeMatches(result, generatedBookCopyback).isNotEmpty()) {
+            result = replaceExactly(result, generatedBookCopyback, 4, "") ?: return source
+        }
+        val generatedClipboardCopyback = Regex(
+            """(?s)if \(\(tag\)\.isEmpty\(\)\) \{\s*""" +
+                """\(clipboard\)\.remove\(net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA\);\s*""" +
+                """\} else \{\s*\(clipboard\)\.set\(""" +
+                """net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA,\s*""" +
+                """net\.minecraft\.world\.item\.component\.CustomData\.of\(tag\)\);\s*\}"""
+        )
+        result = replaceZeroOrOne(result, generatedClipboardCopyback, "") ?: return source
+
+        val generatedBookName = Regex(
+            """(?s)net\.minecraft\.world\.item\.component\.CustomData\.update\(\s*""" +
+                """net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA,\s*book,\s*""" +
+                """modPorterCustomDataRoot\s*->\s*\{\s*""" +
+                """String\s+modPorterCustomDataKey\s*=\s*"display";\s*""" +
+                """net\.minecraft\.nbt\.CompoundTag\s+modPorterCustomDataChild\s*=\s*""" +
+                """modPorterCustomDataRoot\.getCompound\(modPorterCustomDataKey\);\s*""" +
+                """modPorterCustomDataChild\.putString\("Name",\s*""" +
+                """net\.minecraft\.network\.chat\.ComponentSerialization\.CODEC\.encodeStart\(\s*""" +
+                """com\.mojang\.serialization\.JsonOps\.INSTANCE,\s*textComponent\)""" +
+                """\.getOrThrow\(\)\.toString\(\)\);\s*""" +
+                """modPorterCustomDataRoot\.put\(modPorterCustomDataKey,\s*""" +
+                """modPorterCustomDataChild\);\s*\}\);"""
+        )
+        result = replaceZeroOrOne(
+            result,
+            generatedBookName,
+            """book.getOrCreateTagElement("display")
+			.putString("Name", net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(com.mojang.serialization.JsonOps.INSTANCE, textComponent).getOrThrow().toString());"""
+        ) ?: return source
+        val generatedClipboardName = Regex(
+            """(?s)net\.minecraft\.world\.item\.component\.CustomData\.update\(\s*""" +
+                """net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA,\s*clipboard,\s*""" +
+                """modPorterCustomDataRoot\s*->\s*\{\s*""" +
+                """String\s+modPorterCustomDataKey\s*=\s*"display";\s*""" +
+                """net\.minecraft\.nbt\.CompoundTag\s+modPorterCustomDataChild\s*=\s*""" +
+                """modPorterCustomDataRoot\.getCompound\(modPorterCustomDataKey\);\s*""" +
+                """modPorterCustomDataChild\.putString\("Name",\s*""" +
+                """net\.minecraft\.network\.chat\.ComponentSerialization\.CODEC\.encodeStart\(\s*""" +
+                """com\.mojang\.serialization\.JsonOps\.INSTANCE,\s*""" +
+                """CreateLang\.translateDirect\("materialChecklist"\)\s*""" +
+                """\.setStyle\(Style\.EMPTY\.withItalic\(Boolean\.FALSE\)\)\)""" +
+                """\.getOrThrow\(\)\.toString\(\)\);\s*""" +
+                """modPorterCustomDataRoot\.put\(modPorterCustomDataKey,\s*""" +
+                """modPorterCustomDataChild\);\s*\}\);"""
+        )
+        result = replaceZeroOrOne(
+            result,
+            generatedClipboardName,
+            """clipboard.getOrCreateTagElement("display")
+			.putString("Name", net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(com.mojang.serialization.JsonOps.INSTANCE, CreateLang.translateDirect("materialChecklist")
+				.setStyle(Style.EMPTY.withItalic(Boolean.FALSE))).getOrThrow().toString());"""
+        ) ?: return source
+
+        val generatedBookWrite = Regex(
+            """(?s)net\.minecraft\.Util\.make\(book,\s*modPorterCustomDataOwner\s*->\s*\{\s*""" +
+                """net\.minecraft\.nbt\.CompoundTag\s+modPorterCustomDataValue\s*=\s*tag;\s*""" +
+                """if \(modPorterCustomDataValue == null\) \{\s*""" +
+                """modPorterCustomDataOwner\.remove\(""" +
+                """net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA\);\s*""" +
+                """\} else \{\s*modPorterCustomDataOwner\.set\(""" +
+                """net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA,\s*""" +
+                """net\.minecraft\.world\.item\.component\.CustomData\.of\(""" +
+                """modPorterCustomDataValue\)\);\s*\}\s*\}\);"""
+        )
+        result = replaceZeroOrOne(
+            result,
+            generatedBookWrite,
+            "book.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, " +
+                "net.minecraft.world.item.component.CustomData.of(tag));"
+        ) ?: return source
+        val generatedClipboardWrite = Regex(
+            """(?s)net\.minecraft\.Util\.make\(clipboard,\s*modPorterCustomDataOwner\s*->\s*\{\s*""" +
+                """net\.minecraft\.nbt\.CompoundTag\s+modPorterCustomDataValue\s*=\s*tag;\s*""" +
+                """if \(modPorterCustomDataValue == null\) \{\s*""" +
+                """modPorterCustomDataOwner\.remove\(""" +
+                """net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA\);\s*""" +
+                """\} else \{\s*modPorterCustomDataOwner\.set\(""" +
+                """net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA,\s*""" +
+                """net\.minecraft\.world\.item\.component\.CustomData\.of\(""" +
+                """modPorterCustomDataValue\)\);\s*\}\s*\}\);"""
+        )
+        result = replaceZeroOrOne(
+            result,
+            generatedClipboardWrite,
+            "clipboard.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, " +
+                "net.minecraft.world.item.component.CustomData.of(tag));"
+        ) ?: return source
+
         result = replaceOne(
             result,
             Regex(
@@ -691,8 +916,12 @@ public static ItemStackHandler getContents(ItemStack box, HolderLookup.Provider 
         val pageWrite = Regex(
             """pages\.add\(StringTag\.valueOf\(net\.minecraft\.network\.chat\.ComponentSerialization\.CODEC\.encodeStart\(com\.mojang\.serialization\.JsonOps\.INSTANCE, textComponent\)\.getOrThrow\(\)\.toString\(\)\)\);"""
         )
-        if (pageWrite.findAll(result).count() != 4) return source
-        result = pageWrite.replace(result, "pages.add(Filterable.passThrough(textComponent));")
+        result = replaceExactly(
+            result,
+            pageWrite,
+            4,
+            "pages.add(Filterable.passThrough(textComponent));"
+        ) ?: return source
         result = replaceOne(
             result,
             Regex(
@@ -746,8 +975,20 @@ public static ItemStackHandler getContents(ItemStack box, HolderLookup.Provider 
     }
 
     private fun migrateSandPaperItem(source: String): String {
-        var result = replaceOne(
+        var result = replaceZeroOrOne(
             source,
+            Regex(
+                """(?s)tag\.remove\("Polishing"\);\s*""" +
+                    """if \(\(tag\)\.isEmpty\(\)\) \{\s*\(stack\)\.remove\(net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA\);\s*""" +
+                    """\} else \{\s*\(stack\)\.set\(net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA,\s*""" +
+                    """net\.minecraft\.world\.item\.component\.CustomData\.of\(tag\)\);\s*\}\s*""" +
+                    """stack\.hurtAndBreak\(1, entityLiving, net\.minecraft\.world\.entity\.LivingEntity\.getSlotForHand\(p\.getUsedItemHand\(\)\)\);"""
+            ),
+            """tag.remove("Polishing");
+			stack.hurtAndBreak(1, entityLiving, net.minecraft.world.entity.LivingEntity.getSlotForHand(p.getUsedItemHand()));"""
+        ) ?: return source
+        result = replaceOne(
+            result,
             Regex(
                 """tag\.remove\("Polishing"\);\s*\r?\n\s*stack\.hurtAndBreak\(1, entityLiving, net\.minecraft\.world\.entity\.LivingEntity\.getSlotForHand\(p\.getUsedItemHand\(\)\)\);"""
             ),
@@ -787,7 +1028,7 @@ public static ItemStackHandler getContents(ItemStack box, HolderLookup.Provider 
             """stack.hurtAndBreak(1, player,
 					net.minecraft.world.entity.LivingEntity.getSlotForHand(context.getHand()));"""
         ) ?: return source
-        result = replaceOne(
+        result = replaceZeroOrOne(
             result,
             Regex(
                 """\s*stack\.set\(net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA,\s*""" +
@@ -913,6 +1154,43 @@ public static void assignFrequency(ItemStack stack, Player player, UUID frequenc
         return true
     }
 
+    private fun clipboardScreenMigrated(source: String): Boolean {
+        val masked = JavaSourceText.maskCommentsAndLiterals(source)
+        val providerCalls = Regex(
+            """ClipboardEntry\.saveAll\(\s*pages\s*,\s*item\s*,\s*""" +
+                """(?:minecraft|getMinecraft\(\s*\))\.level\.registryAccess\(\s*\)\s*\)"""
+        ).findAll(masked).count()
+        return providerCalls == 1 &&
+            source.contains("StringUtil.isAllowedChatCharacter(pCodePoint)") &&
+            source.contains("""tag.remove("Pages")""")
+    }
+    private fun filterItemStackMigrated(source: String): Boolean {
+        val masked = JavaSourceText.maskCommentsAndLiterals(source)
+        fun exactlyOne(pattern: String): Boolean = Regex(pattern).findAll(masked).count() == 1
+        return source.contains("private final ItemStack filterSnapshot;") &&
+            source.contains("filterSnapshot = filter.copy();") &&
+            source.contains("getFilterItemHandler(filterSnapshot, registries)") &&
+            source.contains("private void resolveContainedItems(HolderLookup.Provider registries)") &&
+            Regex("""resolveContainedItems\(world\.registryAccess\(\)\);""")
+                .findAll(masked).count() == 2 &&
+            exactlyOne(
+                """public static FilterItemStack of\(ItemStack filter, HolderLookup\.Provider registries\)"""
+            ) &&
+            exactlyOne(
+                """public static FilterItemStack of\(CompoundTag tag, HolderLookup\.Provider registries\)"""
+            ) &&
+            exactlyOne("""public ListFilterItemStack\(ItemStack filter\)""") &&
+            exactlyOne(
+                """public ListFilterItemStack\(ItemStack filter, HolderLookup\.Provider registries\)"""
+            ) &&
+            !Regex(
+                """return of\(\s*ItemStack\.parseOptional\(\s*registries\s*,\s*tag\s*\)\s*\);"""
+            ).containsMatchIn(masked) &&
+            !Regex(
+                """getFilterItemHandler\(\s*filter\s*,\s*registries\s*\)"""
+            ).containsMatchIn(masked)
+    }
+
     private fun filterFamilyMigrated(sources: Map<String, String>): Boolean {
         val filterItem = sourceForOwner(sources, FILTER_ITEM) ?: return false
         val listFilterItem = sourceForOwner(sources, LIST_FILTER_ITEM) ?: return false
@@ -924,12 +1202,11 @@ public static void assignFrequency(ItemStack stack, Player player, UUID frequenc
             listFilterItem.contains(
                 "makeStackWrapper(ItemStack filter, HolderLookup.Provider registries)"
             ) &&
-            filterItemStack.contains("private final ItemStack filterSnapshot;") &&
-            filterItemStack.contains("filterSnapshot = filter.copy();") &&
-            filterItemStack.contains("getFilterItemHandler(filterSnapshot, registries)") &&
-            filterItemStack.contains(
-                "public static FilterItemStack of(ItemStack filter, HolderLookup.Provider registries)"
+            listFilterItem.contains(
+                "getFilterItemHandler(ItemStack stack, HolderLookup.Provider registries)"
             ) &&
+            listFilterItem.contains("newInv.deserializeNBT(registries, invNBT)") &&
+            filterItemStackMigrated(filterItemStack) &&
             hasLazyFilterCallerProof(sources)
     }
 
@@ -949,11 +1226,12 @@ public static void assignFrequency(ItemStack stack, Player player, UUID frequenc
             source.contains(
                 "makeStackWrapper(ItemStack filter, HolderLookup.Provider registries)"
             ) &&
-                source.contains("new ListFilterItemStack(filter, registries)")
-        FILTER_ITEM_STACK ->
-            source.contains("private final ItemStack filterSnapshot;") &&
-                source.contains("filterSnapshot = filter.copy();") &&
-                source.contains("getFilterItemHandler(filterSnapshot, registries)")
+                source.contains("new ListFilterItemStack(filter, registries)") &&
+                source.contains(
+                    "getFilterItemHandler(ItemStack stack, HolderLookup.Provider registries)"
+                ) &&
+                source.contains("newInv.deserializeNBT(registries, invNBT)")
+        FILTER_ITEM_STACK -> filterItemStackMigrated(source)
         "$CREATE.content.logistics.filter.FilterMenu" ->
             source.contains("getFilterItemHandler(contentHolder, player.registryAccess())") &&
                 source.contains("CustomData.set(DataComponents.CUSTOM_DATA, filterItem, tag)")
@@ -970,13 +1248,10 @@ public static void assignFrequency(ItemStack stack, Player player, UUID frequenc
                     "HolderLookup.Provider registries)"
             ) &&
                 source.contains("writeNBT(HolderLookup.Provider registries)") &&
-                source.contains("icon.saveOptional(registries)")
-        "$CREATE.content.equipment.clipboard.ClipboardScreen" ->
-            source.contains(
-                "ClipboardEntry.saveAll(pages, item, minecraft.level.registryAccess())"
-            ) &&
-                source.contains("StringUtil.isAllowedChatCharacter(pCodePoint)") &&
-                source.contains("""tag.remove("Pages")""")
+                source.contains("icon.saveOptional(registries)") &&
+                source.contains("DataComponents.CUSTOM_DATA, clipboardItem, tag") &&
+                !source.contains("modPorterCustomDataOwner")
+        "$CREATE.content.equipment.clipboard.ClipboardScreen" -> clipboardScreenMigrated(source)
         "$CREATE.content.equipment.clipboard.ClipboardEditPacket" ->
             source.contains("CustomData.set(DataComponents.CUSTOM_DATA, cbe.dataContainer, data)") &&
                 source.contains("CustomData.set(DataComponents.CUSTOM_DATA, itemStack, data)")
@@ -995,7 +1270,10 @@ public static void assignFrequency(ItemStack stack, Player player, UUID frequenc
         "$CREATE.content.schematics.cannon.MaterialChecklist" ->
             source.contains("DataComponents.WRITTEN_BOOK_CONTENT") &&
                 source.contains("ClipboardEntry.saveAll(pages, clipboard, registries)") &&
-                source.contains("DataComponents.CUSTOM_DATA, clipboard")
+                source.contains("DataComponents.CUSTOM_DATA, clipboard") &&
+                !source.contains("modPorterCustomDataRoot") &&
+                !source.contains("modPorterCustomDataOwner") &&
+                !source.contains("tag.put(\"pages\", pages)")
         "$CREATE.content.equipment.sandPaper.SandPaperItem" ->
             source.contains("entityLiving.getUsedItemHand()") &&
                 source.contains("context.getHand()") &&
@@ -1056,11 +1334,38 @@ public static void assignFrequency(ItemStack stack, Player player, UUID frequenc
     }
 
     private fun replaceOne(source: String, regex: Regex, replacement: String): String? {
-        if (regex.findAll(JavaSourceText.maskCommentsAndLiterals(source)).count() != 1) {
-            // Patterns containing string literals need their real-source count.
-            if (regex.findAll(source).count() != 1) return null
+        val match = codeMatches(source, regex).singleOrNull() ?: return null
+        return source.replaceRange(match.range, match.value.replaceFirst(regex, replacement))
+    }
+
+    private fun replaceZeroOrOne(source: String, regex: Regex, replacement: String): String? {
+        val matches = codeMatches(source, regex)
+        if (matches.size > 1) return null
+        val match = matches.singleOrNull() ?: return source
+        return source.replaceRange(match.range, match.value.replaceFirst(regex, replacement))
+    }
+
+    private fun replaceExactly(
+        source: String,
+        regex: Regex,
+        expectedCount: Int,
+        replacement: String
+    ): String? {
+        val matches = codeMatches(source, regex)
+        if (matches.size != expectedCount) return null
+        var result = source
+        for (match in matches.asReversed()) {
+            result = result.replaceRange(match.range, match.value.replaceFirst(regex, replacement))
         }
-        return regex.replaceFirst(source, replacement)
+        return result
+    }
+
+    private fun codeMatches(source: String, regex: Regex): List<MatchResult> {
+        val masked = JavaSourceText.maskCommentsAndLiterals(source)
+        return regex.findAll(source).filter { match ->
+            val firstCode = match.value.indexOfFirst { !it.isWhitespace() }
+            firstCode >= 0 && masked[match.range.first + firstCode] == source[match.range.first + firstCode]
+        }.toList()
     }
 
     private fun insertBeforeOne(source: String, anchor: Regex, insertion: String): String? {
