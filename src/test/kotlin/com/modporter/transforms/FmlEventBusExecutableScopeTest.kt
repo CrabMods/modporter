@@ -16,7 +16,7 @@ class FmlEventBusExecutableScopeTest {
     lateinit var project: Path
 
     @Test
-    fun `injected constructor bus is threaded into static registration helper`() {
+    fun `injected constructor bus does not escape into static registration helper`() {
         val file = project.resolve("src/main/java/example/Example.java")
         file.parent.createDirectories()
         file.writeText("""
@@ -43,15 +43,12 @@ class FmlEventBusExecutableScopeTest {
         val result = StructuralRefactorPass().apply(project)
         val generated = file.readText()
         assertTrue(result.errors.isEmpty(), result.errors.toString())
-        assertTrue(generated.contains("public Example(IEventBus modEventBus, ModContainer modContainer)"), generated)
-        assertTrue(generated.contains("onCtor(modEventBus);"), generated)
         assertTrue(generated.contains("modEventBus.register(this);"), generated)
-        assertTrue(generated.contains("public static void onCtor(IEventBus modEventBus)"), generated)
-        assertTrue(generated.contains("modEventBus.register(Example.class);"), generated)
         assertFalse(generated.contains("IEventBus modEventBus = modEventBus;"), generated)
-        assertFalse(generated.contains("IEventBus modEventBus ="), generated)
-        assertFalse(generated.contains("FMLJavaModLoadingContext"), generated)
-        assertFalse(generated.contains("net.neoforged.fml.ModList"), generated)
+        assertTrue(generated.contains(
+            "IEventBus modEventBus = net.neoforged.fml.ModList.get().getModContainerById(Example.ID).orElseThrow().getEventBus();"
+        ), generated)
+        assertTrue(generated.contains("modEventBus.register(Example.class);"), generated)
     }
 
     @Test

@@ -1,0 +1,1148 @@
+
+    @Test
+    fun `common bus mod event listener migration matches declared handler type names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.common.NeoForge;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "examplemod";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    NeoForge.EVENT_BUS.addListener(ActualData::gatherData);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ModData.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            class ActualData {
+                public static void gatherData(GatherDataEvent event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val main = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-modbus-listener-registration" })
+        assertTrue(main.contains("modEventBus.addListener(ActualData::gatherData);"), main)
+        assertFalse(main.contains("NeoForge.EVENT_BUS.addListener(ActualData::gatherData);"), main)
+        assertFalse(main.contains("ModData::gatherData"), main)
+    }
+
+    @Test
+    fun `common bus mod event listener migration rejects local event simple names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.common.NeoForge;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "examplemod";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    NeoForge.EVENT_BUS.addListener(LocalData::gatherData);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("GatherDataEvent.java").writeText("""
+            package com.example;
+
+            public class GatherDataEvent {
+            }
+        """.trimIndent())
+        srcDir.resolve("LocalData.java").writeText("""
+            package com.example;
+
+            class LocalData {
+                public static void gatherData(GatherDataEvent event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val main = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.none { it.ruleId == "struct-modbus-listener-registration" })
+        assertTrue(main.contains("NeoForge.EVENT_BUS.addListener(LocalData::gatherData);"), main)
+        assertFalse(main.contains("modEventBus.addListener(LocalData::gatherData);"), main)
+    }
+
+    @Test
+    fun `inserts common static mod bus subscribers outside client dist guard`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val entityDir = srcDir.resolve("entity")
+        val clientDir = srcDir.resolve("client")
+        srcDir.createDirectories()
+        entityDir.createDirectories()
+        clientDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.client.ClientRegistry;
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.loading.FMLLoader;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "examplemod";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    if (FMLLoader.getDist() == Dist.CLIENT) {
+                        ClientRegistry.CLIENT_THINGS.register(modEventBus);
+                    }
+                }
+            }
+        """.trimIndent())
+        entityDir.resolve("EntityRegistry.java").writeText("""
+            package com.example.entity;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.neoforge.event.entity.EntityAttributeCreationEvent;
+            import net.neoforged.neoforge.event.entity.RegisterSpawnPlacementsEvent;
+
+            @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
+            public class EntityRegistry {
+                @SubscribeEvent
+                public static void registerEntityAttributes(EntityAttributeCreationEvent event) {
+                }
+
+                @SubscribeEvent
+                public static void registerSpawnPlacements(RegisterSpawnPlacementsEvent event) {
+                }
+            }
+        """.trimIndent())
+        clientDir.resolve("ClientRegistry.java").writeText("""
+            package com.example.client;
+
+            import net.neoforged.bus.api.IEventBus;
+
+            public class ClientRegistry {
+                public static final ClientRegistry CLIENT_THINGS = new ClientRegistry();
+
+                public void register(IEventBus bus) {
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+
+        val main = srcDir.resolve("ExampleMod.java").readText()
+        val attributeListener = "modEventBus.addListener(com.example.entity.EntityRegistry::registerEntityAttributes);"
+        val spawnListener = "modEventBus.addListener(com.example.entity.EntityRegistry::registerSpawnPlacements);"
+        val listenerIndex = main.indexOf(attributeListener)
+        val spawnListenerIndex = main.indexOf(spawnListener)
+        val guardIndex = main.indexOf("if (FMLLoader.getDist() == Dist.CLIENT)")
+        assertTrue(listenerIndex > 0, main)
+        assertTrue(spawnListenerIndex > 0, main)
+        assertTrue(listenerIndex < guardIndex, main)
+        assertTrue(spawnListenerIndex < guardIndex, main)
+        assertTrue(main.contains("IEventBus modEventBus = modContainer.getEventBus();\n        $spawnListener\n        $attributeListener\n        if (FMLLoader.getDist() == Dist.CLIENT)"), main)
+    }
+
+    @Test
+    fun `adds missing deferred registers to existing main constructor register array`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val worldDir = srcDir.resolve("world")
+        srcDir.createDirectories()
+        worldDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.registry.BlockRegistry;
+            import com.example.registry.CapabilityRegistry;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "examplemod";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    CapabilityRegistry.registerAttachments(modEventBus);
+                    DeferredRegister<?>[] registers = { BlockRegistry.BLOCKS };
+                    for (DeferredRegister<?> register : registers) {
+                        register.register(modEventBus);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("registry").createDirectories()
+        srcDir.resolve("registry/BlockRegistry.java").writeText("""
+            package com.example.registry;
+
+            import net.minecraft.core.registries.Registries;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockRegistry {
+                public static final DeferredRegister.Blocks BLOCKS = DeferredRegister.createBlocks("examplemod");
+            }
+        """.trimIndent())
+        srcDir.resolve("registry/CapabilityRegistry.java").writeText("""
+            package com.example.registry;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.neoforge.attachment.AttachmentType;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+            import net.neoforged.neoforge.registries.NeoForgeRegistries;
+
+            public class CapabilityRegistry {
+                public static final DeferredRegister<AttachmentType<?>> ATTACHMENT_TYPES = DeferredRegister.create(NeoForgeRegistries.ATTACHMENT_TYPES, "examplemod");
+
+                public static void registerAttachments(IEventBus modEventBus) {
+                    ATTACHMENT_TYPES.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Compat.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.inventory.MenuType;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class Compat {
+                public static class Common {
+                    public static final DeferredRegister<MenuType<?>> MENU_TYPES = DeferredRegister.create(Registries.MENU, "examplemod");
+                }
+            }
+        """.trimIndent())
+        worldDir.resolve("PlacementRegistry.java").writeText("""
+            package com.example.world;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifierType;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class PlacementRegistry {
+                public static final DeferredRegister<PlacementModifierType<?>> PLACEMENT_MODIFIER_TYPES = DeferredRegister.create(Registries.PLACEMENT_MODIFIER_TYPE, "examplemod");
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val main = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-deferredregister-array-completeness" })
+        assertTrue(main.contains("DeferredRegister<?>[] registers = { BlockRegistry.BLOCKS, com.example.world.PlacementRegistry.PLACEMENT_MODIFIER_TYPES };"), main)
+        assertFalse(main.contains("CapabilityRegistry.ATTACHMENT_TYPES"), main)
+        assertFalse(main.contains("Compat.MENU_TYPES"), main)
+    }
+
+    @Test
+    fun `deferred register owner collectors use declared Java type names instead of file names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            @Mod(ExampleMod.ID)
+            public class ExampleMod {
+                public static final String ID = "example";
+
+                public ExampleMod(IEventBus bus) {
+                    bus.addListener(ActualListenerRegistry::register);
+                    DeferredRegister<?>[] registers = { };
+                    for (DeferredRegister<?> register : registers) {
+                        register.register(bus);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("WrongListenerOwnerFile.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.levelgen.carver.WorldCarver;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            class ActualListenerRegistry {
+                static final DeferredRegister<WorldCarver<?>> CARVER_TYPES = DeferredRegister.create(Registries.CARVER, ExampleMod.ID);
+
+                static void register(IEventBus bus) {
+                    CARVER_TYPES.register(bus);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("WrongArrayOwnerFile.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifierType;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            class ActualArrayRegistry {
+                static final DeferredRegister<PlacementModifierType<?>> PLACEMENT_MODIFIER_TYPES = DeferredRegister.create(Registries.PLACEMENT_MODIFIER_TYPE, ExampleMod.ID);
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val main = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-deferredregister-listener" }, "changes=${result.changes} errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-deferredregister-array-completeness" }, "changes=${result.changes} errors=${result.errors}")
+        assertTrue(main.contains("ActualListenerRegistry.CARVER_TYPES.register(bus);"), main)
+        assertTrue(main.contains("DeferredRegister<?>[] registers = { com.example.ActualArrayRegistry.PLACEMENT_MODIFIER_TYPES };"), main)
+        assertFalse(main.contains("WrongListenerOwnerFile"), main)
+        assertFalse(main.contains("WrongArrayOwnerFile"), main)
+        assertFalse(main.contains("::register"), main)
+    }
+
+    @Test
+    fun `deferred register array completeness ignores comments and text blocks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            @Mod(ExampleMod.ID)
+            public class ExampleMod {
+                public static final String ID = "example";
+
+                public ExampleMod(IEventBus bus) {
+                    String docs = ${"\"\"\""}
+DeferredRegister<?>[] registers = { };
+RegisteredOwner.registerAll(bus);
+${"\"\"\""};
+                    // DeferredRegister<?>[] registers = { };
+                    DeferredRegister<?>[] registers = { };
+                    for (DeferredRegister<?> register : registers) {
+                        register.register(bus);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ActualArrayRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifierType;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            class ActualArrayRegistry {
+                static final DeferredRegister<PlacementModifierType<?>> PLACEMENT_MODIFIER_TYPES = DeferredRegister.create(Registries.PLACEMENT_MODIFIER_TYPE, ExampleMod.ID);
+            }
+        """.trimIndent())
+        srcDir.resolve("RegisteredOwner.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.levelgen.carver.WorldCarver;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            class RegisteredOwner {
+                static final DeferredRegister<WorldCarver<?>> CARVER_TYPES = DeferredRegister.create(Registries.CARVER, ExampleMod.ID);
+
+                static void registerAll(IEventBus bus) {
+                    CARVER_TYPES.register(bus);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val main = srcDir.resolve("ExampleMod.java").readText()
+        val actualArray = main.substringAfterLast("DeferredRegister<?>[] registers = {").substringBefore("};")
+
+        assertTrue(result.changes.any { it.ruleId == "struct-deferredregister-array-completeness" }, "changes=${result.changes} errors=${result.errors}")
+        assertTrue(actualArray.contains("com.example.ActualArrayRegistry.PLACEMENT_MODIFIER_TYPES"), main)
+        assertTrue(actualArray.contains("com.example.RegisteredOwner.CARVER_TYPES"), main)
+        assertTrue(main.contains("""
+DeferredRegister<?>[] registers = { };
+RegisteredOwner.registerAll(bus);
+""".trimIndent()), main)
+        assertTrue(main.contains("// DeferredRegister<?>[] registers = { };"), main)
+    }
+
+    @Test
+    fun `deferred register listener migration ignores comments and text blocks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.ID)
+            public class ExampleMod {
+                public static final String ID = "example";
+
+                public ExampleMod(IEventBus bus) {
+                    String docs = ""
+                        + "bus.addListener(ActualListenerRegistry::register);";
+                    String blockDocs = ${"\"\"\""}
+bus.addListener(ActualListenerRegistry::register);
+${"\"\"\""};
+                    // bus.addListener(ActualListenerRegistry::register);
+                    bus.addListener(ActualListenerRegistry::register);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ActualListenerRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.levelgen.carver.WorldCarver;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            class ActualListenerRegistry {
+                static final DeferredRegister<WorldCarver<?>> CARVER_TYPES = DeferredRegister.create(Registries.CARVER, ExampleMod.ID);
+
+                static void register(IEventBus bus) {
+                    CARVER_TYPES.register(bus);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val main = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-deferredregister-listener" }, "changes=${result.changes} errors=${result.errors}")
+        assertTrue(main.contains("ActualListenerRegistry.CARVER_TYPES.register(bus);"), main)
+        assertTrue(main.contains("\"bus.addListener(ActualListenerRegistry::register);\""), main)
+        assertTrue(main.contains("""
+bus.addListener(ActualListenerRegistry::register);
+""".trimIndent()), main)
+        assertTrue(main.contains("// bus.addListener(ActualListenerRegistry::register);"), main)
+    }
+
+    @Test
+    fun `detects ifPresent and orElse on capability-related expressions`() {
+        val projectDir = createFile("CapUsage.java", """
+            package com.example;
+            public class CapUsage {
+                void use() {
+                    Object handler = getCapability(cap, side);
+                    handler.ifPresent(h -> use(h));
+                    Object fallback = handler.orElse(null);
+                    Object resolved = cap.resolve().orElseThrow();
+                }
+            }
+        """.trimIndent())
+        val pass = StructuralRefactorPass()
+        val result = pass.analyze(projectDir)
+        assertTrue(result.changes.any { it.ruleId == "struct-lazy-optional-method" },
+            "Should detect ifPresent/orElse/orElseThrow on cap-related code")
+    }
+
+    @Test
+    fun `migrates ItemStack capability Optional resolve pattern`() {
+        val projectDir = createFile("ItemHandlerUsage.java", """
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.items.IItemHandler;
+            import java.util.Optional;
+
+            public class ItemHandlerUsage {
+                int count(ItemStack stack) {
+                    if (stack.getCapability(Capabilities.ITEM_HANDLER).isPresent()) {
+                        Optional<IItemHandler> maybe = stack.getCapability(Capabilities.ITEM_HANDLER).resolve();
+                        if (maybe.isEmpty()) return 0;
+                        IItemHandler handler = maybe.get();
+                        return handler.getSlots();
+                    }
+                    return 0;
+                }
+
+                boolean direct(ItemStack inventoryStack) {
+                    return inventoryStack.getCapability(Capabilities.ItemHandler.BLOCK) != null;
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = projectDir
+            .resolve("src/main/java/com/example/ItemHandlerUsage.java")
+            .readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-itemstack-item-handler-capability" })
+        assertTrue(result.changes.any { it.ruleId == "struct-capability-resolve-nullable" })
+        assertTrue(result.changes.filter { it.ruleId.startsWith("struct-capability") || it.ruleId.startsWith("struct-itemstack") }
+            .all { it.confidence == Confidence.HIGH })
+        assertTrue(migrated.contains("stack.getCapability(Capabilities.ItemHandler.ITEM) != null"))
+        assertTrue(migrated.contains("IItemHandler maybe = stack.getCapability(Capabilities.ItemHandler.ITEM);"))
+        assertTrue(migrated.contains("inventoryStack.getCapability(Capabilities.ItemHandler.ITEM) != null"))
+        assertTrue(migrated.contains("if (maybe == null)"))
+        assertTrue(migrated.contains("IItemHandler handler = maybe;"))
+        assertTrue(!migrated.contains("Optional<"))
+        assertTrue(!migrated.contains(".resolve()"))
+    }
+
+    @Test
+    fun `map entry value migration does not rewrite java Optional get calls`() {
+        val projectDir = createFile("CapabilityOptionalUsage.java", """
+            package com.example;
+
+            import java.util.Map;
+            import java.util.Map.Entry;
+            import java.util.Optional;
+
+            public class CapabilityOptionalUsage {
+                void read(Player player) {
+                    Optional<ResearchData> capability = player.getCapability(ResearchProvider.RESEARCH, null).resolve();
+                    if (capability.isPresent()) {
+                        Map<String, ResearchStatus> status = capability.get().getResearches();
+                    }
+                    for (Map.Entry<String, ResearchStatus> entry : capability.get().getResearches().entrySet()) {
+                        ResearchStatus state = entry.get();
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = projectDir
+            .resolve("src/main/java/com/example/CapabilityOptionalUsage.java")
+            .readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("Optional<ResearchData> capability = player.getCapability(ResearchProvider.RESEARCH, null).resolve();"), migrated)
+        assertTrue(migrated.contains("Map<String, ResearchStatus> status = capability.get().getResearches();"), migrated)
+        assertTrue(migrated.contains("ResearchStatus state = entry.getValue();"), migrated)
+        assertFalse(migrated.contains("capability.getValue()"), migrated)
+        assertFalse(migrated.contains("entry.get();"), migrated)
+    }
+
+    @Test
+    fun `packet migration does not replace mod main class with SimpleChannel`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val networkDir = srcDir.resolve("network")
+        srcDir.createDirectories()
+        networkDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.minecraftforge.fml.common.Mod;
+            import net.minecraftforge.network.simple.SimpleChannel;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+                public static ExampleMod instance;
+                public SimpleChannel channel;
+
+                public ExampleMod() {
+                    instance = this;
+                }
+            }
+        """.trimIndent())
+
+        networkDir.resolve("PacketPing.java").writeText("""
+            package com.example.network;
+
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.neoforged.neoforge.network.handling.IPayloadContext;
+
+            public class PacketPing {
+                public static void encode(PacketPing msg, FriendlyByteBuf buf) {
+                }
+
+                public static PacketPing decode(FriendlyByteBuf buf) {
+                    return new PacketPing();
+                }
+
+                public static class Handler {
+                    public static void handle(PacketPing msg, IPayloadContext ctx) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        networkDir.resolve("NetworkHandler.java").writeText("""
+            package com.example.network;
+
+            import com.example.ExampleMod;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraftforge.network.NetworkRegistry;
+            import net.minecraftforge.network.simple.SimpleChannel;
+
+            public class NetworkHandler {
+                private static final String PROTOCOL_VERSION = "1";
+                public static final SimpleChannel INSTANCE = NetworkRegistry.newSimpleChannel(
+                    new ResourceLocation(ExampleMod.MODID, "main"),
+                    () -> PROTOCOL_VERSION,
+                    PROTOCOL_VERSION::equals,
+                    PROTOCOL_VERSION::equals
+                );
+
+                public static void register() {
+                    int id = 0;
+                    INSTANCE.registerMessage(id++, PacketPing.class, PacketPing::encode, PacketPing::decode, PacketPing.Handler::handle,
+                            java.util.Optional.of(net.minecraftforge.network.NetworkDirection.PLAY_TO_CLIENT));
+                }
+            }
+        """.trimIndent())
+
+        networkDir.resolve("ModPackets.java").writeText("""
+            package com.example.network;
+
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraftforge.network.simple.SimpleChannel;
+
+            public class ModPackets {
+                private static SimpleChannel INSTANCE;
+                public static void sendToPlayer(Object packet, ServerPlayer player) {
+                    INSTANCE.sendTo(packet, player.connection.connection, null);
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(tempDir)
+        val mainClass = srcDir.resolve("ExampleMod.java").readText()
+        val modNetwork = networkDir.resolve("ModNetwork.java").readText()
+        val modPackets = networkDir.resolve("ModPackets.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-generate-mod-network" })
+        assertTrue(mainClass.contains("public static final String MODID = \"example\";"))
+        assertTrue(mainClass.contains("public static ExampleMod instance;"))
+        assertTrue(!mainClass.contains("Replaced SimpleChannel registration class"))
+        assertTrue(modNetwork.contains("PacketPing.Handler.handle(payload, context)"))
+        assertTrue(modPackets.contains("void sendToPlayer(ServerPlayer player, T msg)"))
+        assertTrue(modPackets.contains("void sendToPlayer(T msg, ServerPlayer player)"))
+    }
+
+    @Test
+    fun `packet migration removes inline SimpleChannel setup from mod main class`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val networkDir = srcDir.resolve("network")
+        srcDir.createDirectories()
+        networkDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.network.PacketPing;
+            import net.minecraft.resources.ResourceLocation;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
+            import net.minecraftforge.network.NetworkRegistry;
+            import net.minecraftforge.network.simple.SimpleChannel;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+                private static final String PROTOCOL_VERSION = "1";
+                public SimpleChannel channel;
+
+                public ExampleMod(IEventBus modEventBus) {
+                    modEventBus.addListener(this::commonSetup);
+                    Registry.ITEMS.register(modEventBus);
+                }
+
+                private void commonSetup(FMLCommonSetupEvent event) {
+                    channel = NetworkRegistry.newSimpleChannel(ResourceLocation.fromNamespaceAndPath(MODID, "main"), () -> PROTOCOL_VERSION, PROTOCOL_VERSION::equals, PROTOCOL_VERSION::equals);
+                    int packetIndex = 0;
+                    channel.registerMessage(packetIndex++, PacketPing.class, PacketPing::encode, PacketPing::decode, PacketPing.Handler::handle,
+                            java.util.Optional.of(net.minecraftforge.network.NetworkDirection.PLAY_TO_CLIENT));
+                    Registry.afterNetwork();
+                }
+            }
+        """.trimIndent())
+
+        networkDir.resolve("PacketPing.java").writeText("""
+            package com.example.network;
+
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.neoforged.neoforge.network.handling.IPayloadContext;
+
+            public class PacketPing {
+                public static void encode(PacketPing packet, FriendlyByteBuf buf) {
+                }
+
+                public static PacketPing decode(FriendlyByteBuf buf) {
+                    return new PacketPing();
+                }
+
+                public static class Handler {
+                    public static void handle(PacketPing packet, IPayloadContext ctx) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val main = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-remove-inline-simplechannel-registration" })
+        assertTrue(main.contains("modEventBus.addListener(ModNetwork::register);"))
+        assertTrue(main.contains("Registry.afterNetwork();"))
+        assertTrue(!main.contains("SimpleChannel"))
+        assertTrue(!main.contains("NetworkRegistry"))
+        assertTrue(!main.contains("registerMessage"))
+        assertTrue(!main.contains("packetIndex"))
+    }
+
+    @Test
+    fun `packet migration resolves ResourceLocation factory namespace and bidirectional registerMessage`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val networkDir = srcDir.resolve("network")
+        srcDir.createDirectories()
+        networkDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.network.NetworkHandler;
+            import net.minecraft.resources.ResourceLocation;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(IEventBus modEventBus) {
+                    NetworkHandler.init();
+                    Registry.ITEMS.register(modEventBus);
+                }
+
+                public static ResourceLocation id(String path) {
+                    return ResourceLocation.fromNamespaceAndPath(MODID, path);
+                }
+            }
+        """.trimIndent())
+
+        networkDir.resolve("NetworkHandler.java").writeText("""
+            package com.example.network;
+
+            import com.example.ExampleMod;
+            import net.minecraftforge.network.NetworkRegistry;
+            import net.minecraftforge.network.simple.SimpleChannel;
+
+            public class NetworkHandler {
+                private static final String PROTOCOL_VERSION = "1";
+                public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
+                    ExampleMod.id("main"),
+                    () -> PROTOCOL_VERSION,
+                    PROTOCOL_VERSION::equals,
+                    PROTOCOL_VERSION::equals
+                );
+
+                public static void init() {
+                    int id = 0;
+                    CHANNEL.registerMessage(id++, NoticePacket.class, NoticePacket::encode, NoticePacket::new, NoticePacket.Handler::onMessage);
+                }
+            }
+        """.trimIndent())
+
+        networkDir.resolve("NoticePacket.java").writeText("""
+            package com.example.network;
+
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.neoforged.neoforge.network.handling.IPayloadContext;
+
+            public class NoticePacket {
+                public NoticePacket(FriendlyByteBuf buf) {
+                }
+
+                public void encode(FriendlyByteBuf buf) {
+                }
+
+                public static class Handler {
+                    public static boolean onMessage(NoticePacket packet, IPayloadContext context) {
+                        return true;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val packet = networkDir.resolve("NoticePacket.java").readText()
+        val handler = networkDir.resolve("NetworkHandler.java").readText()
+        val modNetwork = networkDir.resolve("ModNetwork.java").readText()
+        val main = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-packet-payload" })
+        assertTrue(result.changes.any { it.ruleId == "struct-generate-mod-network" })
+        assertTrue(packet.contains("public class NoticePacket implements CustomPacketPayload"), packet)
+        assertTrue(packet.contains("ResourceLocation.fromNamespaceAndPath(\"example\", \"notice\")"), packet)
+        assertTrue(packet.contains("StreamCodec.of((buf, packet) -> packet.encode(buf), NoticePacket::new)"), packet)
+        assertTrue(modNetwork.contains("final PayloadRegistrar registrar = event.registrar(\"example\").versioned(\"1\");"), modNetwork)
+        assertTrue(modNetwork.contains("registrar.playBidirectional("), modNetwork)
+        assertFalse(handler.contains("SimpleChannel"), handler)
+        assertFalse(handler.contains("registerMessage"), handler)
+        assertTrue(main.contains("modEventBus.addListener(ModNetwork::register);"), main)
+        assertTrue(main.contains("Registry.ITEMS.register(modEventBus);"), main)
+    }
+
+    @Test
+    fun `simplechannel cleanup removes legacy marker comments by cleanup shape`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public class ExampleMod {
+                private void commonSetup() {
+                    // TODO: [forge2neo] SimpleChannel field removed after payload migration
+                    // TODO: [forge2neo] registerMessage() removed - register via PayloadRegistrar
+                    int packetIndex = 0;
+                    keepRegistrationTail();
+                }
+
+                private void keepRegistrationTail() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "structural-simplechannel-cleanup" })
+        assertFalse(migrated.contains("[forge2neo]"), migrated)
+        assertFalse(migrated.contains("registerMessage() removed"), migrated)
+        assertFalse(migrated.contains("packetIndex"), migrated)
+        assertTrue(migrated.contains("keepRegistrationTail();"), migrated)
+    }
+
+    @Test
+    fun `packet migration supports records client direction and IPayloadContext handlers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val networkDir = srcDir.resolve("network")
+        srcDir.createDirectories()
+        networkDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+
+        networkDir.resolve("MenuPacket.java").writeText("""
+            package com.example.network;
+
+            import com.example.client.MenuScreen;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.neoforged.neoforge.network.handling.IPayloadContext;
+            import java.util.function.Supplier;
+
+            public record MenuPacket(String mode) {
+                public static void encode(MenuPacket packet, FriendlyByteBuf buf) {
+                    buf.writeUtf(packet.mode);
+                }
+
+                public static MenuPacket decode(FriendlyByteBuf buf) {
+                    return new MenuPacket(buf.readUtf());
+                }
+
+                public static void handle(MenuPacket packet, IPayloadContext contextSupplier) {
+                    NetworkEvent.Context context = contextSupplier.get();
+                    context.enqueueWork(() -> MenuScreen.open(packet));
+                    context.setPacketHandled(true);
+                }
+            }
+        """.trimIndent())
+
+        networkDir.resolve("NetworkHandler.java").writeText("""
+            package com.example.network;
+
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraftforge.network.NetworkDirection;
+            import net.minecraftforge.network.NetworkRegistry;
+            import net.minecraftforge.network.simple.SimpleChannel;
+
+            public class NetworkHandler {
+                private static final String PROTOCOL_VERSION = "1";
+                public static final SimpleChannel INSTANCE = NetworkRegistry.newSimpleChannel(
+                    new ResourceLocation("example", "main"),
+                    () -> PROTOCOL_VERSION,
+                    PROTOCOL_VERSION::equals,
+                    PROTOCOL_VERSION::equals
+                );
+
+                public static void register() {
+                    int id = 0;
+                    INSTANCE.registerMessage(id++, MenuPacket.class,
+                            MenuPacket::encode,
+                            MenuPacket::decode,
+                            MenuPacket::handle,
+                            java.util.Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(tempDir)
+        val packet = networkDir.resolve("MenuPacket.java").readText()
+        val modNetwork = networkDir.resolve("ModNetwork.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-packet-payload" })
+        assertTrue(result.changes.any {
+            it.ruleId == "struct-packet-payload-context" ||
+                it.ruleId == "struct-instance-packet-payload-context"
+        })
+        assertTrue(packet.contains("public record MenuPacket(String mode) implements CustomPacketPayload {"))
+        assertTrue(packet.contains("""ResourceLocation.fromNamespaceAndPath("example", "menu")"""))
+        assertTrue(packet.contains("public static void handle(MenuPacket packet, IPayloadContext context) {"))
+        assertTrue(!packet.contains("NetworkEvent.Context"))
+        assertTrue(!packet.contains("setPacketHandled"))
+        assertTrue(modNetwork.contains("registrar.playToClient("))
+    }
+
+    @Test
+    fun `packet migration supports channel builder messageBuilder chains and nested registered payloads`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val networkDir = srcDir.resolve("network")
+        val blockDir = srcDir.resolve("block")
+        srcDir.createDirectories()
+        networkDir.createDirectories()
+        blockDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.network.Messages;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.ID)
+            public class ExampleMod {
+                public static final String ID = "example";
+
+                public ExampleMod(IEventBus modEventBus) {
+                    Messages.register();
+                }
+            }
+        """.trimIndent())
+
+        networkDir.resolve("Messages.java").writeText("""
+            package com.example.network;
+
+            import com.example.ExampleMod;
+            import com.example.block.ShelfBlock;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.level.Level;
+            import net.minecraftforge.network.NetworkDirection;
+            import net.minecraftforge.network.NetworkRegistry;
+            import net.minecraftforge.network.PacketDistributor;
+            import net.minecraftforge.network.simple.SimpleChannel;
+
+            public class Messages {
+                public static SimpleChannel INSTANCE;
+                private static int packetId = 0;
+
+                private static int id() {
+                    return packetId++;
+                }
+
+                public static void register() {
+                    SimpleChannel net = NetworkRegistry.ChannelBuilder
+                            .named(ResourceLocation.fromNamespaceAndPath(ExampleMod.ID, "messages"))
+                            .networkProtocolVersion(() -> "1")
+                            .clientAcceptedVersions(s -> true)
+                            .serverAcceptedVersions(s -> true)
+                            .simpleChannel();
+                    INSTANCE = net;
+                    net.messageBuilder(PingPacket.class, id(), NetworkDirection.PLAY_TO_SERVER)
+                            .decoder(PingPacket::new)
+                            .encoder(PingPacket::toBytes)
+                            .consumerNetworkThread(PingPacket::handle)
+                            .add();
+                    net.messageBuilder(OuterPacket.Client.class, id(), NetworkDirection.PLAY_TO_CLIENT)
+                            .decoder(OuterPacket.Client::new)
+                            .encoder(OuterPacket.Client::toBytes)
+                            .consumerNetworkThread(OuterPacket.Client::handle)
+                            .add();
+                    net.messageBuilder(OuterPacket.Server.class, id(), NetworkDirection.PLAY_TO_SERVER)
+                            .decoder(OuterPacket.Server::new)
+                            .encoder(OuterPacket.Server::toBytes)
+                            .consumerNetworkThread(OuterPacket.Server::handle)
+                            .add();
+                    net.messageBuilder(ShelfBlock.BreakMessage.class, id(), NetworkDirection.PLAY_TO_SERVER)
+                            .decoder(ShelfBlock.BreakMessage::new)
+                            .encoder(ShelfBlock.BreakMessage::toBytes)
+                            .consumerNetworkThread(ShelfBlock.BreakMessage::handle)
+                            .add();
+                }
+
+                public static <MSG> void sendToServer(MSG message) {
+                    INSTANCE.sendToServer(message);
+                }
+
+                public static <MSG> void sendToPlayer(MSG message, ServerPlayer player) {
+                    INSTANCE.send(PacketDistributor.PLAYER.with(() -> player), message);
+                }
+
+                public static <MSG> void sendToDimension(MSG message, ResourceKey<Level> dimension) {
+                    INSTANCE.send(PacketDistributor.DIMENSION.with(() -> dimension), message);
+                }
+
+                public static <MSG> void sendToTracking(MSG message, Entity entity) {
+                    INSTANCE.send(PacketDistributor.TRACKING_ENTITY.with(() -> entity), message);
+                }
+
+                public static <MSG> void sendToTrackingAndSelf(MSG message, Player player) {
+                    INSTANCE.send(PacketDistributor.TRACKING_ENTITY_AND_SELF.with(() -> player), message);
+                }
+
+                public static void sendObjectToPlayer(Object packet, ServerPlayer player) {
+                    INSTANCE.send(PacketDistributor.PLAYER.with(() -> player), packet);
+                }
+            }
+        """.trimIndent())
+
+        networkDir.resolve("PingPacket.java").writeText("""
+            package com.example.network;
+
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.neoforged.neoforge.network.handling.IPayloadContext;
+
+            public class PingPacket {
+                public PingPacket(int value) {
+                }
+
+                public PingPacket(FriendlyByteBuf buf) {
+                }
+
+                public void write(FriendlyByteBuf buf) {
+                }
+
+                public boolean handle(IPayloadContext ctx) {
+                    return true;
+                }
+            }
+        """.trimIndent())
+
+        networkDir.resolve("OuterPacket.java").writeText("""
+            package com.example.network;
+
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.neoforged.neoforge.network.handling.IPayloadContext;
+
+            public class OuterPacket {
+                public void write(FriendlyByteBuf buf) {
+                }
+
+                public boolean handle(IPayloadContext ctx) {
+                    return true;
+                }
+
+                public static class Client extends OuterPacket {
+                    public Client(String text) {
+                    }
+
+                    public Client(FriendlyByteBuf buf) {
+                    }
+                }
+
+                public static class Server extends OuterPacket {
+                    public Server(String text) {
+                    }
+
+                    public Server(FriendlyByteBuf buf) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        blockDir.resolve("ShelfBlock.java").writeText("""
+            package com.example.block;
+
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.neoforged.neoforge.network.handling.IPayloadContext;
+
+            public class ShelfBlock {
+                public static class BreakMessage {
+                    public BreakMessage(double x) {
+                    }
+
+                    public BreakMessage(FriendlyByteBuf buf) {
+                    }
+
+                    public void write(FriendlyByteBuf buf) {
+                    }
+
+                    public boolean handle(IPayloadContext ctx) {
+                        return true;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val messages = networkDir.resolve("Messages.java").readText()
+        val ping = networkDir.resolve("PingPacket.java").readText()
+        val outer = networkDir.resolve("OuterPacket.java").readText()
+        val shelf = blockDir.resolve("ShelfBlock.java").readText()
+        val modNetwork = networkDir.resolve("ModNetwork.java").readText()
+        val main = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-packet-payload" }, "changes=${result.changes}")
+        assertTrue(result.changes.any { it.ruleId == "struct-generate-mod-network" }, "changes=${result.changes}")
+        assertTrue(ping.contains("public class PingPacket implements CustomPacketPayload"), ping)
+        assertTrue(ping.contains("StreamCodec.of((buf, packet) -> packet.write(buf), PingPacket::new)"), ping)
+        assertTrue(outer.contains("public static class Client extends OuterPacket implements CustomPacketPayload"), outer)
+        assertTrue(outer.contains("CustomPacketPayload.Type<Client> TYPE"), outer)
+        assertTrue(outer.contains("public static class Server extends OuterPacket implements CustomPacketPayload"), outer)
+        assertTrue(outer.contains("CustomPacketPayload.Type<Server> TYPE"), outer)
+        assertTrue(shelf.contains("public static class BreakMessage implements CustomPacketPayload"), shelf)
+        assertTrue(modNetwork.contains("registrar.playToServer("), modNetwork)
+        assertTrue(modNetwork.contains("PingPacket.TYPE"), modNetwork)
+        assertTrue(modNetwork.contains("OuterPacket.Client.TYPE"), modNetwork)
+        assertTrue(modNetwork.contains("OuterPacket.Server.TYPE"), modNetwork)
+        assertTrue(modNetwork.contains("com.example.block.ShelfBlock.BreakMessage.TYPE"), modNetwork)
+        assertTrue(modNetwork.contains("(payload, context) -> payload.handle(context)"), modNetwork)
+        assertTrue(messages.contains("PacketDistributor.sendToPlayersInDimension(level, msg);"), messages)
+        assertTrue(messages.contains("PacketDistributor.sendToPlayersTrackingEntity(entity, msg);"), messages)
+        assertTrue(messages.contains("public static <T extends CustomPacketPayload> void sendToTrackingAndSelf(T message, Player player)"), messages)
+        assertTrue(messages.contains("PacketDistributor.sendToPlayersTrackingEntityAndSelf(player, message);"), messages)
+        assertTrue(messages.contains("public static <T extends CustomPacketPayload> void sendObjectToPlayer(T packet, ServerPlayer player)"), messages)
+        assertTrue(messages.contains("NetworkRegistry.hasChannel(player.connection, packet.type().id())"), messages)
+        assertTrue(messages.contains("PacketDistributor.sendToPlayer(player, packet);"), messages)
+        assertFalse(messages.contains("public static <T extends CustomPacketPayload> void sendToTrackingAndSelf(T msg, Entity entity)"), messages)
+        assertFalse(messages.contains("<MSG>"), messages)
+        assertFalse(messages.contains("Object packet"), messages)
+        assertFalse(messages.contains("SimpleChannel"), messages)
+        assertFalse(messages.contains("messageBuilder"), messages)
+        assertTrue(main.contains("modEventBus.addListener(ModNetwork::register);"), main)
+    }

@@ -181,10 +181,13 @@ internal object FlywheelJarJarRuntimeEvidence {
             CandidateRootPin(
                 artifact = ArtifactPin(
                     "neoforge-21.1.230.jar",
-                    "111b1b3136a1fdee48654cbf8d1e5062ffe75875e83b4d7f69e0a1366a85d062",
-                    // ModDev regenerates this container. Both observed containers have all
-                    // 10557 named entry payloads byte-identical; ZIP metadata is not a mod.
-                    entryPayloadSha256 = "1c40cad92daf78fff5896c2a7b45032ae05782dc2c211e41e4194be0494c5a4e"
+                    "e0dddb0f5b5aa37afca84d03b45abe4926699e87e6e916c0edf645cfa774888c",
+                    // ModDev regenerates this container and applies the converted mod's access
+                    // transformer to it. All 10557 named entry payloads are pinned exactly: this
+                    // baseline is the container of the accepted Create runs (c42-acc-e/f/h and the
+                    // all-11 c42-all-d, byte-identical); the release build package's AT entries change
+                    // four Minecraft classes against the previous 1c40cad9… baseline.
+                    entryPayloadSha256 = "c82bc3684dc087b56b0df94236fb0389918cb73aaebfec48747263e46b86ba97"
                 ),
                 candidates = listOf(
                     CandidatePin(

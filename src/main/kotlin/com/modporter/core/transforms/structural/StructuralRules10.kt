@@ -1459,217 +1459,135 @@ internal fun StructuralRefactorPass.collectModBusListenerRefs(srcDir: Path): Set
     return refs
 }
 
-internal fun StructuralRefactorPass.ensureModEventBusSurface(source: String): Pair<String, String>? {
-    resolveModEventBusName(source)?.let { return source to it }
-    val className = classNameOfJavaSource(source) ?: return null
-    if (constructorSections(source, className).isNotEmpty()) return null
-    val executable = maskJavaCommentsAndLiterals(source)
-    val classDeclaration = Regex(
-        """\b(?:(?:public|protected|private|abstract|final|static)\s+)*class\s+${Regex.escape(className)}\b[^\{;]*\{"""
-    ).find(executable) ?: return null
-    val openBrace = executable.indexOf('{', classDeclaration.range.first)
-    if (openBrace < 0) return null
-    val separator = if (source.contains("\r\n")) "\r\n" else "\n"
-    val constructor = buildString {
-        append(separator)
-        append("    public $className(IEventBus modEventBus) {")
-        append(separator)
-        append("    }")
-        append(separator)
-    }
-    var migrated = source.substring(0, openBrace + 1) + constructor + source.substring(openBrace + 1)
-    migrated = addImportIfMissing(migrated, "net.neoforged.bus.api.IEventBus")
-    return migrated to "modEventBus"
-}
-
 internal fun StructuralRefactorPass.migrateStaticModBusSubscribers(projectDir: Path, dryRun: Boolean): List<Change> {
     val changes = mutableListOf<Change>()
     val srcDir = projectDir.resolve("src/main/java")
     if (!srcDir.exists()) return changes
-    val subscriberFiles = walkJavaSourceRoots(srcDir)
-        .filter { it.extension == "java" }
-        .toList()
-        .filter { file ->
-            val source = file.readText()
-            executableEventBusSubscriberAnnotationRanges(source).any { range ->
-                isModBusSubscriberAnnotation(source, range)
-            }
-        }
-    if (subscriberFiles.isEmpty()) return changes
     val mainFile = detectModMainClass(projectDir) ?: return changes
     var mainText = mainFile.readText()
-    val preparedMain = ensureModEventBusSurface(mainText) ?: return changes
-    mainText = preparedMain.first
-    val modBusVar = preparedMain.second
-    var registeredAny = false
+    val modBusVar = detectModBusVariable(mainText) ?: return changes
 
     data class StaticHandler(
         val methodName: String,
         val eventType: String,
         val isClientOnly: Boolean,
-        val subscribeAnnotationRange: IntRange,
+        val annotationRange: IntRange,
         val isPublic: Boolean = false
     )
 
-    subscriberFiles
+    walkJavaSourceRoots(srcDir)
+        .filter { it.extension == "java" }
+        .toList()
         .filter { it != mainFile }
         .forEach { file ->
             var text = file.readText()
             val original = text
-            var mainChanged = false
-            val registrationEvidence = mutableListOf<String>()
-            var firstChangedLine: Int? = null
-            val annotationRanges = executableEventBusSubscriberAnnotationRanges(text)
-                .filter { range -> isModBusSubscriberAnnotation(text, range) }
-                .sortedByDescending { it.first }
-
-            for (annotationRange in annotationRanges) {
-                val code = maskJavaComments(text)
-                val imports = javaNonStaticImports(code)
-                val executableCode = maskJavaCommentsAndLiterals(text)
-                val typeBlocks = javaTypeBlocks(text, executableCode)
-                val annotationText = text.substring(annotationRange.first, annotationRange.last + 1)
-                val owner = javaTypeBlockForModAnnotation(annotationRange.last, typeBlocks) ?: continue
-                val ownerDistributions = staticModBusSubscriberDistributions(annotationText)
-                    ?: error("Unsupported @EventBusSubscriber distribution: ${annotationText.trim()}")
-                val handlers = Regex(
-                    """(?m)^([ \t]*@SubscribeEvent(?:\([^)\r\n]*\))?[ \t]*\r?\n)([ \t]*(?:(?:public|protected|private)\s+)?static\s+void\s+(\w+)\s*\(\s*(?:final\s+)?([\w.]+)\s+\w+\s*\))"""
-                ).findAll(executableCode)
-                    .filter { match ->
-                        javaTypeBlockContainingOffset(match.range.first, typeBlocks) == owner
+            val code = maskJavaComments(text)
+            val imports = javaNonStaticImports(code)
+            val annotationPattern = Regex(
+                """(?m)^[ \t]*@EventBusSubscriber\((?=[^\r\n)]*\bBus\.MOD\b)[^\r\n)]*\)\s*\r?\n"""
+            )
+            val annotation = annotationPattern.find(text) ?: return@forEach
+            val ownerDistributions = staticModBusSubscriberDistributions(annotation.value)
+                ?: error("Unsupported @EventBusSubscriber distribution: ${annotation.value.trim()}")
+            val executableCode = maskJavaCommentsAndLiterals(text)
+            val typeBlocks = javaTypeBlocks(text, executableCode)
+            val owner = javaTypeBlockForModAnnotation(annotation.range.last, typeBlocks) ?: return@forEach
+            val handlers = Regex(
+                """(?m)^[ \t]*@SubscribeEvent\s*\r?\n[ \t]*(?:public\s+)?static\s+void\s+(\w+)\s*\(\s*(?:final\s+)?([\w.]+)\s+\w+\s*\)"""
+            ).findAll(executableCode)
+                .mapNotNull { match ->
+                    if (javaTypeBlockContainingOffset(match.range.first, typeBlocks) != owner) {
+                        return@mapNotNull null
                     }
-                    .map { match ->
-                        val methodPrefix = text.substring(
-                            (match.range.first - 160).coerceAtLeast(0),
-                            match.range.first
-                        )
-                        val eventType = match.groupValues[4]
-                        StaticHandler(
-                            methodName = match.groupValues[3],
-                            eventType = eventType,
-                            isClientOnly = isKnownClientOnlyModBusEventParameterType(eventType, imports) ||
-                                (methodPrefix.contains("@OnlyIn") && methodPrefix.contains("Dist.CLIENT")),
-                            subscribeAnnotationRange = match.groups[1]!!.range,
-                            isPublic = Regex("""\bpublic\s+static\b""").containsMatchIn(match.groupValues[2])
-                        )
+                    val methodPrefix = text.substring(
+                        (match.range.first - 160).coerceAtLeast(0),
+                        match.range.first
+                    )
+                    val eventType = match.groupValues[2]
+                    val lineEnd = text.indexOf('\n', match.range.first)
+                    val annotationEnd = if (lineEnd >= 0) lineEnd + 1 else {
+                        text.indexOf('\r', match.range.first).takeIf { it >= 0 }?.plus(1)
+                            ?: match.range.first
                     }
-                    .filter { handler -> isKnownModBusEventParameterType(handler.eventType, imports) }
-                    .toList()
-                if (handlers.isEmpty()) continue
-
-                val ownerCode = executableCode.substring(owner.bodyStart.coerceAtMost(owner.end), owner.end)
-                if (handlers.any { handler ->
-                        Regex("""\bvoid\s+${Regex.escape(handler.methodName)}\s*\(""")
-                            .findAll(ownerCode)
-                            .count() > 1
-                    }
-                ) continue
-
-                val handlerDistributions = handlers.associateWith { handler ->
-                    ownerDistributions.intersect(
-                        if (handler.isClientOnly) {
-                            setOf(StaticSubscriberDistribution.CLIENT)
-                        } else {
-                            StaticSubscriberDistribution.entries.toSet()
-                        }
+                    StaticHandler(
+                        methodName = match.groupValues[1],
+                        eventType = eventType,
+                        isClientOnly = isKnownClientOnlyModBusEventParameterType(eventType, imports) ||
+                            (methodPrefix.contains("@OnlyIn") && methodPrefix.contains("Dist.CLIENT")),
+                        annotationRange = match.range.first until annotationEnd,
+                        isPublic = Regex("""\bpublic\s+static\b""").containsMatchIn(match.value)
                     )
                 }
-                if (handlerDistributions.values.any { it.isEmpty() }) {
-                    error(
-                        "@EventBusSubscriber distribution excludes one of its handlers: " +
-                            annotationText.trim()
-                    )
+                .filter { handler ->
+                    isKnownModBusEventParameterType(handler.eventType, imports)
                 }
-
-                val packageName = packageNameOf(text)
-                val mainPackage = packageNameOf(mainText)
-                val ownerPath = javaTypeNestingPath(owner, typeBlocks)
-                val directListenerClassName = javaAccessibleTypeReferenceExpression(
-                    packageName,
-                    mainPackage,
-                    owner,
-                    typeBlocks
-                )?.takeIf {
-                    packageName == mainPackage || handlers.all { handler -> handler.isPublic }
+                .toList()
+            if (handlers.isEmpty()) return@forEach
+            // The main class must be able to name every handler with an unambiguous method
+            // reference; otherwise the annotation (still valid on NeoForge 1.21.1) keeps the wiring.
+            val ownerCode = executableCode.substring(owner.bodyStart.coerceAtMost(owner.end), owner.end)
+            val handlerPackage = packageNameOf(text)
+            if (handlers.any { handler ->
+                    val overloaded = Regex("""\bvoid\s+${Regex.escape(handler.methodName)}\s*\(""")
+                        .findAll(ownerCode).count() > 1
+                    overloaded || (!handler.isPublic && handlerPackage != packageNameOf(mainText))
                 }
-                val indent = mainConstructorIndent(mainText, modBusVar)
-
-                if (directListenerClassName != null) {
-                    for (handler in handlers) {
-                        val listener = "$modBusVar.addListener($directListenerClassName::${handler.methodName});"
-                        val registration = staticModBusRegistration(
-                            indent,
-                            listener,
-                            handlerDistributions.getValue(handler)
-                        )
-                        if (!mainText.contains(listener)) {
-                            mainText = insertModBusListener(
-                                mainText,
-                                modBusVar,
-                                registration,
-                                owner.referenceName
-                            )
-                            mainChanged = true
-                        }
-                        registrationEvidence += listener
+            ) return@forEach
+            val handlerDistributions = handlers.associateWith { handler ->
+                ownerDistributions.intersect(
+                    if (handler.isClientOnly) {
+                        setOf(StaticSubscriberDistribution.CLIENT)
+                    } else {
+                        StaticSubscriberDistribution.entries.toSet()
                     }
-                } else {
-                    val bridgeOwner = ownerPath.dropLast(1).asReversed().firstOrNull { candidate ->
-                        javaAccessibleTypeReferenceExpression(packageName, mainPackage, candidate, typeBlocks) != null
-                    } ?: continue
-                    val bridgeOwnerPath = javaTypeNestingPath(bridgeOwner, typeBlocks).map { it.name }
-                    val bridgeClassName = javaAccessibleTypeReferenceExpression(
-                        packageName,
-                        mainPackage,
-                        bridgeOwner,
-                        typeBlocks
-                    ) ?: continue
-                    val relativeOwnerName = ownerPath.drop(bridgeOwnerPath.size).joinToString(".") { it.name }
-
-                    handlers.groupBy { handlerDistributions.getValue(it) }
-                        .forEach { (distributions, groupedHandlers) ->
-                            val bridgeMethodName = staticModBusBridgeMethodName(distributions)
-                            val listenerRefs = groupedHandlers.map { "$relativeOwnerName::${it.methodName}" }
-                            text = addStaticModBusListenerBridge(
-                                text,
-                                bridgeOwnerPath,
-                                bridgeMethodName,
-                                listenerRefs
-                            )
-                            val bridgeCall = "$bridgeClassName.$bridgeMethodName($modBusVar);"
-                            val registration = staticModBusRegistration(indent, bridgeCall, distributions)
-                            if (!mainText.contains(bridgeCall)) {
-                                mainText = insertModBusListener(
-                                    mainText,
-                                    modBusVar,
-                                    registration,
-                                    bridgeOwner.referenceName
-                                )
-                                mainChanged = true
-                            }
-                            registrationEvidence += bridgeCall
-                        }
-                }
-
-                registeredAny = true
-                firstChangedLine = minOf(
-                    firstChangedLine ?: Int.MAX_VALUE,
-                    lineNumberAt(original, annotationRange.first)
                 )
-                handlers.sortedByDescending { it.subscribeAnnotationRange.first }.forEach { handler ->
-                    text = text.removeRange(handler.subscribeAnnotationRange)
-                }
-                text = text.removeRange(eventBusSubscriberAnnotationRemovalRange(text, annotationRange))
+            }
+            if (handlerDistributions.values.any { it.isEmpty() }) {
+                error(
+                    "@EventBusSubscriber distribution excludes one of its handlers: " +
+                        annotation.value.trim()
+                )
             }
 
-            val finalExecutable = maskJavaCommentsAndLiterals(text)
-            if (!Regex("""@\s*SubscribeEvent\b""").containsMatchIn(finalExecutable)) {
+            val packageName = packageNameOf(text)
+            val mainPackage = packageNameOf(mainText)
+            val listenerClassName = javaListenerTypeReferenceExpression(packageName, mainPackage, owner) ?: return@forEach
+            var mainChanged = false
+            val indent = mainConstructorIndent(mainText, modBusVar)
+            for (handler in handlers) {
+                val listener = "$modBusVar.addListener($listenerClassName::${handler.methodName});"
+                val guard = handlerDistributions.getValue(handler).singleOrNull()
+                val registration = if (guard != null) {
+                    "${indent}if (net.neoforged.fml.loading.FMLLoader.getDist() == " +
+                        "net.neoforged.api.distmarker.Dist.${guard.name}) {\n" +
+                        "$indent    $listener\n" +
+                        "$indent}"
+                } else {
+                    "$indent$listener"
+                }
+                if (!mainText.contains(listener)) {
+                    mainText = insertModBusListener(
+                        mainText,
+                        modBusVar,
+                        registration,
+                        owner.referenceName
+                    )
+                    mainChanged = true
+                }
+            }
+            (handlers.map { it.annotationRange } + listOf(annotation.range))
+                .distinct()
+                .sortedByDescending { it.first }
+                .forEach { text = text.removeRange(it.first, it.last + 1) }
+
+            if (!text.contains("@SubscribeEvent")) {
                 text = removeImport(text, "net.neoforged.bus.api.SubscribeEvent")
             }
-            if (!Regex("""@\s*(?:Mod\.)?EventBusSubscriber\b""").containsMatchIn(finalExecutable)) {
+            if (!text.contains("@EventBusSubscriber")) {
                 text = removeImport(text, "net.neoforged.fml.common.EventBusSubscriber")
             }
-            if (!Regex("""\bMod\s*\.""").containsMatchIn(finalExecutable)) {
+            if (!text.contains("Mod.")) {
                 text = removeImport(text, "net.neoforged.fml.common.Mod")
             }
 
@@ -1678,8 +1596,8 @@ internal fun StructuralRefactorPass.migrateStaticModBusSubscribers(projectDir: P
                     file = mainFile,
                     line = 1,
                     description = "Register static mod-bus subscriber handlers on mod event bus",
-                    before = "@EventBusSubscriber(bus = Bus.MOD)",
-                    after = registrationEvidence.joinToString(" "),
+                    before = annotation.value.trim(),
+                    after = handlers.joinToString(" ") { "$modBusVar.addListener($listenerClassName::${it.methodName});" },
                     confidence = Confidence.HIGH,
                     ruleId = "struct-static-modbus-subscriber-registration"
                 ))
@@ -1688,9 +1606,9 @@ internal fun StructuralRefactorPass.migrateStaticModBusSubscribers(projectDir: P
             if (text != original) {
                 changes.add(Change(
                     file = file,
-                    line = firstChangedLine ?: 1,
+                    line = lineNumberAt(original, annotation.range.first),
                     description = "Remove deprecated static @EventBusSubscriber(bus=MOD) wiring",
-                    before = "@EventBusSubscriber(bus = Bus.MOD)",
+                    before = annotation.value.trim(),
                     after = "constructor modEventBus.addListener(...)",
                     confidence = Confidence.HIGH,
                     ruleId = "struct-static-modbus-subscriber-cleanup"
@@ -1701,77 +1619,11 @@ internal fun StructuralRefactorPass.migrateStaticModBusSubscribers(projectDir: P
             }
         }
 
-    if (!dryRun && registeredAny && mainText != mainFile.readText()) {
+    if (!dryRun && mainText != mainFile.readText()) {
         mainFile.writeText(mainText)
     }
 
     return changes
-}
-
-private fun StructuralRefactorPass.isModBusSubscriberAnnotation(source: String, range: IntRange): Boolean {
-    val annotation = maskJavaCommentsAndLiterals(source.substring(range.first, range.last + 1))
-    return Regex(
-        """\bbus\s*=\s*(?:(?:Mod\.)?EventBusSubscriber\.)?Bus\.MOD\b"""
-    ).containsMatchIn(annotation)
-}
-
-private fun eventBusSubscriberAnnotationRemovalRange(source: String, annotationRange: IntRange): IntRange {
-    val lineStart = source.lastIndexOf('\n', annotationRange.first - 1)
-        .let { if (it < 0) 0 else it + 1 }
-    val removalStart = if (source.substring(lineStart, annotationRange.first).isBlank()) {
-        lineStart
-    } else {
-        annotationRange.first
-    }
-    var removalEnd = annotationRange.last + 1
-    while (removalEnd < source.length && (source[removalEnd] == ' ' || source[removalEnd] == '\t')) {
-        removalEnd++
-    }
-    if (removalEnd < source.length && source[removalEnd] == '\r') removalEnd++
-    if (removalEnd < source.length && source[removalEnd] == '\n') removalEnd++
-    return removalStart until removalEnd
-}
-
-private fun javaTypeNestingPath(
-    owner: JavaTypeBlock,
-    typeBlocks: List<JavaTypeBlock>
-): List<JavaTypeBlock> =
-    typeBlocks
-        .filter { candidate ->
-            candidate != owner &&
-                candidate.bodyStart < owner.declarationStart &&
-                candidate.end > owner.end
-        }
-        .sortedBy { it.bodyStart } + owner
-
-private fun javaTypeBlockForNestingPath(
-    path: List<String>,
-    typeBlocks: List<JavaTypeBlock>
-): JavaTypeBlock? = typeBlocks.singleOrNull { candidate ->
-    javaTypeNestingPath(candidate, typeBlocks).map { it.name } == path
-}
-
-private fun javaAccessibleTypeReferenceExpression(
-    sourcePackage: String,
-    targetPackage: String,
-    owner: JavaTypeBlock,
-    typeBlocks: List<JavaTypeBlock>
-): String? {
-    val path = javaTypeNestingPath(owner, typeBlocks)
-    val samePackage = sourcePackage == targetPackage
-    val accessible = if (samePackage) {
-        path.none { it.isPrivate }
-    } else {
-        path.all { it.isPublic }
-    }
-    if (!accessible) return null
-    val typePath = path.joinToString(".") { it.name }
-    return when {
-        sourcePackage.isBlank() -> typePath
-        path.all { it.isPublic } -> "$sourcePackage.$typePath"
-        samePackage -> typePath
-        else -> null
-    }
 }
 
 private enum class StaticSubscriberDistribution {
@@ -1803,103 +1655,6 @@ private fun staticModBusSubscriberDistributions(annotation: String): Set<StaticS
             else -> return null
         }
     }
-}
-
-private fun staticModBusBridgeMethodName(
-    distributions: Set<StaticSubscriberDistribution>
-): String = when (distributions) {
-    setOf(StaticSubscriberDistribution.CLIENT) -> "registerClientModBusListeners"
-    setOf(StaticSubscriberDistribution.DEDICATED_SERVER) -> "registerDedicatedServerModBusListeners"
-    StaticSubscriberDistribution.entries.toSet() -> "registerModBusListeners"
-    else -> error("Unsupported static mod-bus subscriber distribution set: $distributions")
-}
-
-private fun staticModBusRegistration(
-    indent: String,
-    statement: String,
-    distributions: Set<StaticSubscriberDistribution>
-): String {
-    val guard = distributions.singleOrNull()
-    return if (guard == null) {
-        "$indent$statement"
-    } else {
-        "${indent}if (net.neoforged.fml.loading.FMLLoader.getDist() == " +
-            "net.neoforged.api.distmarker.Dist.${guard.name}) {\n" +
-            "$indent    $statement\n" +
-            "$indent}"
-    }
-}
-
-private fun StructuralRefactorPass.addStaticModBusListenerBridge(
-    source: String,
-    bridgeOwnerPath: List<String>,
-    methodName: String,
-    listenerReferences: List<String>
-): String {
-    val executable = maskJavaCommentsAndLiterals(source)
-    val typeBlocks = javaTypeBlocks(source, executable)
-    val bridgeOwner = javaTypeBlockForNestingPath(bridgeOwnerPath, typeBlocks)
-        ?: error("Cannot resolve mod-bus listener bridge owner '${bridgeOwnerPath.joinToString(".")}'")
-    val methodPattern = Regex(
-        """(?m)^([ \t]*)public\s+static\s+void\s+${Regex.escape(methodName)}\s*\(\s*net\.neoforged\.bus\.api\.IEventBus\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
-    )
-    val existingMethod = methodPattern.findAll(executable).singleOrNull { match ->
-        javaTypeBlockContainingOffset(match.range.first, typeBlocks) == bridgeOwner
-    }
-    val separator = if (source.contains("\r\n")) "\r\n" else "\n"
-    if (existingMethod != null) {
-        val openBrace = executable.indexOf('{', existingMethod.range.first)
-        val closeBrace = findMatchingBrace(executable, openBrace)
-        if (openBrace < 0 || closeBrace < 0) {
-            error("Cannot match generated mod-bus listener bridge '$methodName'")
-        }
-        val methodIndent = existingMethod.groupValues[1]
-        val eventBusName = existingMethod.groupValues[2]
-        val statementIndent = "$methodIndent    "
-        val additions = listenerReferences
-            .map { "$eventBusName.addListener($it);" }
-            .filterNot { statement ->
-                maskJavaCommentsAndLiterals(source.substring(openBrace + 1, closeBrace)).contains(statement)
-            }
-        if (additions.isEmpty()) return source
-        val insertion = additions.joinToString(
-            separator,
-            prefix = separator,
-            postfix = "$separator$methodIndent"
-        ) { "$statementIndent$it" }
-        return source.substring(0, closeBrace) + insertion + source.substring(closeBrace)
-    }
-
-    val conflictingMethod = Regex(
-        """(?m)^[ \t]*(?:(?:public|protected|private)\s+)?(?:static\s+)?[A-Za-z_$][\w$<>,.? \[\]]*\s+${Regex.escape(methodName)}\s*\("""
-    )
-        .findAll(executable)
-        .any { match -> javaTypeBlockContainingOffset(match.range.first, typeBlocks) == bridgeOwner }
-    if (conflictingMethod) {
-        error("Cannot generate mod-bus listener bridge '$methodName': method name already exists")
-    }
-
-    val declarationLineStart = source.lastIndexOf('\n', bridgeOwner.start)
-        .let { if (it < 0) 0 else it + 1 }
-    val ownerIndent = source.substring(declarationLineStart, bridgeOwner.start)
-    val methodIndent = "$ownerIndent    "
-    val statementIndent = "$methodIndent    "
-    val method = buildString {
-        append(separator)
-        append(methodIndent)
-        append("public static void $methodName(net.neoforged.bus.api.IEventBus modEventBus) {")
-        listenerReferences.forEach { listener ->
-            append(separator)
-            append(statementIndent)
-            append("modEventBus.addListener($listener);")
-        }
-        append(separator)
-        append(methodIndent)
-        append('}')
-        append(separator)
-        append(ownerIndent)
-    }
-    return source.substring(0, bridgeOwner.end) + method + source.substring(bridgeOwner.end)
 }
 
 internal fun StructuralRefactorPass.mainConstructorIndent(source: String, eventBusName: String): String {

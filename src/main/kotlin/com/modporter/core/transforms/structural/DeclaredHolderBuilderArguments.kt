@@ -3,40 +3,46 @@ package com.modporter.core.transforms.structural
 import com.github.javaparser.JavaParser
 import com.github.javaparser.ParserConfiguration
 import com.github.javaparser.ast.CompilationUnit
-import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
 import com.github.javaparser.ast.body.Parameter
 import com.github.javaparser.ast.body.TypeDeclaration
 import com.github.javaparser.ast.body.VariableDeclarator
+import com.github.javaparser.ast.expr.BooleanLiteralExpr
 import com.github.javaparser.ast.expr.Expression
 import com.github.javaparser.ast.expr.FieldAccessExpr
 import com.github.javaparser.ast.expr.IntegerLiteralExpr
 import com.github.javaparser.ast.expr.LambdaExpr
 import com.github.javaparser.ast.expr.MethodCallExpr
 import com.github.javaparser.ast.expr.NameExpr
+import com.github.javaparser.ast.expr.NullLiteralExpr
+import com.github.javaparser.ast.expr.StringLiteralExpr
 import com.github.javaparser.ast.type.TypeParameter
 import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter
+import com.modporter.core.transforms.structural.ProjectSourceDeclarations.TypeRef
 import com.modporter.core.transforms.util.JavaSourceText
+import com.modporter.mapping.TargetMembers
 
 /**
  * Repairs three source-proven holder/value boundaries:
  *
  * 1. Registrate block-loot callbacks use their provider instance and resolve enchantment keys
  *    through that provider;
- * 2. BuiltInRegistries.FLUID#getKey receives the value of NeoForge's deferred fluid holder; and
- * 3. EmptyingRecipeGen builder callbacks pass that value to output(Fluid, int).
+ * 2. a built-in registry's `getKey` receives the value of a platform `DeferredHolder` constant
+ *    whose value type is the registry's element type; and
+ * 3. a project method argument that is a platform `DeferredHolder` constant receives the holder's
+ *    value when the project's own overloads prove that only the value type can be accepted.
  *
- * The admitted receivers and callback roots are canonical so this does not add `.value()` to
- * unrelated holders or method names.
+ * NeoForge declares registry constants such as `NeoForgeMod.MILK` as `DeferredHolder<R, T>` (the
+ * 1.21.1 member table), and the 1.20.1 `RegistryObject#get()` read of such a constant is migrated
+ * to the bare holder. Rule 3 restores the value only where the call's receiver type and every
+ * overload it can bind to are project declarations: exactly one overload accepts the value type,
+ * none can accept the holder, and every other argument is a literal the overload provably accepts.
+ * Vanilla `Holder<T>` constants are not admitted; their identity flows are migrated separately.
  */
 internal fun StructuralRefactorPass.migrateDeclaredHolderBuilderArguments(
     source: String
 ): String {
-    if (!source.contains("createSilkTouchDispatchTable") &&
-        !source.contains("NeoForgeMod.MILK") &&
-        !source.contains("NeoForgeMod.FLOWING_MILK")
-    ) {
-        return source
-    }
+    val loot = source.contains("createSilkTouchDispatchTable")
+    if (!loot && !importsDeferredHolderOwner(source)) return source
 
     val parser = JavaParser(
         ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
@@ -47,22 +53,16 @@ internal fun StructuralRefactorPass.migrateDeclaredHolderBuilderArguments(
     LexicalPreservingPrinter.setup(unit)
 
     var changed = false
-    for (lambda in unit.findAll(LambdaExpr::class.java).toList()) {
-        changed = migrateRegistrateOreLootLambda(lambda, unit, parser, source) || changed
+    if (loot) {
+        for (lambda in unit.findAll(LambdaExpr::class.java).toList()) {
+            changed = migrateRegistrateOreLootLambda(lambda, unit, parser, source) || changed
+        }
     }
     for (call in unit.findAll(MethodCallExpr::class.java).toList()) {
-        changed = migrateBuiltInFluidKeyArgument(call, unit, parser, source) || changed
+        changed = migrateBuiltInRegistryKeyArgument(call, unit, parser) || changed
     }
-    for (owner in unit.findAll(ClassOrInterfaceDeclaration::class.java).toList()) {
-        if (!declaredHolderExtendsEmptyingRecipeGen(owner, unit, source)) continue
-        for (lambda in owner.findAll(LambdaExpr::class.java).toList()) {
-            if (lambda.findAncestor(ClassOrInterfaceDeclaration::class.java)
-                    .orElse(null) !== owner
-            ) {
-                continue
-            }
-            changed = migrateEmptyingFluidOutput(lambda, unit, parser, source) || changed
-        }
+    for (call in unit.findAll(MethodCallExpr::class.java).toList()) {
+        changed = migrateProjectDeferredHolderArgument(call, unit, parser) || changed
     }
 
     if (!changed) return source
@@ -152,101 +152,239 @@ private fun migrateRegistrateOreLootLambda(
     return true
 }
 
-private fun migrateBuiltInFluidKeyArgument(
+/** `BuiltInRegistries.X.getKey(holder)`: the registry's element type must be the holder's value type. */
+private fun migrateBuiltInRegistryKeyArgument(
     call: MethodCallExpr,
     unit: CompilationUnit,
-    parser: JavaParser,
-    source: String
+    parser: JavaParser
 ): Boolean {
     if (call.nameAsString != "getKey" || call.arguments.size != 1) return false
     val registry = call.scope.orElse(null) as? FieldAccessExpr ?: return false
-    if (registry.nameAsString != "FLUID" ||
-        !declaredHolderCanonicalOwner(
-            registry.scope,
-            BUILT_IN_REGISTRIES_SIMPLE,
-            BUILT_IN_REGISTRIES,
-            unit,
-            source
-        )
-    ) {
-        return false
-    }
-    val holder = call.arguments.single()
-    if (!declaredHolderNeoForgeFluid(holder, unit, source)) return false
+    if (platformOwnerName(registry.scope, unit) != BUILT_IN_REGISTRIES) return false
+    val element = TargetMembers.fieldSignatures(BUILT_IN_REGISTRIES)[registry.nameAsString]
+        ?.let(::registryElementType)
+        ?: return false
+    val holder = platformDeferredHolderField(call.arguments.single(), unit) ?: return false
+    if (holder.valueType != element) return false
     call.setArgument(
         0,
-        parser.parseExpression<Expression>("$holder.value()").result.orElseThrow()
+        parser.parseExpression<Expression>("${call.arguments.single()}.value()").result.orElseThrow()
     )
     return true
 }
 
-private fun migrateEmptyingFluidOutput(
-    lambda: LambdaExpr,
+private fun StructuralRefactorPass.migrateProjectDeferredHolderArgument(
+    call: MethodCallExpr,
     unit: CompilationUnit,
-    parser: JavaParser,
-    source: String
+    parser: JavaParser
 ): Boolean {
-    if (lambda.parameters.size != 1) return false
-    val createCall = lambda.parentNode.orElse(null) as? MethodCallExpr ?: return false
-    if (createCall.nameAsString != "create" ||
-        createCall.arguments.size != 2 ||
-        createCall.arguments.last() !== lambda
-    ) {
-        return false
+    val holders = call.arguments.withIndex().mapNotNull { (index, argument) ->
+        platformDeferredHolderField(argument, unit)?.let { index to it }
     }
-    val builderName = lambda.parameters.single().nameAsString
-    var changed = false
-    for (output in lambda.findAll(MethodCallExpr::class.java).toList()) {
-        if (output.findAncestor(LambdaExpr::class.java).orElse(null) !== lambda ||
-            output.nameAsString != "output" ||
-            output.arguments.size != 2 ||
-            !declaredHolderRootedIn(output, builderName) ||
-            output.arguments[1] !is IntegerLiteralExpr
-        ) {
-            continue
+    val (index, holder) = holders.singleOrNull() ?: return false
+    val declarations = projectSourceDeclarations
+    val receiver = runCatching { declarations.receiverType(call) }.getOrNull() ?: return false
+    if (!declarations.declares(receiver)) return false
+    val candidates = runCatching {
+        declarations.methods(receiver, call.nameAsString, call.arguments.size)
+    }.getOrNull()?.takeIf { it.isNotEmpty() } ?: return false
+
+    var applicable = 0
+    for (candidate in candidates) {
+        val parameters = candidate.declaration.parameters.map { declarations.resolve(it.type, it) }
+        val others = call.arguments.indices.filter { it != index }.map {
+            literalArgumentFit(call.arguments[it], parameters[it], declarations)
         }
-        val holder = output.arguments[0]
-        if (!declaredHolderNeoForgeFluid(holder, unit, source)) continue
-        output.setArgument(
-            0,
-            parser.parseExpression<Expression>("$holder.value()").result.orElseThrow()
-        )
-        changed = true
+        if (others.any { it == HolderFit.NO }) continue
+        val holderFit = platformTypeFit(DEFERRED_HOLDER, parameters[index], declarations)
+        if (holderFit != HolderFit.NO) return false
+        val valueFit = platformTypeFit(holder.valueType, parameters[index], declarations)
+        when {
+            valueFit == HolderFit.NO -> continue
+            valueFit == HolderFit.YES && others.all { it == HolderFit.YES } -> applicable++
+            else -> return false
+        }
     }
-    return changed
+    if (applicable != 1) return false
+    call.setArgument(
+        index,
+        parser.parseExpression<Expression>("${call.arguments[index]}.value()").result.orElseThrow()
+    )
+    return true
 }
 
-private fun declaredHolderExtendsEmptyingRecipeGen(
-    owner: ClassOrInterfaceDeclaration,
-    unit: CompilationUnit,
-    source: String
-): Boolean =
-    owner.methods.none { it.nameAsString == "create" && it.parameters.size == 2 } &&
-        owner.extendedTypes.any { type ->
-            type.nameWithScope == EMPTYING_RECIPE_GEN ||
-                type.nameWithScope == EMPTYING_RECIPE_GEN_SIMPLE &&
-                declaredHolderCanonicalSimpleType(
-                    EMPTYING_RECIPE_GEN_SIMPLE,
-                    EMPTYING_RECIPE_GEN,
-                    unit,
-                    source
-                )
-        }
+private enum class HolderFit { YES, NO, UNKNOWN }
 
-private fun declaredHolderNeoForgeFluid(
+/** Whether a value of the platform class [actual] can be passed as a parameter of type [parameter]. */
+private fun platformTypeFit(
+    actual: String,
+    parameter: TypeRef?,
+    declarations: ProjectSourceDeclarations
+): HolderFit = when (parameter) {
+    null, is TypeRef.Variable -> HolderFit.UNKNOWN
+    is TypeRef.Primitive -> HolderFit.NO
+    is TypeRef.Named -> when {
+        parameter.name == actual || parameter.name == "java.lang.Object" -> HolderFit.YES
+        // a platform class never extends or implements a project type
+        declarations.declares(parameter.name) -> HolderFit.NO
+        else -> {
+            val hierarchy = platformHierarchy(actual)
+            val target = ProjectSourceDeclarations.platformBinary(parameter.name) ?: parameter.name
+            when {
+                hierarchy == null -> HolderFit.UNKNOWN
+                target in hierarchy.types -> HolderFit.YES
+                ProjectSourceDeclarations.platformBinary(parameter.name) != null -> HolderFit.NO
+                parameter.name.startsWith("java.") && !hierarchy.throughJava -> HolderFit.NO
+                else -> HolderFit.UNKNOWN
+            }
+        }
+    }
+}
+
+private class PlatformHierarchy(val types: Set<String>, val throughJava: Boolean)
+
+/** Every supertype the member table lists above [qualifiedName]; null when it is not a platform class. */
+private fun platformHierarchy(qualifiedName: String): PlatformHierarchy? {
+    val binary = ProjectSourceDeclarations.platformBinary(qualifiedName) ?: return null
+    val types = linkedSetOf<String>()
+    var throughJava = false
+    val frontier = ArrayDeque(listOf(binary))
+    while (frontier.isNotEmpty()) {
+        val current = frontier.removeFirst()
+        if (!types.add(current)) continue
+        if (TargetMembers.hasClass(current)) {
+            frontier.addAll(TargetMembers.supertypesOf(current))
+        } else if (current != "java.lang.Object") {
+            // a java.* supertype's own supertypes are not in the table
+            throughJava = true
+        }
+    }
+    return PlatformHierarchy(types, throughJava)
+}
+
+private fun literalArgumentFit(
+    argument: Expression,
+    parameter: TypeRef?,
+    declarations: ProjectSourceDeclarations
+): HolderFit {
+    val accepted = when (argument) {
+        is IntegerLiteralExpr -> setOf("int", "long", "float", "double", "java.lang.Integer", "java.lang.Number")
+        is StringLiteralExpr -> setOf("java.lang.String", "java.lang.CharSequence")
+        is BooleanLiteralExpr -> setOf("boolean", "java.lang.Boolean")
+        is NullLiteralExpr -> return when (parameter) {
+            is TypeRef.Primitive -> HolderFit.NO
+            is TypeRef.Named -> HolderFit.YES
+            else -> HolderFit.UNKNOWN
+        }
+        else -> return HolderFit.UNKNOWN
+    }
+    return when (parameter) {
+        null, is TypeRef.Variable -> HolderFit.UNKNOWN
+        is TypeRef.Primitive -> if (parameter.name in accepted) HolderFit.YES else HolderFit.NO
+        is TypeRef.Named -> when {
+            parameter.name in accepted || parameter.name == "java.lang.Object" -> HolderFit.YES
+            declarations.declares(parameter.name) ||
+                ProjectSourceDeclarations.platformBinary(parameter.name) != null ||
+                parameter.name.startsWith("java.lang.") -> HolderFit.NO
+            else -> HolderFit.UNKNOWN
+        }
+    }
+}
+
+private data class PlatformDeferredHolderField(val owner: String, val name: String, val valueType: String)
+
+/** A static platform field the 1.21.1 member table declares as `DeferredHolder<R, T>` with a plain T. */
+private fun platformDeferredHolderField(
     expression: Expression,
-    unit: CompilationUnit,
-    source: String
-): Boolean {
-    val field = expression as? FieldAccessExpr ?: return false
-    if (field.nameAsString !in setOf("MILK", "FLOWING_MILK")) return false
-    return declaredHolderCanonicalOwner(
-        field.scope,
-        NEO_FORGE_MOD_SIMPLE,
-        NEO_FORGE_MOD,
-        unit,
-        source
-    )
+    unit: CompilationUnit
+): PlatformDeferredHolderField? {
+    val field = expression as? FieldAccessExpr ?: return null
+    if (!Regex("""[A-Z][A-Z0-9_]*""").matches(field.nameAsString)) return null
+    val owner = platformOwnerName(field.scope, unit) ?: return null
+    val binary = ProjectSourceDeclarations.platformBinary(owner) ?: return null
+    val signature = TargetMembers.fieldSignatures(binary)[field.nameAsString] ?: return null
+    val value = deferredHolderValueType(signature) ?: return null
+    return PlatformDeferredHolderField(owner, field.nameAsString, value)
+}
+
+/** The canonical platform class [expression] names: an unshadowed single-type import or a qualified name. */
+private fun platformOwnerName(expression: Expression, unit: CompilationUnit): String? {
+    val name = when (expression) {
+        is NameExpr -> importedTypeName(expression.nameAsString, unit) ?: return null
+        is FieldAccessExpr -> expression.toString().takeIf { text ->
+            text.split('.').let { parts -> parts.first().firstOrNull()?.isLowerCase() == true }
+        } ?: return null
+        else -> return null
+    }
+    return name.takeIf { ProjectSourceDeclarations.platformBinary(it) != null }
+}
+
+private fun importedTypeName(simple: String, unit: CompilationUnit): String? {
+    if (unit.findAll(TypeDeclaration::class.java).any { it.nameAsString == simple }) return null
+    if (unit.findAll(TypeParameter::class.java).any { it.nameAsString == simple }) return null
+    if (unit.findAll(Parameter::class.java).any { it.nameAsString == simple }) return null
+    if (unit.findAll(VariableDeclarator::class.java).any { it.nameAsString == simple }) return null
+    return unit.imports
+        .filter { !it.isStatic && !it.isAsterisk && it.name.identifier == simple }
+        .singleOrNull()
+        ?.nameAsString
+}
+
+/** Cheap admission: the file imports a platform class that declares a `DeferredHolder` constant. */
+private fun importsDeferredHolderOwner(source: String): Boolean =
+    IMPORT.findAll(JavaSourceText.maskCommentsAndLiterals(source)).any { match ->
+        val qualified = match.groupValues[1]
+        val binary = ProjectSourceDeclarations.platformBinary(qualified) ?: return@any false
+        TargetMembers.fieldSignatures(binary).values.any { it.startsWith(DEFERRED_HOLDER_SIGNATURE) } &&
+            source.contains("${qualified.substringAfterLast('.')}.")
+    }
+
+private fun deferredHolderValueType(signature: String): String? {
+    if (!signature.startsWith(DEFERRED_HOLDER_SIGNATURE) || !signature.endsWith(">;")) return null
+    val arguments = signatureArguments(
+        signature.substring(DEFERRED_HOLDER_SIGNATURE.length, signature.length - 2)
+    ) ?: return null
+    val value = arguments.takeIf { it.size == 2 }?.last() ?: return null
+    return plainSignatureClass(value)
+}
+
+/** `Lnet/minecraft/core/DefaultedRegistry<Lnet/.../Fluid;>;` -> `net.minecraft.world.level.material.Fluid`. */
+private fun registryElementType(signature: String): String? {
+    val open = signature.indexOf('<')
+    if (open < 0 || !signature.endsWith(">;")) return null
+    val owner = signature.substring(1, open).replace('/', '.')
+    val registry = owner.replace('$', '.')
+    if (!TargetMembers.inheritsFrom(owner, "net.minecraft.core.Registry") && registry != "net.minecraft.core.Registry") {
+        return null
+    }
+    val arguments = signatureArguments(signature.substring(open + 1, signature.length - 2)) ?: return null
+    return plainSignatureClass(arguments.singleOrNull() ?: return null)
+}
+
+private fun plainSignatureClass(argument: String): String? {
+    if (!argument.startsWith("L") || !argument.endsWith(";") || '<' in argument) return null
+    return argument.substring(1, argument.length - 1).replace('/', '.').replace('$', '.')
+}
+
+private fun signatureArguments(text: String): List<String>? {
+    val parts = mutableListOf<String>()
+    var start = 0
+    var depth = 0
+    for ((index, character) in text.withIndex()) {
+        when (character) {
+            '<' -> depth++
+            '>' -> depth--
+            ';' -> if (depth == 0) {
+                parts += text.substring(start, index + 1)
+                start = index + 1
+            }
+            '*' -> if (depth == 0 && index == start) {
+                parts += "*"
+                start = index + 1
+            }
+        }
+    }
+    return parts.takeIf { start == text.length }
 }
 
 private fun declaredHolderCanonicalStaticField(
@@ -303,14 +441,9 @@ private fun declaredHolderCanonicalSimpleType(
     }
 }
 
-private fun declaredHolderRootedIn(call: MethodCallExpr, name: String): Boolean {
-    var expression = call.scope.orElse(null) ?: return false
-    while (expression is MethodCallExpr) {
-        expression = expression.scope.orElse(null) ?: return false
-    }
-    return (expression as? NameExpr)?.nameAsString == name
-}
-
+private val IMPORT = Regex("""(?m)^\s*import\s+(?!static\b)([\w.]+)\s*;""")
+private const val DEFERRED_HOLDER = "net.neoforged.neoforge.registries.DeferredHolder"
+private const val DEFERRED_HOLDER_SIGNATURE = "Lnet/neoforged/neoforge/registries/DeferredHolder<"
 private const val REGISTRATE_BLOCK_LOOT_TABLES_SIMPLE = "RegistrateBlockLootTables"
 private const val REGISTRATE_BLOCK_LOOT_TABLES =
     "com.tterrag.registrate.providers.loot.RegistrateBlockLootTables"
@@ -319,10 +452,4 @@ private const val APPLY_BONUS_COUNT =
     "net.minecraft.world.level.storage.loot.functions.ApplyBonusCount"
 private const val ENCHANTMENTS_SIMPLE = "Enchantments"
 private const val ENCHANTMENTS = "net.minecraft.world.item.enchantment.Enchantments"
-private const val BUILT_IN_REGISTRIES_SIMPLE = "BuiltInRegistries"
 private const val BUILT_IN_REGISTRIES = "net.minecraft.core.registries.BuiltInRegistries"
-private const val NEO_FORGE_MOD_SIMPLE = "NeoForgeMod"
-private const val NEO_FORGE_MOD = "net.neoforged.neoforge.common.NeoForgeMod"
-private const val EMPTYING_RECIPE_GEN_SIMPLE = "EmptyingRecipeGen"
-private const val EMPTYING_RECIPE_GEN =
-    "com.simibubi.create.api.data.recipe.EmptyingRecipeGen"

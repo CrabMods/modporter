@@ -57,7 +57,7 @@ private val FLATTENABLE_WORLDGEN_VALUE_PROVIDER_TYPES = setOf(
     "uniform",
     "very_biased_to_bottom"
 )
-private val TAG_REFERENCE_VALUE_KEYS = setOf(
+internal val TAG_REFERENCE_VALUE_KEYS = setOf(
     "blockTag",
     "fluidTag",
     "itemTag",
@@ -91,6 +91,39 @@ private val COMMON_TAG_PATH_PREFIX_RENAMES = mapOf(
     "gravel/" to "gravels/",
     "sand/" to "sands/"
 )
+internal fun normalizeCommonTagPath(path: String): String {
+    COMMON_TAG_PATH_RENAMES[path]?.let { return it }
+    for ((from, to) in COMMON_TAG_PATH_PREFIX_RENAMES) {
+        if (path.startsWith(from)) return to + path.removePrefix(from)
+    }
+    return path
+}
+
+/** True when [normalizeCommonTagPath] leaves every path that starts with [prefix] unchanged. */
+internal fun commonTagPathPrefixIsStable(prefix: String): Boolean =
+    COMMON_TAG_PATH_RENAMES.keys.none { it.startsWith(prefix) } &&
+        COMMON_TAG_PATH_PREFIX_RENAMES.keys.none { it.startsWith(prefix) || prefix.startsWith(it) }
+
+/**
+ * Legacy Forge/NeoForge common tag references in data: `#forge:x` anywhere, and a bare
+ * `forge:x` under a key that names a tag ([TAG_REFERENCE_VALUE_KEYS]), move to `c:` with the
+ * 1.21 common-tag path renames.
+ */
+internal fun normalizeLegacyTagReference(currentKey: String?, value: String): String {
+    return when {
+        value.startsWith("#forge:") -> "#c:${normalizeCommonTagPath(value.removePrefix("#forge:"))}"
+        value.startsWith("#neoforge:") -> "#c:${normalizeCommonTagPath(value.removePrefix("#neoforge:"))}"
+        value.startsWith("#c:") -> "#c:${normalizeCommonTagPath(value.removePrefix("#c:"))}"
+        currentKey != null && currentKey in TAG_REFERENCE_VALUE_KEYS && value.startsWith("forge:") ->
+            "c:${normalizeCommonTagPath(value.removePrefix("forge:"))}"
+        currentKey != null && currentKey in TAG_REFERENCE_VALUE_KEYS && value.startsWith("neoforge:") ->
+            "c:${normalizeCommonTagPath(value.removePrefix("neoforge:"))}"
+        currentKey != null && currentKey in TAG_REFERENCE_VALUE_KEYS && value.startsWith("c:") ->
+            "c:${normalizeCommonTagPath(value.removePrefix("c:"))}"
+        else -> value
+    }
+}
+
 private val RESOURCE_ID_RENAMES_121 = mapOf(
     "minecraft:grass" to "minecraft:short_grass",
     "minecraft:block/grass" to "minecraft:block/short_grass"
@@ -261,66 +294,23 @@ class ResourceMigrationPass(
             }
         }
 
-        if (isCreateStructureNbtOwner(projectDir)) {
-            val createStructureNbtPlan = CreateStructureNbtMigrationStage.plan(resourceDirs)
-            if (createStructureNbtPlan.blockers.isNotEmpty()) {
-                errors += createStructureNbtPlan.blockers.map {
-                    "Create structure NBT migration refused: $it"
-                }
-            } else {
-                createStructureNbtPlan.files.forEach { file ->
-                    val migratedPayloads = buildList {
-                        if (file.migratedTankCount > 0) {
-                            add("${file.migratedTankCount} tank FluidStack payload(s)")
-                        }
-                        if (file.migratedAirCount > 0) {
-                            add("${file.migratedAirCount} empty ItemStack payload(s)")
-                        }
-                        if (file.migratedItemCount > 0) {
-                            add("${file.migratedItemCount} nonempty ItemStack payload(s)")
-                        }
-                        if (file.migratedGravityCount > 0) {
-                            add("${file.migratedGravityCount} entity gravity attribute(s)")
-                        }
-                        if (file.migratedEmptyEntityCount > 0) {
-                            add(
-                                "${file.migratedEmptyEntityCount} " +
-                                    "source-proven empty entity wrapper(s)"
-                            )
-                        }
-                    }.joinToString(" and ")
-                    val appliedRuleIds = buildList {
-                        if (file.migratedTankCount > 0) {
-                            add(CreateStructureFluidNbtMigration.RULE_ID)
-                        }
-                        if (file.migratedAirCount > 0) {
-                            add(CreateStructureEmptyItemNbtMigration.RULE_ID)
-                        }
-                        if (file.migratedItemCount > 0) {
-                            add(CreateStructureItemStackNbtMigration.RULE_ID)
-                        }
-                        if (file.migratedGravityCount > 0) {
-                            add(CreateStructureGravityAttributeNbtMigration.RULE_ID)
-                        }
-                        if (file.migratedEmptyEntityCount > 0) {
-                            add(CreateStructureEmptyEntityNbtMigration.RULE_ID)
-                        }
-                    }
-                    val ruleId =
-                        appliedRuleIds.singleOrNull() ?: CreateStructureNbtMigrationStage.RULE_ID
-                    changes += Change(
-                        file = file.path,
-                        line = 0,
-                        description = "Migrate $migratedPayloads in Create structure NBT",
-                        before = file.originalSha256,
-                        after = file.migratedSha256,
-                        confidence = Confidence.HIGH,
-                        ruleId = ruleId
-                    )
-                }
-                if (!dryRun) {
-                    CreateStructureNbtMigrationStage.apply(createStructureNbtPlan)
-                }
+        val structureNbtPlan = LegacyStructureNbtMigration.plan(resourceDirs)
+        if (structureNbtPlan.blockers.isNotEmpty()) {
+            errors += structureNbtPlan.blockers.map { "Legacy structure NBT migration refused: $it" }
+        } else {
+            structureNbtPlan.files.forEach { file ->
+                changes += Change(
+                    file = file.path,
+                    line = 0,
+                    description = "Migrate ${file.counts.describe()} in structure NBT",
+                    before = file.originalSha256,
+                    after = file.migratedSha256,
+                    confidence = Confidence.HIGH,
+                    ruleId = LegacyStructureNbtMigration.RULE_ID
+                )
+            }
+            if (!dryRun) {
+                LegacyStructureNbtMigration.apply(structureNbtPlan)
             }
         }
 
@@ -591,12 +581,6 @@ class ResourceMigrationPass(
         merged["values"] = JsonArray(values.values.toList())
         return RESOURCE_JSON.encodeToString(JsonElement.serializer(), JsonObject(merged)) + "\n"
     }
-
-    private fun isCreateStructureNbtOwner(projectDir: Path): Boolean =
-        listOf(
-            "src/main/java/com/simibubi/create/Create.java",
-            "src/main/java/com/simibubi/create/content/fluids/tank/FluidTankBlockEntity.java"
-        ).all { projectDir.resolve(it).isRegularFile() }
 
     private fun findResourceDirs(projectDir: Path): List<Path> {
         val dirs = mutableListOf<Path>()
@@ -1920,8 +1904,8 @@ class ResourceMigrationPass(
                             modified = true
                             changes.add(Change(
                                 file = file, line = 0,
-                                description = "Preserve stained glass washing ingredients as native tag intersections",
-                                before = "Legacy Forge stained glass item tags",
+                                description = "Preserve legacy Forge item tags NeoForge split into several tags as native tag intersections",
+                                before = "Legacy Forge item tag split by NeoForge",
                                 after = "Native glass kind and dyed tag intersection",
                                 confidence = Confidence.HIGH,
                                 ruleId = "res-create-stained-glass-intersection"
@@ -3601,28 +3585,8 @@ class ResourceMigrationPass(
         }
     }
 
-    private fun normalizeTagReferenceString(currentKey: String?, value: String): String {
-        return when {
-            value.startsWith("#forge:") -> "#c:${normalizeCommonTagPath(value.removePrefix("#forge:"))}"
-            value.startsWith("#neoforge:") -> "#c:${normalizeCommonTagPath(value.removePrefix("#neoforge:"))}"
-            value.startsWith("#c:") -> "#c:${normalizeCommonTagPath(value.removePrefix("#c:"))}"
-            currentKey != null && currentKey in TAG_REFERENCE_VALUE_KEYS && value.startsWith("forge:") ->
-                "c:${normalizeCommonTagPath(value.removePrefix("forge:"))}"
-            currentKey != null && currentKey in TAG_REFERENCE_VALUE_KEYS && value.startsWith("neoforge:") ->
-                "c:${normalizeCommonTagPath(value.removePrefix("neoforge:"))}"
-            currentKey != null && currentKey in TAG_REFERENCE_VALUE_KEYS && value.startsWith("c:") ->
-                "c:${normalizeCommonTagPath(value.removePrefix("c:"))}"
-            else -> value
-        }
-    }
-
-    private fun normalizeCommonTagPath(path: String): String {
-        COMMON_TAG_PATH_RENAMES[path]?.let { return it }
-        for ((from, to) in COMMON_TAG_PATH_PREFIX_RENAMES) {
-            if (path.startsWith(from)) return to + path.removePrefix(from)
-        }
-        return path
-    }
+    private fun normalizeTagReferenceString(currentKey: String?, value: String): String =
+        normalizeLegacyTagReference(currentKey, value)
 
     private fun renameLegacyResourceIds(content: String): String {
         if (RESOURCE_ID_RENAMES_121.keys.none { content.contains("\"$it\"") }) return content

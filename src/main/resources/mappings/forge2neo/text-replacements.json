@@ -1,6 +1,34 @@
 {
   "replacements": [
     {
+      "id": "dynamictrees-tree-helper-class",
+      "pattern": "com.ferreusveritas.dynamictrees.api.TreeHelper",
+      "replacement": "com.dtteam.dynamictrees.tree.TreeHelper",
+      "description": "Dynamic Trees moved TreeHelper to its public tree API package",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "dynamictrees-branch-destruction-data-class",
+      "pattern": "com.ferreusveritas.dynamictrees.util.BranchDestructionData",
+      "replacement": "com.dtteam.dynamictrees.api.network.BranchDestructionData",
+      "description": "Dynamic Trees moved BranchDestructionData to its public network API package",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "dynamictrees-branch-block-class",
+      "pattern": "com.ferreusveritas.dynamictrees.block.branch.BranchBlock",
+      "replacement": "com.dtteam.dynamictrees.block.branch.BranchBlock",
+      "description": "Dynamic Trees moved BranchBlock to the DT Team package root",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "dynamictrees-trunk-shell-block-class",
+      "pattern": "com.ferreusveritas.dynamictrees.block.branch.TrunkShellBlock",
+      "replacement": "com.dtteam.dynamictrees.block.branch.TrunkShellBlock",
+      "description": "Dynamic Trees moved TrunkShellBlock to the DT Team package root",
+      "fileGlob": "*.java"
+    },
+    {
       "id": "pkg-fml",
       "pattern": "net.minecraftforge.fml",
       "replacement": "net.neoforged.fml",
@@ -68,34 +96,6 @@
       "pattern": "ConfigManager.isOldTextures()",
       "replacement": "!ConfigManager.isNewTextures()",
       "description": "Lootr texture mode API renamed from old-texture predicate to new-texture predicate",
-      "fileGlob": "*.java"
-    },
-    {
-      "id": "dynamictrees-tree-helper-class",
-      "pattern": "com.ferreusveritas.dynamictrees.api.TreeHelper",
-      "replacement": "com.dtteam.dynamictrees.tree.TreeHelper",
-      "description": "Dynamic Trees moved TreeHelper to its public tree API package",
-      "fileGlob": "*.java"
-    },
-    {
-      "id": "dynamictrees-branch-destruction-data-class",
-      "pattern": "com.ferreusveritas.dynamictrees.util.BranchDestructionData",
-      "replacement": "com.dtteam.dynamictrees.api.network.BranchDestructionData",
-      "description": "Dynamic Trees moved BranchDestructionData to its public network API package",
-      "fileGlob": "*.java"
-    },
-    {
-      "id": "dynamictrees-branch-block-class",
-      "pattern": "com.ferreusveritas.dynamictrees.block.branch.BranchBlock",
-      "replacement": "com.dtteam.dynamictrees.block.branch.BranchBlock",
-      "description": "Dynamic Trees moved BranchBlock to the DT Team package root",
-      "fileGlob": "*.java"
-    },
-    {
-      "id": "dynamictrees-trunk-shell-block-class",
-      "pattern": "com.ferreusveritas.dynamictrees.block.branch.TrunkShellBlock",
-      "replacement": "com.dtteam.dynamictrees.block.branch.TrunkShellBlock",
-      "description": "Dynamic Trees moved TrunkShellBlock to the DT Team package root",
       "fileGlob": "*.java"
     },
     {
@@ -1429,14 +1429,6 @@
       "isRegex": true
     },
     {
-      "id": "registry-recipe-types-getValue",
-      "pattern": "ForgeRegistries\\.RECIPE_TYPES\\.getValue\\(",
-      "replacement": "BuiltInRegistries.RECIPE_TYPE.get(",
-      "description": "Forge recipe type registry lookup -> vanilla built-in recipe type registry lookup",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "registry-getValue",
       "pattern": "(BuiltInRegistries\\.\\w+|NeoForgeRegistries\\.\\w+)\\.getValue\\(",
       "replacement": "$1.get(",
@@ -1851,6 +1843,14 @@
       "isRegex": true
     },
     {
+      "id": "vanilla-options-controls-package",
+      "pattern": "net\\.minecraft\\.client\\.gui\\.screens\\.controls\\.(ControlsScreen|KeyBindsList|KeyBindsScreen)\\b",
+      "replacement": "net.minecraft.client.gui.screens.options.controls.$1",
+      "description": "Vanilla key-binding screens moved from net.minecraft.client.gui.screens.controls to net.minecraft.client.gui.screens.options.controls in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "blockstate-getBlockState-get",
       "pattern": "\\.getBlockState\\(([^)]*\\))\\s*\\.get\\(",
       "replacement": ".getBlockState($1.getValue(",
@@ -2090,6 +2090,29 @@
       "fileGlob": "*.java"
     },
     {
+      "id": "nbt-stack-getOrCreateTag-putLong",
+      "pattern": "(\\w+)\\.getOrCreateTag\\(\\)\\.putLong\\(([^;]+)\\);",
+      "replacement": "net.minecraft.world.item.component.CustomData.update(net.minecraft.core.component.DataComponents.CUSTOM_DATA, $1, customDataTag -> customDataTag.putLong($2));",
+      "description": "ItemStack.getOrCreateTag().putLong() must write back to CUSTOM_DATA in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "nbt-stack-getOrCreateTag",
+      "pattern": ".getOrCreateTag()",
+      "replacement": ".getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()",
+      "description": "ItemStack.getOrCreateTag() -> DataComponents.CUSTOM_DATA in 1.21",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "distexecutor-import",
+      "pattern": "import net\\.neoforged\\.fml\\.DistExecutor;\\r?\\n",
+      "replacement": "",
+      "isRegex": true,
+      "description": "Remove DistExecutor import; structural pass rewrites active usages to FMLLoader guards",
+      "fileGlob": "*.java"
+    },
+    {
       "id": "gui-renderBackground-remove",
       "pattern": "\\s+renderBackground\\(guiGraphics\\);\\r?\\n",
       "replacement": "",
@@ -2226,6 +2249,14 @@
       "pattern": "\\w+\\.sendTo\\((\\w+),\\s*\\w+\\.connection\\.(?:connection|getConnection\\(\\)),\\s*NetworkDirection\\.PLAY_TO_CLIENT\\)",
       "replacement": "PacketDistributor.sendToPlayer(player, $1)",
       "description": "network.sendTo(pkt, connection, PLAY_TO_CLIENT) -> PacketDistributor.sendToPlayer(player, pkt)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "network-send-player-with",
+      "pattern": "\\w+\\.send\\(PacketDistributor\\.PLAYER\\.with\\((\\w+)\\),\\s*(\\w+)\\)",
+      "replacement": "PacketDistributor.sendToPlayer($1, $2)",
+      "description": "CHANNEL.send(PacketDistributor.PLAYER.with(p), msg) -> PacketDistributor.sendToPlayer(p, msg)",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -2582,6 +2613,14 @@
       "isRegex": true
     },
     {
+      "id": "leveltick-level-accessor",
+      "pattern": "(?<![\\w.])event\\.level\\b",
+      "replacement": "event.getLevel()",
+      "description": "LevelTickEvent.level is private in NeoForge 1.21; use getLevel()",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "saveddata-load-provider",
       "pattern": "((?:(?:public|private|protected|static|final|abstract)\\s+)*class\\s+(\\w+)\\s+extends\\s+SavedData[\\s\\S]*?public\\s+static\\s+\\2\\s+load\\(\\s*CompoundTag\\s+(\\w+)\\s*)\\)",
       "replacement": "$1, HolderLookup.Provider registries)",
@@ -2734,6 +2773,14 @@
       "isRegex": true
     },
     {
+      "id": "net-handler-send-player-lambda",
+      "pattern": "\\w+\\.instance\\.HANDLER\\.send\\(PacketDistributor\\.PLAYER\\.with\\(\\(\\)\\s*->\\s*\\(ServerPlayer\\)\\s*(\\w+)\\),\\s*(\\w+)\\)",
+      "replacement": "PacketDistributor.sendToPlayer((ServerPlayer) $1, $2)",
+      "description": "HANDLER.send(PacketDistributor.PLAYER.with(...), pkt) -> PacketDistributor.sendToPlayer(player, pkt)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "net-instance-packetdist-sendToServer",
       "pattern": "\\w+\\.instance\\.PacketDistributor\\.sendToServer\\(",
       "replacement": "PacketDistributor.sendToServer(",
@@ -2860,6 +2907,21 @@
       "isRegex": true
     },
     {
+      "id": "tick-event-player-rename",
+      "pattern": "TickEvent.PlayerTickEvent",
+      "replacement": "PlayerTickEvent.Post",
+      "description": "TickEvent.PlayerTickEvent -> PlayerTickEvent.Post (1.21)",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "tick-event-phase-end-check-remove",
+      "pattern": "[ \\t]*if \\(event\\.phase != TickEvent\\.Phase\\.END\\) return;\\r?\\n",
+      "replacement": "",
+      "isRegex": true,
+      "description": "Remove TickEvent.Phase.END check after migrating to .Post event in 1.21",
+      "fileGlob": "*.java"
+    },
+    {
       "id": "guava-supplier-import-jdk",
       "pattern": "import com.google.common.base.Supplier;",
       "replacement": "import java.util.function.Supplier;",
@@ -2943,6 +3005,89 @@
       "fileGlob": "*.java"
     },
     {
+      "id": "tick-event-rename",
+      "pattern": "TickEvent.ClientTickEvent",
+      "replacement": "ClientTickEvent",
+      "description": "TickEvent.ClientTickEvent -> ClientTickEvent (1.21)",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "tick-event-server-rename",
+      "pattern": "TickEvent.ServerTickEvent",
+      "replacement": "ServerTickEvent",
+      "description": "TickEvent.ServerTickEvent -> ServerTickEvent (1.21)",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "tick-event-level-rename",
+      "pattern": "TickEvent.LevelTickEvent",
+      "replacement": "LevelTickEvent",
+      "description": "TickEvent.LevelTickEvent -> LevelTickEvent (1.21)",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "tick-event-nested-import-render",
+      "pattern": "import net\\.(?:minecraftforge|neoforged\\.neoforge)\\.event\\.TickEvent\\.RenderTickEvent;",
+      "replacement": "import net.neoforged.neoforge.client.event.RenderFrameEvent;",
+      "description": "Nested TickEvent.RenderTickEvent import -> net.neoforged.neoforge.client.event.RenderFrameEvent (before the qualified rename turns the import into a wrong package)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tick-event-nested-render-parameter",
+      "pattern": "(?<![\\w$.])RenderTickEvent(\\s+[A-Za-z_$][\\w$]*\\s*\\))",
+      "replacement": "RenderFrameEvent.Post$1",
+      "description": "A RenderTickEvent parameter imported as a nested class -> RenderFrameEvent.Post, like TickEvent.RenderTickEvent",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tick-event-render-rename",
+      "pattern": "TickEvent.RenderTickEvent",
+      "replacement": "RenderFrameEvent.Post",
+      "description": "TickEvent.RenderTickEvent -> RenderFrameEvent.Post (1.21)",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "import-render-frame-event",
+      "pattern": "(import net\\.neoforged\\.neoforge\\.client\\.event\\.ClientTickEvent;)\\r?\\n(?!import net\\.neoforged\\.neoforge\\.client\\.event\\.RenderFrameEvent;)",
+      "replacement": "$1\nimport net.neoforged.neoforge.client.event.RenderFrameEvent;\n",
+      "description": "Add RenderFrameEvent import alongside ClientTickEvent",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tick-event-phase-end-return",
+      "pattern": "if \\(event\\.phase == TickEvent\\.Phase\\.END\\) \\{\\r?\\n[^\\S\\r\\n]*return;\\r?\\n[^\\S\\r\\n]*\\}",
+      "replacement": "",
+      "description": "Remove TickEvent.Phase.END guard (NeoForge uses Pre/Post subevents)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tick-event-phase-start-return",
+      "pattern": "if \\(event\\.phase == TickEvent\\.Phase\\.START\\) \\{\\r?\\n[^\\S\\r\\n]*return;\\r?\\n[^\\S\\r\\n]*\\}",
+      "replacement": "",
+      "description": "Remove TickEvent.Phase.START guard (NeoForge uses Pre/Post subevents)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tick-event-phase-check-neq",
+      "pattern": "if \\(event\\.phase != TickEvent\\.Phase\\.(START|END)\\)[^{]*\\{\\r?\\n[^\\S\\r\\n]*return;\\r?\\n[^\\S\\r\\n]*\\}",
+      "replacement": "",
+      "description": "Remove TickEvent.Phase != check (NeoForge uses Pre/Post subevents)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "render-tick-time-field",
+      "pattern": "event\\.renderTickTime",
+      "replacement": "Minecraft.getInstance().getTimer().getRealtimeDeltaTicks()",
+      "description": "event.renderTickTime -> Minecraft.getInstance().getTimer().getRealtimeDeltaTicks() (1.21)",
+      "fileGlob": "*.java"
+    },
+    {
       "id": "get-delta-frame-time",
       "pattern": "Minecraft\\.getInstance\\(\\)\\.getDeltaFrameTime\\(\\)",
       "replacement": "Minecraft.getInstance().getTimer().getRealtimeDeltaTicks()",
@@ -2951,12 +3096,26 @@
       "isRegex": true
     },
     {
+      "id": "import-tick-event-replace",
+      "pattern": "import net.neoforged.neoforge.event.TickEvent;",
+      "replacement": "import net.neoforged.neoforge.client.event.ClientTickEvent;\nimport net.neoforged.neoforge.event.tick.ServerTickEvent;\nimport net.neoforged.neoforge.event.tick.LevelTickEvent;\nimport net.neoforged.neoforge.event.tick.PlayerTickEvent;",
+      "description": "Replace TickEvent import with specific tick event imports (1.21)",
+      "fileGlob": "*.java"
+    },
+    {
       "id": "sound-events-get-remove",
       "pattern": "SoundEvents\\.(\\w+)\\.get\\(\\)",
       "replacement": "SoundEvents.$1.value()",
       "description": "SoundEvents.xxx.get() -> SoundEvents.xxx.value() (Holder<SoundEvent> in 1.21)",
       "fileGlob": "*.java",
       "isRegex": true
+    },
+    {
+      "id": "gui-overlay-import-remove",
+      "pattern": "import net.neoforged.neoforge.client.gui.overlay.IGuiOverlay;",
+      "replacement": "import net.minecraft.client.gui.LayeredDraw;",
+      "description": "IGuiOverlay removed in 1.21 - use LayeredDraw.Layer",
+      "fileGlob": "*.java"
     },
     {
       "id": "gui-overlay-vanilla-import-remove",
@@ -3034,6 +3193,30 @@
       "replacement": "",
       "isRegex": true,
       "description": "Remove .endVertex() calls - no longer needed in 1.21",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "clienttickevent-param",
+      "pattern": "(ClientTickEvent)(?!\\.)\\s+(\\w+)\\)",
+      "replacement": "ClientTickEvent.Post $2)",
+      "isRegex": true,
+      "description": "ClientTickEvent -> ClientTickEvent.Post in method parameters",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "servertickevent-param",
+      "pattern": "(ServerTickEvent)(?!\\.)\\s+(\\w+)\\)",
+      "replacement": "ServerTickEvent.Post $2)",
+      "isRegex": true,
+      "description": "ServerTickEvent -> ServerTickEvent.Post in method parameters",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "leveltickevent-param",
+      "pattern": "(LevelTickEvent)(?!\\.)\\s+(\\w+)\\)",
+      "replacement": "LevelTickEvent.Post $2)",
+      "isRegex": true,
+      "description": "LevelTickEvent -> LevelTickEvent.Post in method parameters",
       "fileGlob": "*.java"
     },
     {
@@ -3362,22 +3545,6 @@
       "isRegex": true
     },
     {
-      "id": "vanilla-enchantment-table-block-entity-rename",
-      "pattern": "\\bEnchantmentTableBlockEntity\\b",
-      "replacement": "EnchantingTableBlockEntity",
-      "description": "EnchantmentTableBlockEntity was renamed to EnchantingTableBlockEntity in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "vanilla-enchantment-table-block-rename",
-      "pattern": "\\bEnchantmentTableBlock\\b",
-      "replacement": "EnchantingTableBlock",
-      "description": "EnchantmentTableBlock was renamed to EnchantingTableBlock in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "blockentity-super-ondatapacket-provider",
       "pattern": "super\\.onDataPacket\\(\\s*net\\s*,\\s*pkt\\s*\\)",
       "replacement": "super.onDataPacket(connection, pkt, lookupProvider)",
@@ -3622,6 +3789,22 @@
       "pattern": "\\b(BuiltInRegistries\\.[A-Z][A-Z0-9_]*)\\s*\\.\\s*getKeys\\(\\)",
       "replacement": "$1.keySet()",
       "description": "IForgeRegistry#getKeys() (Set<ResourceLocation>) is vanilla Registry#keySet() on a BuiltInRegistries constant (javap of forge-1.20.1 and the 1.21.1 member table)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "vanilla-sharedconstants-chat-filter-to-stringutil",
+      "pattern": "(?<![\\w$.])(?:net\\.minecraft\\.)?SharedConstants\\s*\\.\\s*(isAllowedChatCharacter|filterText)\\s*\\(",
+      "replacement": "net.minecraft.util.StringUtil.$1(",
+      "description": "1.20.1 SharedConstants.isAllowedChatCharacter(C)Z and filterText(String[,Z]) live on net.minecraft.util.StringUtil in 1.21.1 (srg-mojang-1.20.1 vs target-members-1.21.1)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "forge-capability-provider-caps-compatible",
+      "pattern": "(?<![\\w$.])[A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*\\s*\\.\\s*areCapsCompatible\\s*\\(\\s*[A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*\\s*\\)",
+      "replacement": "true",
+      "description": "Forge CapabilityProvider.areCapsCompatible compared serialized capability data; NeoForge 1.21.1 item stacks carry no capability data (no areCapsCompatible in target-members-1.21.1), so two stacks are always capability-compatible. Only side-effect-free name/field operands are rewritten.",
       "fileGlob": "*.java",
       "isRegex": true
     }

@@ -53,15 +53,14 @@ internal object CreateStationMapRuntimeValidation {
             "net/minecraft/client/gui/MapRenderer.class",
         "net.neoforged.neoforge.client.gui.map.MapDecorationRendererManager" to
             "net/neoforged/neoforge/client/gui/map/MapDecorationRendererManager.class",
-        "com.simibubi.create.AllMapDecorationTypes" to
-            "com/simibubi/create/AllMapDecorationTypes.class",
         "com.simibubi.create.content.trains.station.StationMarker" to
             "com/simibubi/create/content/trains/station/StationMarker.class",
         "com.simibubi.create.content.trains.station.StationMapData" to
-            "com/simibubi/create/content/trains/station/StationMapData.class",
-        "com.simibubi.create.foundation.map.StationMapDecorationRenderer" to
-            "com/simibubi/create/foundation/map/StationMapDecorationRenderer.class"
+            "com/simibubi/create/content/trains/station/StationMapData.class"
     )
+    private const val STATION_MARKER = "com.simibubi.create.content.trains.station.StationMarker"
+    private const val STATION_TYPE_NAMESPACE = "create"
+    private val binaryClassName = Regex("""^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$""")
 
     internal data class Context(
         val spawnProfileId: String,
@@ -111,8 +110,13 @@ internal object CreateStationMapRuntimeValidation {
         if (bindings != context.bindings) {
             issues += "station receipt bindings do not exactly match the sealed manifest"
         }
+        val rendererClass = station["scenarios"]?.arrayOrNull()?.singleOrNull()?.objectOrNull()
+            ?.get("observations")?.objectOrNull()
+            ?.get("firstPersonNativeRenderer")?.objectOrNull()
+            ?.let { string(it, "productionDelegateClass") }
+            ?.takeIf(binaryClassName::matches)
         station["runtime"]?.objectOrNull()?.let {
-            issues += verifyRuntime(context, it)
+            issues += verifyRuntime(context, it, rendererClass)
         } ?: run { issues += "station receipt runtime must be an object" }
 
         val scenarios = station["scenarios"]?.arrayOrNull()
@@ -432,12 +436,10 @@ internal object CreateStationMapRuntimeValidation {
             "firstPersonNativeRenderer",
             issues
         )
-        requireString(
-            value,
-            "productionDelegateClass",
-            "com.simibubi.create.foundation.map.StationMapDecorationRenderer",
-            issues
-        )
+        // the renderer the converted mod registered for its station type; verifyRuntime binds its class
+        if (string(value, "productionDelegateClass")?.let(binaryClassName::matches) != true) {
+            issues += "productionDelegateClass must name the production renderer class"
+        }
         for (key in listOf(
             "productionDelegateReturned", "renderThread", "itemInHandRenderMapFrame",
             "mapRendererRenderFrame", "mapInstanceDrawFrame", "rendererManagerRenderFrame"
@@ -510,7 +512,9 @@ internal object CreateStationMapRuntimeValidation {
         issues: MutableList<String>
     ) {
         exactKeys(value, setOf("typeKey", "x", "y", "rotation", "name"), label, issues)
-        requireString(value, "typeKey", "create:station", issues)
+        if (string(value, "typeKey")?.substringBefore(':') != STATION_TYPE_NAMESPACE) {
+            issues += "$label typeKey must be a $STATION_TYPE_NAMESPACE map decoration type"
+        }
         if (int(value, "x") == null || int(value, "y") == null) {
             issues += "$label x/y must be integers"
         }
@@ -518,7 +522,7 @@ internal object CreateStationMapRuntimeValidation {
         if (string(value, "name").isNullOrBlank()) issues += "$label name must be non-empty"
     }
 
-    private fun verifyRuntime(context: Context, runtime: JsonObject): List<String> {
+    private fun verifyRuntime(context: Context, runtime: JsonObject, rendererClass: String?): List<String> {
         val issues = mutableListOf<String>()
         exactKeys(
             runtime,
@@ -574,6 +578,14 @@ internal object CreateStationMapRuntimeValidation {
             val expectedResources = linkedMapOf<String, String>().apply {
                 putAll(requiredClassResources)
                 if (harnessClass != null && harnessResource != null) put(harnessClass, harnessResource)
+                if (rendererClass != null) put(rendererClass, rendererClass.replace('.', '/') + ".class")
+            }
+            if (rendererClass == null) {
+                issues += "the production renderer class is not recorded"
+            } else if (classResources[rendererClass]?.objectOrNull()?.let { string(it, "origin") } !=
+                classResources[STATION_MARKER]?.objectOrNull()?.let { string(it, "origin") }
+            ) {
+                issues += "the production renderer $rendererClass is not loaded from the converted mod"
             }
             exactKeys(classResources, expectedResources.keys, "classResources", issues)
             for ((className, expectedResource) in expectedResources) {

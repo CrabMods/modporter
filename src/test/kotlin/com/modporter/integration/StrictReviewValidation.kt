@@ -3,7 +3,8 @@ package com.modporter.integration
 import com.modporter.core.pipeline.Change
 import com.modporter.core.pipeline.Confidence
 import com.modporter.core.pipeline.PipelineResult
-import com.modporter.core.transforms.structural.CreateCopperDataMapMigration
+import com.modporter.core.transforms.build.CopperDataMapMigration
+import com.modporter.core.transforms.structural.LegacyCustomMapDecorations
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -38,7 +39,8 @@ import kotlin.math.abs
 
 internal object StrictSpawnValidationContract {
     const val RULE_ID = "struct-legacy-client-spawn-factory"
-    const val STATION_RULE_ID = "struct-create-native-station-map-decoration"
+    /** Map decorations that drew themselves got registered types and renderers: the station map scenario runs. */
+    const val STATION_RULE_ID = LegacyCustomMapDecorations.RULE_ID
     const val PROFILE_ID = "legacy-client-spawn-factory/package-entity/v1"
     const val RECEIPT_SCHEMA = "modporter.strict-review.legacy-client-spawn-factory.v1"
     const val MANIFEST_SCHEMA = "modporter.strict-review.legacy-client-spawn-manifest.v1"
@@ -349,44 +351,41 @@ internal object StrictReviewValidationRegistry {
         )
     }
 
+    /**
+     * The converted station map family, by what it does rather than by the classes holding it: Create's
+     * StationMapData interface, a map decoration type registered through a MAP_DECORATION_TYPE
+     * DeferredRegister, and an IMapDecorationRenderer registered from RegisterMapDecorationRenderersEvent.
+     * The runtime scenario then proves the station decoration carries that type and renders through it.
+     */
     private fun validateGeneratedStationMapFamily(modDir: Path): List<String> {
-        val expected = linkedMapOf(
-            "src/main/java/com/simibubi/create/AllMapDecorationTypes.java" to
-                listOf(
-                    "STATION_MAP_DECORATION",
-                    "DeferredRegister.create(Registries.MAP_DECORATION_TYPE"
-                ),
-            "src/main/java/com/simibubi/create/content/trains/station/StationMapData.java" to
-                listOf("interface StationMapData", "addStationMarker"),
-            "src/main/java/com/simibubi/create/foundation/map/StationMapDecorationRenderer.java" to
-                listOf("implements IMapDecorationRenderer", "boolean render("),
-            "src/main/java/com/simibubi/create/foundation/map/StationMapDecorationEvents.java" to
-                listOf(
-                    "RegisterMapDecorationRenderersEvent",
-                    "new StationMapDecorationRenderer()"
-                )
-        )
         val issues = mutableListOf<String>()
-        for ((relative, markers) in expected) {
-            val file = modDir.resolve(relative).normalize()
-            if (!file.isRegularFile(LinkOption.NOFOLLOW_LINKS)) {
-                issues += "Generated Create station-map family is missing: $relative"
-                continue
-            }
-            val source = file.readText()
-            val missingMarkers = markers.filterNot(source::contains)
-            if (missingMarkers.isNotEmpty()) {
-                issues +=
-                    "Generated Create station-map family drifted: $relative lacks ${missingMarkers.joinToString()}"
+        val stationData = modDir.resolve(
+            "src/main/java/com/simibubi/create/content/trains/station/StationMapData.java"
+        ).normalize()
+        if (!stationData.isRegularFile(LinkOption.NOFOLLOW_LINKS)) {
+            issues += "Converted Create station-map family lacks StationMapData"
+        } else {
+            val source = stationData.readText()
+            listOf("interface StationMapData", "addStationMarker").filterNot(source::contains).takeIf { it.isNotEmpty() }?.let {
+                issues += "Converted Create station-map family drifted: StationMapData lacks ${it.joinToString()}"
             }
         }
-        val texture = modDir.resolve(
-            "src/main/resources/assets/create/textures/map/decorations/station.png"
-        ).normalize()
-        if (!texture.isRegularFile(LinkOption.NOFOLLOW_LINKS) ||
-            texture.readBytes().isEmpty()
-        ) {
-            issues += "Generated Create station-map texture is missing or empty"
+        val javaRoot = modDir.resolve("src/main/java")
+        val sources = if (javaRoot.isDirectory()) Files.walk(javaRoot).use { paths ->
+            paths.filter { it.isRegularFile(LinkOption.NOFOLLOW_LINKS) && it.toString().endsWith(".java") }
+                .map { it.readText() }
+                .toList()
+        } else emptyList()
+        val markers = listOf(
+            "DeferredRegister.create(Registries.MAP_DECORATION_TYPE",
+            "RegisterMapDecorationRenderersEvent",
+            "implements IMapDecorationRenderer"
+        )
+        for (marker in markers) {
+            if (sources.none { it.contains(marker) }) issues += "Converted Create station-map family lacks $marker"
+        }
+        if (sources.none { it.contains("RegisterMapDecorationRenderersEvent") && it.contains("event.register(") }) {
+            issues += "Converted Create station-map family registers no map decoration renderer"
         }
         return issues
     }
@@ -1037,7 +1036,7 @@ internal object StrictReviewValidationRegistry {
         check(string(root, "caseId") == "create") {
             "Create data-generation receipt belongs to another benchmark case"
         }
-        check(string(root, "ruleId") == CreateCopperDataMapMigration.RULE_ID) {
+        check(string(root, "ruleId") == CopperDataMapMigration.PROVIDER_RULE_ID) {
             "Create data-generation receipt rule differs"
         }
         check(receiptPath(root, "buildRoot") == profile.convertedBuildRoot.toAbsolutePath().normalize()) {

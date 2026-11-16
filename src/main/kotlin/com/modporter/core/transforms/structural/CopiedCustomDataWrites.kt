@@ -54,7 +54,8 @@ internal object CopiedCustomDataWrites {
             val e = Regex.escape(tag)
             val written = Regex("""(?<![\w$.])$e\s*\.\s*(?:put\w*|remove|merge|getCompound|getList)\s*\(|[(,]\s*$e\s*[,)]""").containsMatchIn(span)
             if (!written ||
-                Regex("""\b(?:return|throw|break|continue|yield)\b""").containsMatchIn(span) ||
+                // an exit inside a lambda or anonymous class body does not leave this block
+                Regex("""\b(?:return|throw|break|continue|yield)\b""").containsMatchIn(withoutNestedBodies(span)) ||
                 Regex("""(?<![\w$.])$e\s*=(?!=)|=\s*$e\s*;""").containsMatchIn(span) ||
                 Regex("""(?<![\w$])(?:this\s*\.\s*)?$stack\s*=(?!=)""").containsMatchIn(span) ||
                 Regex("""(?<![\w$])(?:this\s*\.\s*)?$stack\s*\.\s*set\s*\(\s*(?:net\.minecraft\.core\.component\.)?DataComponents\.CUSTOM_DATA""")
@@ -64,6 +65,17 @@ internal object CopiedCustomDataWrites {
             insertions += (last.second + 1) to "\n$indent${receiver.trim()}.set($SET_BACK($tag));"
         }
         return insertions.sortedByDescending { it.first }.fold(source) { text, (at, insertion) -> text.substring(0, at) + insertion + text.substring(at) }
+    }
+
+    /** [masked] with the bodies of lambdas (`-> { ... }`) and anonymous classes (`new X(...) { ... }`) blanked. */
+    private fun withoutNestedBodies(masked: String): String {
+        val chars = masked.toCharArray()
+        Regex("""->\s*\{|\bnew\s+[\w$.<>?, ]+\([^;{}]*\)\s*\{""").findAll(masked).forEach { opener ->
+            val open = opener.range.last
+            val close = JavaSourceText.matchingBrace(masked, open)
+            if (close > open) for (index in open..close) chars[index] = ' '
+        }
+        return String(chars)
     }
 
     private fun statements(source: String): String {

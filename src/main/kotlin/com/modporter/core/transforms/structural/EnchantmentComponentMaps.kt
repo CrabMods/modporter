@@ -4,7 +4,6 @@ import com.github.javaparser.JavaParser
 import com.github.javaparser.ParserConfiguration
 import com.github.javaparser.ast.body.VariableDeclarator
 import com.github.javaparser.ast.body.MethodDeclaration
-import com.github.javaparser.ast.body.TypeDeclaration
 import com.github.javaparser.ast.expr.AssignExpr
 import com.github.javaparser.ast.expr.EnclosedExpr
 import com.github.javaparser.ast.expr.Expression
@@ -24,7 +23,6 @@ internal fun StructuralRefactorPass.migrateEnchantmentComponentMaps(source: Stri
     val parser = JavaParser(ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE))
     val unit = parser.parse(source).result.orElse(null) ?: return source
     val typing = SourceValueTypes(this, source)
-    val exact = ExactJavaSemantics(unit)
     val starts = buildList { add(0); source.forEachIndexed { i, c -> if (c == '\n') add(i + 1) } }
     fun offset(node: com.github.javaparser.ast.Node) = node.range.map { starts[it.begin.line - 1] + it.begin.column - 1 }.orElse(0)
     LexicalPreservingPrinter.setup(unit)
@@ -66,7 +64,9 @@ internal fun StructuralRefactorPass.migrateEnchantmentComponentMaps(source: Stri
                         "net.minecraft.core.Holder<net.minecraft.world.item.enchantment.Enchantment>",
                         "$enchantmentsName.keySet().contains($enchantmentName)",
                     )
-                exactRawEnchantmentReference(argument, exact) ->
+                typing.typeOf(argument.toString(), offset(argument)) ==
+                    "net.minecraft.world.item.enchantment.Enchantment" &&
+                    sideEffectFreeEnchantmentReference(argument) ->
                     oneTimePredicate(
                         receiver,
                         argument,
@@ -128,44 +128,6 @@ internal fun StructuralRefactorPass.migrateEnchantmentComponentMaps(source: Stri
         loopChanged = true
     }
     return if (loopChanged) LexicalPreservingPrinter.print(loops) else intermediate
-}
-
-private fun exactRawEnchantmentReference(
-    expression: Expression,
-    exact: ExactJavaSemantics,
-): Boolean {
-    if (!sideEffectFreeEnchantmentReference(expression)) return false
-    if (exact.isProvablyType(
-            expression,
-            "Enchantment",
-            "net.minecraft.world.item.enchantment.Enchantment",
-        )
-    ) {
-        return true
-    }
-    var unwrapped = expression
-    while (unwrapped is EnclosedExpr) unwrapped = unwrapped.inner
-    val field = unwrapped as? FieldAccessExpr ?: return false
-    val thisScope = field.scope as? ThisExpr ?: return false
-    val owners = generateSequence(field.parentNode.orElse(null)) {
-        it.parentNode.orElse(null)
-    }.filterIsInstance<TypeDeclaration<*>>().toList()
-    val qualifiedOwner = thisScope.typeName.map { it.asString() }.orElse(null)
-    val owner = if (qualifiedOwner == null) {
-        owners.firstOrNull()
-    } else {
-        owners.filter { it.nameAsString == qualifiedOwner }.singleOrNull()
-    } ?: return false
-    val declaration = owner.fields
-        .flatMap { it.variables }
-        .filter { it.nameAsString == field.nameAsString }
-        .singleOrNull()
-        ?: return false
-    return exact.exactTypeReference(
-        declaration.typeAsString,
-        "Enchantment",
-        "net.minecraft.world.item.enchantment.Enchantment",
-    )
 }
 
 private fun sideEffectFreeEnchantmentReference(expression: Expression): Boolean = when (expression) {

@@ -33,6 +33,8 @@ import com.modporter.core.transforms.util.JavaScopedDeclarations
 import com.modporter.core.transforms.util.JavaSourceText
 import com.modporter.mapping.TargetMembers
 import java.nio.file.Path
+import kotlin.io.path.createDirectories
+import kotlin.io.path.exists
 import kotlin.io.path.extension
 import kotlin.io.path.isDirectory
 import kotlin.io.path.readText
@@ -92,19 +94,119 @@ internal object ProviderArityRepair {
         val providerNames = project.methods.values.flatMap { byName -> byName.filterValues { shapes -> shapes.any { it.providerIndex != null } }.keys }.toSet() +
             project.constructors.filterValues { shapes -> shapes.any { it.providerIndex != null } }.keys
         val changes = mutableListOf<Change>()
+        val compatPackage = runCatching { with(pass) { detectRequiredGeneratedCompatPackage(projectDir, "live registry access") } }.getOrNull()
+        val live = compatPackage?.let { "$it.$LIVE_REGISTRIES.current()" }
+        var liveUsed = false
         for ((file, source) in sources) {
             val relocatedCalls = repairCatnipUnsafeItemComponents(pass, source)
             val contractedCalls = repairRemovedTrailingNullArguments(pass, relocatedCalls, project)
-            val repairedCalls = repair(pass, contractedCalls, project, providerNames, index)
+            val repairedCalls = repair(pass, contractedCalls, project, providerNames, index, live)
             val repairedFluidWrites = repairFluidStackWrites(pass, repairedCalls, index)
             val repairedFluidReads = repairStaticRegistryFluidReads(pass, repairedFluidWrites, index)
-            val repaired = repairDetachedBlockEntityLookups(pass, repairedFluidReads)
+            val repairedLookups = repairDetachedBlockEntityLookups(pass, repairedFluidReads)
+            val repaired = repairResidualStackSerialization(pass, repairedLookups, index, live)
             if (repaired == originalSources[file]) continue
+            if (live != null && repaired.contains(live)) liveUsed = true
             if (!dryRun) file.writeText(repaired)
             changes += Change(file, 1, "Calls match their source-proven target arity",
                 "stale call arity", "target arity with the provider in scope when required", Confidence.HIGH, RULE_ID)
         }
+        if (liveUsed && compatPackage != null) {
+            val helper = srcDir.resolve(compatPackage.replace('.', '/')).resolve("$LIVE_REGISTRIES.java")
+            val content = liveRegistriesSource(compatPackage)
+            if (!helper.exists() || helper.readText() != content) {
+                if (!dryRun) {
+                    helper.parent.createDirectories()
+                    helper.writeText(content)
+                }
+                changes += Change(helper, 1, "Generate the live registry access used where no registry provider is in scope",
+                    "provider-less 1.20.1 item data access", "$compatPackage.$LIVE_REGISTRIES.current()", Confidence.HIGH, RULE_ID)
+            }
+        }
         return changes
+    }
+
+    private const val LIVE_REGISTRIES = "ModPorterRegistries"
+
+    /**
+     * 1.20.1 read and wrote item data through the global registries. 1.21.1 needs the registries of
+     * the running game for data-driven entries (enchantments and the like); where 1.20.1 code holds
+     * no level, entity or provider, the running game's registries are the same ones a provider in
+     * scope would carry: the server's on its thread, the client level's on the client. With no world
+     * running (data generation, for one) there are only the built-in registries, which are exactly the
+     * registries 1.20.1 encoded item data against; data-driven entries then fail in their codec.
+     */
+    private fun liveRegistriesSource(compatPackage: String): String = """
+        |package $compatPackage;
+        |
+        |/** The running game's registries, for code that had no registry provider in scope in 1.20.1. */
+        |public final class $LIVE_REGISTRIES {
+        |    private $LIVE_REGISTRIES() {
+        |    }
+        |
+        |    public static net.minecraft.core.HolderLookup.Provider current() {
+        |        net.minecraft.server.MinecraftServer server = net.neoforged.neoforge.server.ServerLifecycleHooks.getCurrentServer();
+        |        if (server != null && server.isSameThread())
+        |            return server.registryAccess();
+        |        if (net.neoforged.fml.loading.FMLEnvironment.dist.isClient()) {
+        |            net.minecraft.core.HolderLookup.Provider client = Client.registries();
+        |            if (client != null)
+        |                return client;
+        |        }
+        |        if (server != null)
+        |            return server.registryAccess();
+        |        // no world: the built-in registries, the ones 1.20.1 item data was encoded against
+        |        return net.minecraft.core.RegistryAccess.fromRegistryOfRegistries(net.minecraft.core.registries.BuiltInRegistries.REGISTRY);
+        |    }
+        |
+        |    private static final class Client {
+        |        static net.minecraft.core.HolderLookup.Provider registries() {
+        |            net.minecraft.client.Minecraft minecraft = net.minecraft.client.Minecraft.getInstance();
+        |            net.minecraft.client.multiplayer.ClientLevel level = minecraft == null ? null : minecraft.level;
+        |            return level == null ? null : level.registryAccess();
+        |        }
+        |    }
+        |}
+        |""".trimMargin()
+
+    /**
+     * ItemStack serialization 1.20.1 did without registries that the earlier rules left for want of
+     * a provider: `stack.serializeNBT()` and `ItemStack.of(tag)`. A provider in scope is preferred;
+     * otherwise [live] (the running game's registries) is used.
+     */
+    private fun repairResidualStackSerialization(pass: StructuralRefactorPass, source: String, index: JavaInheritanceIndex, live: String?): String {
+        if (!source.contains(".serializeNBT()") && !source.contains("ItemStack.of(")) return source
+        val values = SourceValueTypes(pass, source)
+        val masked = JavaSourceText.maskCommentsAndLiterals(source)
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        fun provider(at: Int): String? = with(pass) {
+            registryAccessExpressionAt(source, at, index) ?: minecraftServerRegistryAccessAt(source, at)
+        }?.let { with(pass) { holderLookupProviderArgumentExpression(it) } } ?: live
+        Regex("""\.\s*serializeNBT\s*\(\s*\)""").findAll(masked).forEach { call ->
+            val start = with(pass) { findExpressionReceiverStart(masked, call.range.first) }
+            if (start !in 0 until call.range.first) return@forEach
+            val receiver = source.substring(start, call.range.first).trim()
+            if (values.typeOf(receiver, call.range.first) != "net.minecraft.world.item.ItemStack") return@forEach
+            val registries = provider(start) ?: return@forEach
+            // serializeNBT returned the CompoundTag that saveOptional returns as a Tag
+            edits += start..call.range.last to "net.minecraft.nbt.CompoundTag.class.cast($receiver.saveOptional($registries))"
+        }
+        Regex("""(?<![\w$.])(?:net\.minecraft\.world\.item\.)?ItemStack\s*\.\s*of\s*\(""").findAll(masked).forEach { call ->
+            // the platform ItemStack: spelled out, or the simple name imported from it
+            if (!call.value.startsWith("net.") &&
+                !Regex("""(?m)^\s*import\s+net\.minecraft\.world\.item\.(?:ItemStack|\*)\s*;""").containsMatchIn(masked)
+            ) {
+                return@forEach
+            }
+            val close = JavaSourceText.matchingParen(masked, call.range.last)
+            if (close < 0) return@forEach
+            val args = JavaSourceText.splitTopLevelArgs(source.substring(call.range.last + 1, close))
+            if (args.size != 1) return@forEach
+            val registries = provider(call.range.first) ?: return@forEach
+            edits += call.range.first..close to "net.minecraft.world.item.ItemStack.parseOptional($registries, ${args.single().trim()})"
+        }
+        if (edits.isEmpty()) return source
+        return edits.sortedByDescending { it.first.first }.fold(source) { text, (range, replacement) -> text.replaceRange(range, replacement) }
     }
 
     /**
@@ -850,7 +952,14 @@ internal object ProviderArityRepair {
         return result
     }
 
-    private fun repair(pass: StructuralRefactorPass, source: String, project: Project, projectProviderNames: Set<String>, index: JavaInheritanceIndex): String {
+    private fun repair(
+        pass: StructuralRefactorPass,
+        source: String,
+        project: Project,
+        projectProviderNames: Set<String>,
+        index: JavaInheritanceIndex,
+        live: String? = null
+    ): String {
         var result = repairCompoundListMethodReferences(pass, source, project, index)
         var cursor = 0
         var valueSource: String? = null
@@ -951,7 +1060,10 @@ internal object ProviderArityRepair {
                             } ?: continue // A declared, unmodeled field chain is not proof for an extra argument.
                         }
                     }
-                    methodProviderIndex(name, arguments.size, receiverTypes, project)
+                    val argumentTypes = arguments.map { argument ->
+                        expressionType(argument.trim(), match.range.first)
+                    }.takeIf { types -> types.none { it == null } }?.filterNotNull()
+                    methodProviderIndex(name, arguments.size, receiverTypes, project, argumentTypes)
                 }
             } ?: continue
             val registryAccess = with(pass) {
@@ -966,7 +1078,7 @@ internal object ProviderArityRepair {
                     ?: registryAccessExpressionAt(result, match.range.first, index)
                     ?: minecraftServerRegistryAccessAt(result, match.range.first)
                     ?: bindings().enclosingLevelAccessorRegistryAccessAt(match.range.first)
-            } ?: continue
+            } ?: live ?: continue
             val provider = with(pass) { holderLookupProviderArgumentExpression(registryAccess) }
             if (arguments.any { it.trim() == provider }) continue
             val updated = arguments.map { it.trim() }.toMutableList().apply { add(position, provider) }.joinToString(", ")
@@ -1320,7 +1432,13 @@ internal object ProviderArityRepair {
         return widened.filter(::accepts).mapNotNull { it.providerIndex }.distinct().singleOrNull()
     }
 
-    private fun methodProviderIndex(name: String, count: Int, types: Set<String>?, project: Project): Int? {
+    private fun methodProviderIndex(
+        name: String,
+        count: Int,
+        types: Set<String>?,
+        project: Project,
+        argumentTypes: List<String>? = null
+    ): Int? {
         val shapes = if (types != null) {
             val projectShapes = types.flatMap { project.methods[it]?.get(name).orEmpty() }
             // platform classes: the receiver's own type when it is one, and those above the project's types
@@ -1331,10 +1449,21 @@ internal object ProviderArityRepair {
         } else {
             project.methods.values.flatMap { it[name].orEmpty() } + platformShapes(name, null)
         }
-        if (shapes.isEmpty() || shapes.any { it.count == count }) return null
+        if (shapes.isEmpty()) return null
         val widened = shapes.filter { it.count == count + 1 }
         if (widened.isEmpty() || widened.any { it.providerIndex == null }) return null
-        return widened.map { it.providerIndex }.distinct().singleOrNull()
+        if (shapes.none { it.count == count }) return widened.map { it.providerIndex }.distinct().singleOrNull()
+        // An overload already taking the call's argument count wins unless the arguments' proven
+        // types rule it out (and it is a project declaration whose parameter types are known).
+        val types = argumentTypes?.map(::simpleTypeName) ?: return null
+        fun accepts(shape: Shape, skip: Int?): Boolean {
+            if (shape.parameterTypes.size != shape.count) return false
+            val retained = shape.parameterTypes.filterIndexed { index, _ -> index != skip }.map(::simpleTypeName)
+            return retained.size == types.size && retained.zip(types).all { (parameter, argument) -> parameter == argument }
+        }
+        val sameCount = shapes.filter { it.count == count }
+        if (sameCount.any { it.parameterTypes.size != it.count || accepts(it, null) }) return null
+        return widened.filter { accepts(it, it.providerIndex) }.mapNotNull { it.providerIndex }.distinct().singleOrNull()
     }
 
     /** Shapes of the platform methods [name], declared by [owner] or anything above it (every class when null). */

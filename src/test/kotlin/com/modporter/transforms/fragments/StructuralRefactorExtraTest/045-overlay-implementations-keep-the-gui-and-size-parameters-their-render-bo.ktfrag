@@ -97,6 +97,7 @@
         assertTrue(probe.contains("job.getStatus() != null"), probe)
         assertTrue(probe.contains("String getStatus() {"), probe)
     }
+
     @Test
     fun `saved data loaders thread their provider into static readers that need one`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
@@ -158,16 +159,9 @@
         val train = srcDir.resolve("Train.java").readText()
         val data = srcDir.resolve("RailwaySavedData.java").readText()
 
-        val trainProvider = Regex(
-            """public static Train read\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider ([A-Za-z_$][\w$]*)\) \{"""
-        ).find(train)?.groupValues?.get(1)
-        assertTrue(trainProvider != null, train)
-        assertTrue(train.contains("Component.Serializer.fromJson(tag.getString(\"Name\"), ${trainProvider!!})"), train)
-        val loaderProvider = Regex(
-            """private static RailwaySavedData load\(CompoundTag nbt, (?:net\.minecraft\.core\.)?HolderLookup\.Provider ([A-Za-z_$][\w$]*)\) \{"""
-        ).find(data)?.groupValues?.get(1)
-        assertTrue(loaderProvider != null, data)
-        assertTrue(data.contains("Train.read(list.getCompound(i), ${loaderProvider!!})"), data)
+        assertTrue(train.contains("public static Train read(CompoundTag tag, HolderLookup.Provider registries) {"), train)
+        assertTrue(train.contains("Component.Serializer.fromJson(modporter\$legacyComponentJson(tag.getString(\"Name\"), false), registries)"), train)
+        assertTrue(data.contains("Train.read(list.getCompound(i), registries)"), data)
     }
 
     @Test
@@ -225,6 +219,7 @@
         assertTrue(signal.contains("AABB area = new AABB(Vec3.atLowerCornerOf(other), Vec3.atLowerCornerOf(other.above(2)));"), signal)
         assertTrue(signal.contains("AABB vectors = new AABB(from, to);"), signal)
     }
+
     @Test
     fun `static readers calling a threaded hook through a subclass receiver take the provider too`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
@@ -282,11 +277,7 @@
         val instruction = srcDir.resolve("Instruction.java").readText()
         val holder = srcDir.resolve("Holder.java").readText()
 
-        assertTrue(
-            Regex("""public static Instruction fromTag\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider registries\) \{""")
-                .containsMatchIn(instruction),
-            instruction
-        )
+        assertTrue(instruction.contains("public static Instruction fromTag(CompoundTag tag, HolderLookup.Provider registries) {"), instruction)
         assertTrue(instruction.contains("instruction.readAdditional(tag.getCompound(\"Data\"), registries);"), instruction)
         assertTrue(holder.contains("return Instruction.fromTag(tag, registries);"), holder)
     }
@@ -352,11 +343,7 @@
         val entry = srcDir.resolve("Entry.java").readText()
         val holder = srcDir.resolve("Holder.java").readText()
 
-        assertTrue(
-            Regex("""public static Entry fromTag\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider registries\) \{""")
-                .containsMatchIn(entry),
-            entry
-        )
+        assertTrue(entry.contains("public static Entry fromTag(CompoundTag tag, HolderLookup.Provider registries) {"), entry)
         assertTrue(entry.contains("Instruction.fromTag(tag.getCompound(\"Instruction\"), registries)"), entry)
         assertTrue(holder.contains("return Entry.fromTag(tag, registries);"), holder)
     }
@@ -556,27 +543,13 @@
         StructuralRefactorPass().apply(tempDir)
         val fluids = srcDir.resolve("PotionFluids.java").readText()
 
-        assertTrue(fluids.contains("stack -> (stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"), fluids)
+        assertTrue(fluids.contains("stack -> stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"), fluids)
         assertTrue(fluids.contains("return LegacyPotionUtils.getColor(LegacyPotionUtils.getAllEffects(tag)) | 0xff000000;"), fluids)
         assertTrue(fluids.contains("return LegacyPotionUtils.getPotion(tag);"), fluids)
-        assertTrue(
-            fluids.contains(
-                "(stack).update(DataComponents.POTION_CONTENTS, PotionContents.EMPTY, " +
-                    "Potions.WATER, PotionContents::withPotion);"
-            ),
-            fluids
-        )
-        assertTrue(
-            Regex(
-                """return net\.minecraft\.Util\.make\(stack\.copy\(\),\s*""" +
-                    """modPorterPotionStack\d*\s*->\s*modPorterPotionStack\d*\.update\(""" +
-                    """DataComponents\.POTION_CONTENTS,\s*PotionContents\.EMPTY,\s*""" +
-                    """Potions\.WATER,\s*PotionContents::withPotion\)\);"""
-            ).containsMatchIn(fluids),
-            fluids
-        )
+        assertTrue(fluids.contains("stack.set(DataComponents.POTION_CONTENTS, new PotionContents(Potions.WATER));"), fluids)
+        assertTrue(fluids.contains("return net.minecraft.Util.make(stack.copy(), modporterStack -> modporterStack.set(DataComponents.POTION_CONTENTS, new PotionContents(Potions.WATER)));"), fluids)
         assertTrue(fluids.contains("import com.modporter.generated.example.compat.LegacyPotionUtils;"), fluids)
-        assertTrue(fluids.contains("LegacyPotionUtils.setPotion(stack, potion);"), fluids)
+        assertTrue(fluids.contains("stack.set(DataComponents.POTION_CONTENTS, new PotionContents(net.minecraft.core.registries.BuiltInRegistries.POTION.wrapAsHolder(potion)));"), fluids)
     }
 
     @Test
@@ -864,6 +837,7 @@
         assertTrue(packet.contains("FluidStack.OPTIONAL_STREAM_CODEC.encode(buffer, fluid);"), packet)
         assertTrue(packet.contains("scratch.writeFluidStack(stack);"), packet)
     }
+
     @Test
     fun `threaded nbt methods called through a cast receiver take the provider`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
@@ -912,11 +886,7 @@
         val item = srcDir.resolve("ListFilterItem.java").readText()
         val stack = srcDir.resolve("FilterStack.java").readText()
 
-        assertTrue(
-            Regex("""public ItemStack firstFilter\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider registries\) \{""")
-                .containsMatchIn(item),
-            item
-        )
+        assertTrue(item.contains("public ItemStack firstFilter(CompoundTag tag, HolderLookup.Provider registries) {"), item)
         assertTrue(stack.contains("return ((ListFilterItem) filter.getItem()).firstFilter(tag, registries);"), stack)
     }
 

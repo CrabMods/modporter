@@ -1,7 +1,6 @@
 package com.modporter.core.transforms.structural
 
 import com.modporter.core.pipeline.*
-import com.modporter.core.transforms.shared.HolderLookupProviderPropagationMigration
 import com.github.javaparser.JavaParser
 import com.github.javaparser.ParserConfiguration
 import com.github.javaparser.ast.CompilationUnit
@@ -58,15 +57,18 @@ class StructuralRefactorPass : Pass {
     internal var projectEnumRecipeTypeInputs: EnumRecipeTypeInputs = EnumRecipeTypeInputs.empty()
     internal var projectValueFacts: ProjectValueFacts = ProjectValueFacts()
 
+    /** The project's own type declarations as they stood when the per-file rules started; see [ProjectSourceDeclarations]. */
+    internal var projectSourceDeclarations: ProjectSourceDeclarations = ProjectSourceDeclarations.EMPTY
+
+    /** The project's Mixin configs and legacy-arity @Invoker declarations; see [MixinProjectFacts]. */
+    internal var projectMixinFacts: MixinProjectFacts = MixinProjectFacts()
+
     /**
      * The project's direct-superclass map, collected before the per-file rules run. The full
      * [projectValueFacts] are only collected by the late project-level migrations, so per-file
      * rules that must walk a project class to its platform base read this map.
      */
     internal var projectParents: Map<String, String> = emptyMap()
-
-    /** Project-owned legacy ITeleporter implementations and their subclasses, collected before per-file rewrites. */
-    internal var projectLegacyTeleporterTypes: Set<String> = emptySet()
 
     /** The early, inventory-backed migration owns legacy plant semantics for this invocation. */
     internal var legacyPlantRuntimeOwned: Boolean = false
@@ -88,8 +90,6 @@ class StructuralRefactorPass : Pass {
         val errors = mutableListOf<String>()
         val skipped = mutableListOf<String>()
         val parser = JavaParser(ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE))
-        var blockEntityCapabilityQueryFallbackBlocked = false
-        val lazyOptionalDiagnostics = mutableListOf<Change>()
 
         legacyPlantRuntimeOwned = false
         if (LegacyMigrationArtifactInventoryHandoff.isPublished(projectDir) ||
@@ -105,13 +105,12 @@ class StructuralRefactorPass : Pass {
             }
         }
 
-        val journeyMap = CreateJourneyMapMigration.migrate(this, projectDir, dryRun)
+        val journeyMap = JourneyMapFullscreenRenderHooks.migrate(this, projectDir, dryRun)
         changes.addAll(journeyMap.changes)
         errors.addAll(journeyMap.gates)
-        if (journeyMap.gates.isNotEmpty()) {
-            return PassResult(name, changes, errors, skipped)
-        }
 
+        // Only the mod module's own source sets are migrated: ModPorter-installed sidecars
+        // (.modporter/...), build outputs, reference sources and generated compat stay untouched.
         val moduleDir = GradleModLayout.modModule(projectDir)
         val mainJavaSourceRoot = moduleDir.resolve("src/main/java")
         val generatedCompatRoot = mainJavaSourceRoot.resolve("com/modporter/generated").toAbsolutePath().normalize()
@@ -133,30 +132,12 @@ class StructuralRefactorPass : Pass {
         }
 
         projectParents = runCatching { ProjectValueFacts.collect(this, javaFiles).parents }.getOrDefault(emptyMap())
-        projectLegacyTeleporterTypes = collectLegacyTeleporterTypes(javaFiles)
-        val projectDistExecutorTypes = javaFiles.mapNotNull { javaFile ->
-            val javaSource = runCatching { javaFile.readText() }.getOrDefault("")
-            val executable = maskJavaCommentsAndLiterals(javaSource)
-            if (!Regex("""\b(?:class|interface|enum|record)\s+DistExecutor\b""").containsMatchIn(executable)) {
-                return@mapNotNull null
-            }
-            packageNameOf(javaSource).let { packageName ->
-                if (packageName.isBlank()) "DistExecutor" else "$packageName.DistExecutor"
-            }
-        }.toSet()
 
         for (file in javaFiles) {
             try {
                 val source = file.readText()
                 val fileChanges = mutableListOf<Change>()
-                val hasNativeSimpleDistExecutorOwner =
-                    hasNativeDistExecutorEvidence(source, projectDistExecutorTypes)
-                var distSource = migrateDistExecutorDistGuards(
-                    source,
-                    file,
-                    fileChanges,
-                    projectDistExecutorTypes
-                )
+                var distSource = migrateDistExecutorDistGuards(source, file, fileChanges)
                 distSource = migrateClientPlayerDistLinkage(distSource, file, fileChanges)
                 distSource = migrateClientOnlyEventBusSubscriberDist(distSource, file, fileChanges)
                 distSource = migrateAbstractScreenInitSubscriberFanout(distSource, file, fileChanges)
@@ -208,17 +189,11 @@ class StructuralRefactorPass : Pass {
                 // Detect and transform networking patterns
                 detectNetworkingPatterns(migratedCu, file, fileChanges)
 
-                // LazyOptional findings are diagnostics only. Keep them separate so they cannot
-                // trigger a pretty-printed source write before lifecycle-aware query migration.
-                detectLazyOptionalUsage(migratedCu, file, lazyOptionalDiagnostics)
+                // Detect LazyOptional usage
+                detectLazyOptionalUsage(migratedCu, file, fileChanges)
 
                 // Detect DistExecutor usage (removed in NeoForge)
-                detectDistExecutorUsage(
-                    migratedCu,
-                    file,
-                    fileChanges,
-                    hasNativeSimpleDistExecutorOwner
-                )
+                detectDistExecutorUsage(migratedCu, file, fileChanges)
 
                 changes.addAll(fileChanges)
 
@@ -230,25 +205,10 @@ class StructuralRefactorPass : Pass {
             }
         }
 
-        var closedLegacyParticleFiles: Set<Path> = emptySet()
-        try {
-            val particleOutcome = LegacyParticleSerializationMigration().migrate(projectDir, dryRun)
-            changes.addAll(particleOutcome.changes)
-            closedLegacyParticleFiles = particleOutcome.ownedFiles
-        } catch (e: Exception) {
-            errors.add("Legacy particle serialization migration error: ${e.message}")
-        }
-
         try {
             changes.addAll(FinalTestFunctionSubclassAdapters.migrate(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Final TestFunction adapter migration error: ${e.message}")
-        }
-
-        try {
-            changes.addAll(LegacyBlockSourceAdapterMigration().migrate(projectDir, dryRun))
-        } catch (e: Exception) {
-            errors.add("BlockSource adapter migration error: ${e.message}")
         }
 
         try {
@@ -336,14 +296,7 @@ class StructuralRefactorPass : Pass {
         // Particle data that writes and reads itself keeps that contract behind generated
         // interfaces; its ParticleType gains the MapCodec/StreamCodec pair 1.20.5 requires.
         try {
-            changes.addAll(
-                ParticleOptionsCodecs.migrate(
-                    projectDir,
-                    { detectRequiredGeneratedCompatPackage(projectDir, "particle options codecs") },
-                    dryRun,
-                    closedLegacyParticleFiles
-                )
-            )
+            changes.addAll(ParticleOptionsCodecs.migrate(projectDir, { detectRequiredGeneratedCompatPackage(projectDir, "particle options codecs") }, dryRun))
         } catch (e: Exception) {
             errors.add("Particle options codec migration error: ${e.message}")
         }
@@ -355,8 +308,8 @@ class StructuralRefactorPass : Pass {
             errors.add("Dispatched codec family migration error: ${e.message}")
         }
 
-        // DistExecutor calls the statement-level guards could not express use a generated typed
-        // adapter backed by FMLLoader.getDist().
+        // DistExecutor calls the statement-level guards could not express keep the Forge API
+        // through a generated class on FMLEnvironment.dist.
         try {
             changes.addAll(DistExecutorCompat.migrate(projectDir, { detectRequiredGeneratedCompatPackage(projectDir, "DistExecutor compat") }, dryRun))
         } catch (e: Exception) {
@@ -469,9 +422,6 @@ class StructuralRefactorPass : Pass {
         // CapabilityManager + AttachCapabilitiesEvent to NeoForge EntityCapability
         // registrations while preserving LazyOptional call chains.
         try {
-            val wrappedSerializableChanges = WrappedSerializableEntityCapabilityMigration()
-                .apply(projectDir, dryRun, errors)
-            changes.addAll(wrappedSerializableChanges)
             val providerBackedCapabilityChanges = migrateProviderBackedEntityCapabilities(projectDir, dryRun, errors)
             changes.addAll(providerBackedCapabilityChanges)
             val customEntityCapabilityChanges = migrateCustomEntityCapabilities(projectDir, dryRun, errors)
@@ -525,49 +475,26 @@ class StructuralRefactorPass : Pass {
 
         // Block entities that still answer getCapability(Capability, Direction) keep it as the
         // mod's own API; generated providers forward NeoForge's queries into it.
-        var retainedCapabilityQueryFiles: Set<Path> = emptySet()
         try {
             val capabilityModId = detectModId(projectDir)
             if (capabilityModId != null) {
-                val legacy = LegacyBlockEntityCapabilities.migrate(
-                    projectDir,
-                    capabilityModId,
-                    { detectRequiredGeneratedCompatPackage(projectDir, "legacy block entity capabilities") },
-                    dryRun,
-                    errors
-                )
+                val legacy = LegacyBlockEntityCapabilities.migrate(projectDir, capabilityModId, { detectRequiredGeneratedCompatPackage(projectDir, "legacy block entity capabilities") }, dryRun)
                 changes.addAll(legacy.changes)
                 errors.removeAll(LegacyBlockEntityCapabilities.withdrawnGates(errors, projectDir, legacy.adaptedFiles))
                 errors.addAll(legacy.gates)
-
-                val queries = LegacyBlockEntityCapabilityQueries.migrate(
-                    projectDir,
-                    { detectRequiredGeneratedCompatPackage(projectDir, "legacy block entity capability queries") },
-                    dryRun
-                )
+                val queries = LegacyBlockEntityCapabilityQueries.migrate(projectDir,
+                    { detectRequiredGeneratedCompatPackage(projectDir, "legacy block entity capability queries") }, dryRun)
                 changes.addAll(queries.changes)
                 errors.addAll(queries.gates)
-                retainedCapabilityQueryFiles = queries.retainedFiles
-                    .map { it.toAbsolutePath().normalize() }
-                    .toSet()
-                if (queries.gates.isNotEmpty()) {
-                    blockEntityCapabilityQueryFallbackBlocked = true
-                }
-
+                if (queries.gates.isNotEmpty()) return PassResult(name, changes, errors, skipped)
                 val peripheral = LegacyComputerCraftPeripheralCapabilities.migrate(projectDir, capabilityModId,
                     detectRequiredGeneratedCompatPackage(projectDir, "ComputerCraft peripheral capability"), dryRun)
                 changes.addAll(peripheral.changes)
                 errors.addAll(peripheral.gates)
             }
         } catch (e: Exception) {
-            blockEntityCapabilityQueryFallbackBlocked = true
             errors.add("Legacy block entity capability migration error: ${e.message}")
         }
-        changes.addAll(
-            lazyOptionalDiagnostics.filter { diagnostic ->
-                diagnostic.file.toAbsolutePath().normalize() !in retainedCapabilityQueryFiles
-            }
-        )
 
         try {
             val forcedChunkModId = detectModId(projectDir)
@@ -601,72 +528,10 @@ class StructuralRefactorPass : Pass {
         // Migrate legacy advancement criterion triggers to the 1.21 codec
         // shape and register trigger types through DeferredRegister.
         try {
-            changes.addAll(LegacyCriterionTriggerHierarchyMigration().migrate(projectDir, dryRun))
             val advancementTriggerChanges = migrateAdvancementCriterionTriggers(projectDir, dryRun)
             changes.addAll(advancementTriggerChanges)
         } catch (e: Exception) {
             errors.add("Advancement criterion trigger migration error: ${e.message}")
-        }
-
-        try {
-            changes.addAll(LegacyJukeboxApiMigration().migrate(projectDir, dryRun))
-        } catch (e: Exception) {
-            errors.add("Jukebox component migration error: ${e.message}")
-        }
-
-        try {
-            changes.addAll(LegacyDefaultTooltipFlagsMigration().migrate(projectDir, dryRun))
-        } catch (e: Exception) {
-            errors.add("Default tooltip flags migration error: ${e.message}")
-        }
-
-        try {
-            changes.addAll(LegacyConfigScreenFactoryMigration().migrate(projectDir, dryRun))
-        } catch (e: Exception) {
-            errors.add("Config screen factory migration error: ${e.message}")
-        }
-
-        try {
-            changes.addAll(LegacyPositionImplMigration().migrate(projectDir, dryRun))
-        } catch (e: Exception) {
-            errors.add("PositionImpl value migration error: ${e.message}")
-        }
-
-        try {
-            changes.addAll(LegacyProjectileDispenseAccessorMigration().migrate(projectDir, dryRun))
-        } catch (e: Exception) {
-            errors.add("Projectile dispense accessor migration error: ${e.message}")
-            return PassResult(name, changes, errors, skipped)
-        }
-
-        try {
-            changes.addAll(LegacyMultiItemValueMigration().migrate(projectDir, dryRun))
-        } catch (e: Exception) {
-            errors.add("MultiItemValue migration error: ${e.message}")
-        }
-
-        try {
-            changes.addAll(LegacyItemStackBooleanEqualsMigration().migrate(projectDir, dryRun))
-        } catch (e: Exception) {
-            errors.add("ItemStack boolean equals migration error: ${e.message}")
-        }
-
-        try {
-            changes.addAll(LegacyTrackingChunkPacketTargetMigration().migrate(projectDir, dryRun))
-        } catch (e: Exception) {
-            errors.add("Tracking chunk packet target migration error: ${e.message}")
-        }
-
-        try {
-            changes.addAll(LegacyDirectTrackingChunkTargetMigration().migrate(projectDir, dryRun))
-        } catch (e: Exception) {
-            errors.add("Direct tracking chunk target migration error: ${e.message}")
-        }
-
-        try {
-            changes.addAll(LegacyPacketTargetMigration().migrate(projectDir, dryRun))
-        } catch (e: Exception) {
-            errors.add("Legacy packet target migration error: ${e.message}")
         }
 
         // Forge criterion instances that only carry the id and an ANY player predicate.
@@ -784,12 +649,6 @@ class StructuralRefactorPass : Pass {
             errors.add("BowlFoodItem subclass migration error: ${e.message}")
         }
 
-        try {
-            changes.addAll(ExactLegacyCustomDataMigration().migrate(projectDir, dryRun))
-        } catch (e: Exception) {
-            errors.add("Exact legacy custom-data graph migration error: ${e.message}")
-        }
-
         // Migrate common 1.21 API surface changes that are too broad for
         // project-specific rewrites: split tick events, BlockEntity NBT hooks,
         // tooltip context imports, and Holder<MobEffect> call sites.
@@ -814,72 +673,19 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
-            val stationMaps = CreateStationMapDecorationMigration.migrate(this, projectDir, dryRun)
-            changes.addAll(stationMaps.changes)
-            errors.addAll(stationMaps.gates)
-            if (stationMaps.gates.isNotEmpty()) return PassResult(name, changes, errors, skipped)
-        } catch (e: Exception) {
-            errors.add("Create station map decoration migration error: ${e.message}")
-            return PassResult(name, changes, errors, skipped)
-        }
-
-        try {
-            changes.addAll(migrateLexicallyBoundDeferredHolderGenerics(projectDir, dryRun))
-        } catch (e: Exception) {
-            errors.add("Lexically bound DeferredHolder generic migration error: ${e.message}")
-        }
-
-        try {
-            val commonApiChanges = migrateCommonNeoForge121Apis(projectDir, dryRun, errors)
+            val commonApiChanges = migrateCommonNeoForge121Apis(projectDir, dryRun)
             changes.addAll(commonApiChanges)
-            if (!dryRun) {
-                changes.addAll(HolderLookupProviderPropagationMigration().migrate(projectDir, dryRun = false))
-            }
-            changes.addAll(LegacyMutableInventoryMigration().migrate(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Common NeoForge 1.21 API migration error: ${e.message}")
         }
 
-        // Handle exact residual BlockEntity queries only after the broader
-        // source-relationship migration has consumed the shapes it owns.
-        if (blockEntityCapabilityQueryFallbackBlocked) {
-            skipped.add(
-                "Exact BlockEntity capability query fallback retained because lifecycle-aware " +
-                    "query migration reported unresolved ownership or lifecycle gates"
-            )
-        } else {
-            try {
-                val queryChanges = ExactBlockEntityCapabilityQueryMigration(
-                    projectDir.resolve("src/main/java"),
-                    plannedLazyOptionalType = {
-                        detectRequiredGeneratedCompatPackage(
-                            projectDir,
-                            "exact BlockEntity capability query migration"
-                        ) + ".LazyOptional"
-                    }
-                ).migrate(dryRun)
-                changes.addAll(queryChanges)
-            } catch (e: Exception) {
-                errors.add("Block entity capability query migration error: ${e.message}")
-            }
-        }
-
+        // after the per-file composition gave self-rendering decoration classes their record factory
         try {
-            changes.addAll(ExactFluidTankProviderCallMigration().migrate(projectDir, dryRun))
+            val mapDecorations = LegacyCustomMapDecorations.migrate(this, projectDir, dryRun)
+            changes.addAll(mapDecorations.changes)
+            errors.addAll(mapDecorations.gates)
         } catch (e: Exception) {
-            errors.add("Exact FluidTank provider call migration error: ${e.message}")
-        }
-
-        try {
-            changes.addAll(ExactExternalProviderCallMigration().migrate(projectDir, dryRun))
-        } catch (e: Exception) {
-            errors.add("Exact external provider call migration error: ${e.message}")
-        }
-
-        try {
-            changes.addAll(ExactProjectProviderCallMigration().migrate(projectDir, dryRun))
-        } catch (e: Exception) {
-            errors.add("Exact project provider call migration error: ${e.message}")
+            errors.add("Custom map decoration type migration error: ${e.message}")
         }
 
         try {
@@ -1229,21 +1035,6 @@ class StructuralRefactorPass : Pass {
             errors.add("Empty subscriber class removal error: ${e.message}")
         }
 
-        // Some structural migrations create mod-bus subscribers after the
-        // first subscriber pass. Normalize those generated surfaces too, then
-        // fail closed if any MOD bus annotation still lacks explicit wiring.
-        if (!dryRun) {
-            try {
-                val finalStaticModBusChanges = migrateStaticModBusSubscribers(projectDir, false)
-                changes.addAll(finalStaticModBusChanges)
-                val finalSubscriberCleanupChanges = cleanupEventBusSubscriber(projectDir, false)
-                changes.addAll(finalSubscriberCleanupChanges)
-                validateNoUnresolvedEventBusSubscriberModBusParameters(projectDir)
-            } catch (e: Exception) {
-                errors.add("Final EventBusSubscriber normalization error: ${e.message}")
-            }
-        }
-
         // Final structural normalization: attachment registration methods are
         // ordinary mod-constructor registration helpers, not event handlers.
         try {
@@ -1251,19 +1042,6 @@ class StructuralRefactorPass : Pass {
             changes.addAll(attachmentRegistrationChanges)
         } catch (e: Exception) {
             errors.add("Attachment registration cleanup error: ${e.message}")
-        }
-
-        try {
-            val dimensionTransitionChanges = migrateDelegatingEntityDimensionTransitionOverrides(projectDir, dryRun)
-            changes.addAll(dimensionTransitionChanges)
-        } catch (e: Exception) {
-            errors.add("Entity dimension transition override migration error: ${e.message}")
-        }
-
-        try {
-            changes.addAll(migrateRegistryKeyAccessors(projectDir, dryRun))
-        } catch (e: Exception) {
-            errors.add("Registry key accessor migration error: ${e.message}")
         }
 
         // Some later project-level rewrites can touch entity sources after the
@@ -1372,15 +1150,9 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
-            val triggerRegistration =
-                CreateAdvancementTriggerRegistrationMigration.migrate(projectDir, dryRun)
-            changes.addAll(triggerRegistration.changes)
-            errors.addAll(triggerRegistration.gates)
-            if (triggerRegistration.gates.isNotEmpty()) {
-                return PassResult(name, changes, errors, skipped)
-            }
+            changes.addAll(LegacySetupRegistryWrites.migrate(projectDir, dryRun))
         } catch (e: Exception) {
-            errors.add("Create advancement trigger registration migration error: ${e.message}")
+            errors.add("Setup built-in registry write migration error: ${e.message}")
             return PassResult(name, changes, errors, skipped)
         }
 
@@ -1389,6 +1161,13 @@ class StructuralRefactorPass : Pass {
             changes.addAll(LegacyFinishedRecipeResults.migrate(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Legacy finished recipe result migration error: ${e.message}")
+        }
+
+        // In-memory pack entries follow the same 1.21 data-folder table as resource files.
+        try {
+            changes.addAll(LegacyRuntimePackPaths.migrate(this, projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Legacy runtime pack data folder migration error: ${e.message}")
         }
 
         try {
@@ -1463,30 +1242,6 @@ class StructuralRefactorPass : Pass {
             errors.add("Stale override annotation cleanup error: ${e.message}")
         }
 
-        try {
-            val filtering =
-                CreateFilteringEmptyStackSizeMigration.migrate(projectDir, dryRun)
-            changes.addAll(filtering.changes)
-            errors.addAll(filtering.gates)
-            if (filtering.gates.isNotEmpty()) {
-                return PassResult(name, changes, errors, skipped)
-            }
-        } catch (e: Exception) {
-            errors.add("Create filtering empty-stack migration error: ${e.message}")
-            return PassResult(name, changes, errors, skipped)
-        }
-
-        // Publish the complete item-data family before the final arity graph observes it.
-        try {
-            val itemData = CreateItemStackDataFamilyMigration.migrate(projectDir, dryRun)
-            changes.addAll(itemData.changes)
-            errors.addAll(itemData.gates)
-            if (itemData.gates.isNotEmpty()) return PassResult(name, changes, errors, skipped)
-        } catch (e: Exception) {
-            errors.add("Create item-data family migration error: ${e.message}")
-            return PassResult(name, changes, errors, skipped)
-        }
-
         // Calls that still miss the HolderLookup.Provider their target now takes.
         try {
             changes.addAll(ProviderArityRepair.migrate(this, projectDir, dryRun))
@@ -1506,10 +1261,6 @@ class StructuralRefactorPass : Pass {
             if (LegacyMigrationArtifactInventoryHandoff.isPublished(projectDir)) {
                 changes.addAll(LegacyLootingPolicyMigration.migrate(this, projectDir, dryRun))
             }
-            // Preserve the standalone exact-target migration after the sealed policy has
-            // either completed or proved that this project has no owned policy graph.
-            // An exception above prevents this fallback from touching refused legacy input.
-            changes.addAll(migrateExactLootingMixinTargets(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Legacy looting migration error: ${e.message}")
         }
@@ -1527,101 +1278,26 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
-            val copperStairs = CreateCopperStairFactoryMigration.migrate(this, projectDir, dryRun)
-            changes.addAll(copperStairs.changes)
-            errors.addAll(copperStairs.gates)
-            if (copperStairs.gates.isNotEmpty()) return PassResult(name, changes, errors, skipped)
+            changes.addAll(LegacyRegistrateDataGeneratorTiming.migrate(projectDir, dryRun))
         } catch (e: Exception) {
-            errors.add("Create copper stair migration error: ${e.message}")
+            errors.add("Registrate data generator timing migration error: ${e.message}")
             return PassResult(name, changes, errors, skipped)
         }
 
+        // Tag ids built in the legacy Forge namespace follow the data migration's common-tag table.
         try {
-            val createDatagen =
-                CreateRegistrateDatagenLifecycleMigration.migrate(projectDir, dryRun)
-            changes.addAll(createDatagen.changes)
-            errors.addAll(createDatagen.gates)
-            if (createDatagen.gates.isNotEmpty()) {
-                return PassResult(name, changes, errors, skipped)
-            }
+            changes.addAll(LegacyCommonTagNamespaces.migrate(projectDir, dryRun))
         } catch (e: Exception) {
-            errors.add("Create Registrate datagen lifecycle migration error: ${e.message}")
-            return PassResult(name, changes, errors, skipped)
+            errors.add("Legacy common tag namespace migration error: ${e.message}")
         }
 
         try {
-            val commonMetalTags =
-                CreateCommonMetalTagNamespaceMigration.migrate(projectDir, dryRun)
-            changes.addAll(commonMetalTags.changes)
-            errors.addAll(commonMetalTags.gates)
-            if (commonMetalTags.gates.isNotEmpty()) {
-                return PassResult(name, changes, errors, skipped)
-            }
+            changes.addAll(LegacyEnchantmentDatagenBootstrap.migrate(this, projectDir, dryRun))
         } catch (e: Exception) {
-            errors.add("Create common-metal tag namespace migration error: ${e.message}")
+            errors.add("Legacy enchantment datagen bootstrap error: ${e.message}")
             return PassResult(name, changes, errors, skipped)
         }
 
-        try {
-            val createLegacyTags =
-                CreateLegacyTagConventionMigration.migrate(projectDir, dryRun)
-            changes.addAll(createLegacyTags.changes)
-            errors.addAll(createLegacyTags.gates)
-            if (createLegacyTags.gates.isNotEmpty()) {
-                return PassResult(name, changes, errors, skipped)
-            }
-        } catch (e: Exception) {
-            errors.add("Create legacy tag convention migration error: ${e.message}")
-            return PassResult(name, changes, errors, skipped)
-        }
-
-        try {
-            val enchantmentBootstrap =
-                CreateEnchantmentDatagenBootstrapMigration.migrate(projectDir, dryRun)
-            changes.addAll(enchantmentBootstrap.changes)
-            errors.addAll(enchantmentBootstrap.gates)
-            if (enchantmentBootstrap.gates.isNotEmpty()) {
-                return PassResult(name, changes, errors, skipped)
-            }
-        } catch (e: Exception) {
-            errors.add("Create enchantment datagen bootstrap migration error: ${e.message}")
-            return PassResult(name, changes, errors, skipped)
-        }
-
-        try {
-            val flapDisplay =
-                CreateFlapDisplaySerializationMigration.migrate(projectDir, dryRun)
-            changes.addAll(flapDisplay.changes)
-            errors.addAll(flapDisplay.gates)
-            if (flapDisplay.gates.isNotEmpty()) {
-                return PassResult(name, changes, errors, skipped)
-            }
-        } catch (e: Exception) {
-            errors.add("Create flap-display component migration error: ${e.message}")
-            return PassResult(name, changes, errors, skipped)
-        }
-
-        try {
-            val copperDataMaps = CreateCopperDataMapMigration.migrate(projectDir, dryRun)
-            changes.addAll(copperDataMaps.changes)
-            errors.addAll(copperDataMaps.gates)
-            if (copperDataMaps.gates.isNotEmpty()) {
-                return PassResult(name, changes, errors, skipped)
-            }
-        } catch (e: Exception) {
-            errors.add("Create copper data-map migration error: ${e.message}")
-            return PassResult(name, changes, errors, skipped)
-        }
-
-        try {
-            val analogShape = CreateAnalogLeverShapeAccess.migrate(this, projectDir, dryRun)
-            changes.addAll(analogShape.changes)
-            errors.addAll(analogShape.gates)
-            if (analogShape.gates.isNotEmpty()) return PassResult(name, changes, errors, skipped)
-        } catch (e: Exception) {
-            errors.add("Create analog lever shape migration error: ${e.message}")
-            return PassResult(name, changes, errors, skipped)
-        }
 
         try {
             val finalImportChanges = normalizeIntroducedJavaImports(projectDir, dryRun)
@@ -1642,46 +1318,6 @@ class StructuralRefactorPass : Pass {
                 { detectRequiredGeneratedCompatPackage(projectDir, "legacy food codecs") }, dryRun))
         } catch (e: Exception) {
             errors.add("Legacy food codec migration error: ${e.message}")
-        }
-
-        try {
-            val handoffs = CreateItemStackDataFamilyMigration.migrateHandoffs(projectDir, dryRun)
-            changes.addAll(handoffs.changes)
-            errors.addAll(handoffs.gates)
-            if (handoffs.gates.isNotEmpty()) return PassResult(name, changes, errors, skipped)
-        } catch (e: Exception) {
-            errors.add("Create item-data handoff migration error: ${e.message}")
-            return PassResult(name, changes, errors, skipped)
-        }
-
-        try {
-            val zapper = CreateZapperDataMigration.migrate(projectDir, dryRun)
-            changes.addAll(zapper.changes)
-            errors.addAll(zapper.gates)
-            if (zapper.gates.isNotEmpty()) return PassResult(name, changes, errors, skipped)
-        } catch (e: Exception) {
-            errors.add("Create Zapper data migration error: ${e.message}")
-            return PassResult(name, changes, errors, skipped)
-        }
-
-        try {
-            val attributes = CreateAttributeFilterDataMigration.migrate(projectDir, dryRun)
-            changes.addAll(attributes.changes)
-            errors.addAll(attributes.gates)
-            if (attributes.gates.isNotEmpty()) return PassResult(name, changes, errors, skipped)
-        } catch (e: Exception) {
-            errors.add("Create attribute-filter data migration error: ${e.message}")
-            return PassResult(name, changes, errors, skipped)
-        }
-
-        try {
-            changes.addAll(CreateEffectComponentSurfaces.migratePotionData(this, projectDir, dryRun))
-            // Resolve source-owned tag uses while the exact legacy PotionUtils contracts are
-            // still available, before their owner is replaced by the generated adapter below.
-            changes.addAll(ExactLegacyCustomDataMigration().migrate(projectDir, dryRun))
-        } catch (e: Exception) {
-            errors.add("Create potion data boundary migration error: ${e.message}")
-            return PassResult(name, changes, errors, skipped)
         }
 
         try {
@@ -1713,6 +1349,11 @@ class StructuralRefactorPass : Pass {
             errors.add("Legacy position value migration error: ${e.message}")
         }
         try {
+            changes.addAll(migrateDefaultAttributeTooltip(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Default attribute tooltip migration error: ${e.message}")
+        }
+        try {
             changes.addAll(migrateLegacyMinecartFactories(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Legacy minecart factory migration error: ${e.message}")
@@ -1725,35 +1366,26 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
-            changes.addAll(CreateEffectComponentSurfaces.migrate(this, projectDir, dryRun))
+            changes.addAll(LegacyEffectComponentSurfaces.migrate(this, projectDir, dryRun))
         } catch (e: Exception) {
-            errors.add("Create effect and component boundary migration error: ${e.message}")
+            errors.add("Legacy effect and component surface migration error: ${e.message}")
+            return PassResult(name, changes, errors, skipped)
+        }
+
+        // A project projectile factory without a direction gets the dispensing Direction threaded in
+        // before the member moves rewrite its legacy getProjectile invoker to asProjectile.
+        try {
+            changes.addAll(LegacyProjectileDispenseDirections.migrate(this, projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Projectile dispense direction threading error: ${e.message}")
             return PassResult(name, changes, errors, skipped)
         }
 
         try {
-            changes.addAll(CreateProjectileAndStewSurfaces.migrate(this, projectDir, dryRun))
+            changes.addAll(LegacyMixinMemberMoves.migrate(this, projectDir, dryRun))
         } catch (e: Exception) {
-            errors.add("Create projectile and stew source migration error: ${e.message}")
+            errors.add("Legacy Mixin member move error: ${e.message}")
             return PassResult(name, changes, errors, skipped)
-        }
-
-        try {
-            val poseAndLoot = CreatePoseAndLootMixinMigration.migrate(projectDir, dryRun)
-            changes.addAll(poseAndLoot.changes)
-            errors.addAll(poseAndLoot.gates)
-            if (poseAndLoot.gates.isNotEmpty()) return PassResult(name, changes, errors, skipped)
-        } catch (e: Exception) {
-            errors.add("Create pose and loot mixin migration error: ${e.message}")
-            return PassResult(name, changes, errors, skipped)
-        }
-
-        // Source-owned families above close aliases unavailable to the first custom-data graph.
-        // Reuse its complete-file proof after all emitters; unknown uses still retain every call.
-        try {
-            changes.addAll(ExactLegacyCustomDataMigration().migrate(projectDir, dryRun))
-        } catch (e: Exception) {
-            errors.add("Final exact custom data graph migration error: ${e.message}")
         }
 
         return PassResult(name, changes, errors, skipped)

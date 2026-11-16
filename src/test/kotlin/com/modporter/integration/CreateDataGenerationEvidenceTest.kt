@@ -4,7 +4,7 @@ import com.modporter.core.pipeline.Change
 import com.modporter.core.pipeline.Confidence
 import com.modporter.core.pipeline.PassResult
 import com.modporter.core.pipeline.PipelineResult
-import com.modporter.core.transforms.structural.CreateCopperDataMapMigration
+import com.modporter.core.transforms.build.CopperDataMapMigration
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -29,7 +29,7 @@ class CreateDataGenerationEvidenceTest {
         assertFalse(CreateDataGenerationEvidence.required(resultWithRule("unrelated-rule")))
         assertTrue(
             CreateDataGenerationEvidence.required(
-                resultWithRule(CreateCopperDataMapMigration.RULE_ID)
+                resultWithRule(CopperDataMapMigration.PROVIDER_RULE_ID)
             )
         )
     }

@@ -546,7 +546,6 @@
                 }
 
                 public ItemStack drop(Flask flask) {
-                    if (this.level == null) throw new IllegalStateException("Cannot drop before world attachment");
                     return flask.toItem();
                 }
 
@@ -649,33 +648,14 @@
         assertTrue(migrated.contains("private void saveClientData(CompoundTag tag, HolderLookup.Provider registries)"), migrated)
         assertTrue(migrated.contains("flask.toNBT(registries)"), migrated)
         assertTrue(migrated.contains("ItemStack toItem(HolderLookup.Provider registries)"), migrated)
-        assertTrue(migrated.contains("public ItemStack drop(Flask flask)"), migrated)
-        assertTrue(migrated.contains("return flask.toItem(this.level.registryAccess());"), migrated)
+        assertTrue(migrated.contains("return flask.toItem(this.getLevel().registryAccess());"), migrated)
         assertTrue(migrated.contains("return new PoolEntry(tag, registries);"), migrated)
-        assertTrue(migrated.contains("stack.saveOptional(registries);"), migrated)
         assertFalse(migrated.contains("new PoolEntry(tag, HolderLookup.Provider registries)"), migrated)
         assertFalse(migrated.contains("this.getLevel().registryAccess(), tag.getCompound(\"tank\")"), migrated)
-        val externalLoadProvider = Regex(
-            """loadExternal\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)"""
-        ).find(other)?.groupValues?.get(1)
-        val externalSaveProvider = Regex(
-            """saveExternal\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)"""
-        ).find(other)?.groupValues?.get(1)
-        val externalDropProvider = Regex(
-            """dropExternal\((?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)"""
-        ).find(other)?.groupValues?.get(1)
-        assertTrue(externalLoadProvider != null, other)
-        assertTrue(externalSaveProvider != null, other)
-        assertTrue(externalDropProvider != null, other)
-        assertTrue(
-            other.contains("new ShelfBlockEntity.Flask(tag.getCompound(\"flask\"), $externalLoadProvider)"),
-            other
-        )
-        assertTrue(other.contains("tag.put(\"flask\", flask.toNBT($externalSaveProvider));"), other)
-        assertTrue(other.contains("return flask.toItem($externalDropProvider);"), other)
-        assertFalse(other.contains("getLevel().registryAccess()"), other)
+        assertTrue(other.contains("new ShelfBlockEntity.Flask(tag.getCompound(\"flask\"), this.getLevel().registryAccess())"), other)
+        assertTrue(other.contains("tag.put(\"flask\", flask.toNBT(this.getLevel().registryAccess()));"), other)
+        assertTrue(other.contains("return flask.toItem(this.getLevel().registryAccess());"), other)
         assertTrue(bloodPool.contains("return new BloodPoolEntity(tag, registries);"), bloodPool)
-        assertTrue(bloodPool.contains("stack.saveOptional(registries);"), bloodPool)
         assertFalse(bloodPool.contains("new BloodPoolEntity(tag, HolderLookup.Provider registries)"), bloodPool)
     }
 

@@ -52,41 +52,6 @@ internal fun StructuralRefactorPass.migrateLegacyTagElementWriteChains(source: S
     }
 }
 
-/**
- * Create 6 (NeoForge 1.21.1): `OpenEndedPipe.fromNBT(tag, HolderLookup.Provider, pos)`,
- * `manageSource(Level, BlockEntity)` and `provideHandler()` returning Create's
- * `ICapabilityProvider<IFluidHandler>` with a nullable `getCapability()` instead of a LazyOptional.
- */
-internal fun StructuralRefactorPass.migrateCreateOpenEndedPipeApi(source: String): String {
-    if (!source.contains("OpenEndedPipe")) return source
-    val executable = maskJavaCommentsAndLiterals(source)
-    val args = """((?:[^(),]|\([^()]*\))+?)"""
-    val edits = mutableListOf<Pair<IntRange, String>>()
-    val fromNbt = Regex("""\bOpenEndedPipe\.fromNBT\(\s*$args\s*,\s*$args\s*\)""")
-    for (method in javaMethodRangesIncludingDefault(executable)) {
-        val body = executable.substring(method.range)
-        fromNbt.findAll(body).forEach { match ->
-            val access = registryAccessExpressionInScope(method.header, body, match.range.first) ?: return@forEach
-            val start = method.range.first + match.range.first
-            edits += (start..method.range.first + match.range.last) to
-                "OpenEndedPipe.fromNBT(${match.groupValues[1].trim()}, $access, ${match.groupValues[2].trim()})"
-        }
-    }
-    var result = source
-    edits.sortedByDescending { it.first.first }.forEach { (range, text) -> result = result.replaceRange(range, text) }
-    result = replaceExecutableRegex(result, Regex("""\.manageSource\(\s*([A-Za-z_$][\w$]*)\s*\)""")) { ".manageSource(${it.groupValues[1]}, null)" }
-    result = replaceExecutableRegex(
-        result,
-        Regex("""\.provideHandler\(\)\.(?:orElseThrow|orElse)\((?:[^()]|\([^()]*\))*\)""")
-    ) { ".provideHandler().getCapability()" }
-    return result
-}
-
-/** Only the proven target library value changes its amount accessor. */
-internal fun StructuralRefactorPass.migrateCreateFluidIngredientAmounts(source: String): String {
-    return migrateProvenFluidIngredientAmounts(source)
-}
-
 /** `RecipeManager#byKey` yields `RecipeHolder`s in 1.21; code that used the recipe itself maps to its value. */
 internal fun StructuralRefactorPass.migrateRecipeManagerByKeyValues(source: String): String {
     if (!source.contains(".byKey(") || source.contains("RecipeHolder")) return source
@@ -788,8 +753,9 @@ internal fun StructuralRefactorPass.migrateRegistryDependentSaveCallsPhase(
 /**
  * Forge 1.20.1 patched a `Supplier<BlockState> stateSupplier` into StairBlock for stairs whose base
  * block is registered later; NeoForge 1.21.1's StairBlock only has the vanilla `baseState` set by
- * the constructor, so a reflective write to the supplier has nothing to target. The real port
- * (Create 6, CreateWeatheringCopperStairBlock) keeps the base state it was constructed with and drops the write.
+ * the constructor, so a reflective write to the supplier has nothing to target. A write whose
+ * supplier and stair are provable was already moved into a lazy-base stair by
+ * [migrateLegacySupplierStairs]; a remaining write is dropped, keeping the constructed base state.
  */
 internal fun StructuralRefactorPass.migrateForgeOnlyStairStateSupplierWrites(source: String): String {
     if (!source.contains("\"stateSupplier\"")) return source
@@ -823,9 +789,13 @@ internal fun StructuralRefactorPass.migrateBlockEntityCapabilityLookups(source: 
 /**
  * Mixin injector handlers mirror the target method's parameters. When the 1.21.1 target (from the
  * real class table) gained parameters after the ones the handler lists, the missing parameters are
- * appended before the callback so the descriptor matches again.
+ * appended before the callback so the descriptor matches again. Selectors naming the 1.20.1
+ * descriptor explicitly follow [migrateExtendedInjectorDescriptors].
  */
-internal fun StructuralRefactorPass.migrateMixinInjectorSignatures(source: String): String {
+internal fun StructuralRefactorPass.migrateMixinInjectorSignatures(source: String): String =
+    migrateExtendedInjectorDescriptors(migrateBareNameMixinInjectorSignatures(source))
+
+private fun StructuralRefactorPass.migrateBareNameMixinInjectorSignatures(source: String): String {
     if (!source.contains("@Mixin(") || !source.contains("@Inject(")) return source
     val targetName = Regex("""@Mixin\(\s*(?:value\s*=\s*)?\{?\s*([A-Za-z_$][\w$.]*)\.class""").find(source)?.groupValues?.get(1) ?: return source
     val binaryName = mixinTargetBinaryName(source, targetName) ?: return source
@@ -1344,6 +1314,27 @@ internal fun StructuralRefactorPass.migrateCustomDataComponentsSource(source: St
     var executableCode = maskJavaCommentsAndLiterals(result)
     val stackReceivers = (collectItemStackValueNames(result) + "stack").joinToString("|") { Regex.escape(it) }
     val receiverPattern = """(?<![\w$.])($stackReceivers)"""
+    // A child read on any expression proven to be an ItemStack (`player.getMainHandItem()`, a
+    // field chain, an ItemStack-returning method) reads the same CUSTOM_DATA child.
+    if (executableCode.contains(".getTagElement(")) {
+        val names = collectItemStackValueNames(result)
+        val stackMethods = collectItemStackReturningMethodNames(result)
+        val accessors = collectKnownItemStackAccessorExpressions(result)
+        val rewritten = rewriteJavaCallWithOffset(result, "getTagElement") { receiver, args, _ ->
+            val stack = receiver.trim()
+            if (args.size != 1 || stack.isEmpty() || Regex("""[A-Za-z_$][\w$]*""").matches(stack)) return@rewriteJavaCallWithOffset null
+            if (args.single().trim() == "\"BlockEntityTag\"") return@rewriteJavaCallWithOffset null
+            if (!isItemStackExpression(stack, names, stackMethods, accessors)) return@rewriteJavaCallWithOffset null
+            "getCustomDataChild($stack, ${args.single().trim()})"
+        }
+        if (rewritten != result) {
+            result = addExecutableImportIfMissing(rewritten, "net.minecraft.core.component.DataComponents")
+            result = addExecutableImportIfMissing(result, "net.minecraft.world.item.component.CustomData")
+            result = addExecutableImportIfMissing(result, "java.util.function.Consumer")
+            result = addItemStackCustomDataHelpers(result)
+            executableCode = maskJavaCommentsAndLiterals(result)
+        }
+    }
     if (Regex("""$receiverPattern\.(?:getTagElement|removeTagKey)\(""").containsMatchIn(executableCode) ||
         executableCode.contains("DataComponents.CUSTOM_DATA") && executableCode.contains(".copyTag().getCompound(")) {
         val legacyCustomFluidTagCopy =
@@ -1781,7 +1772,7 @@ internal fun StructuralRefactorPass.migrateVanilla121ApiSource(
     result = migrateLegacyAdvancementDatagenSource(result, criterionInstanceFactoryHints)
     result = migrateLegacyCriterionTriggerInstanceCallSites(result, criterionInstanceFactoryHints)
     result = migrateLegacyDatagenTagConstantsSource(result)
-    result = migrateCreateMixinSignatureFamilies(result)
+    result = migrateLegacyMixinTargets(result)
     result = migrateLegacyComponentSerializationSource(result, javaInheritanceIndex)
     result = migrateLegacyNitrogenLanguageHelpersSource(result)
     result = migrateMixinLegacyCapabilityProviderSuperclass(result)
@@ -2065,8 +2056,10 @@ internal fun StructuralRefactorPass.migrateVanilla121ApiSource(
     result = migrateRegistryAccessDependentCalls(result)
     result = migrateConfigScreenFactoryRegistrationExact(result)
     result = migrateModLoadingContextConfigCalls(result)
+    result = migrateLegacySupplierStairs(result)
     result = migrateForgeOnlyStairStateSupplierWrites(result)
     result = LibraryTypeArguments.migrate(result, projectRegistryElements)
+    result = migrateForgeItemStackEquality(result)
     result = removeUnreadInteractionCancellationResults(result)
     result = EntityDataSerializerCodecs.migrate(result)
     result = EntityIgniteOverrides.migrate(result)
@@ -2094,8 +2087,8 @@ internal fun StructuralRefactorPass.migrateVanilla121ApiSource(
     result = migrateItemCapabilityOptionalAccess(result)
     result = migrateArmorTrimSheetDecal(result)
     result = migrateLegacyTagElementWriteChains(result)
-    result = migrateCreateOpenEndedPipeApi(result)
-    result = migrateCreateFluidIngredientAmounts(result)
+    result = LibraryCallContracts.migrate(this, result)
+    result = migrateProvenFluidIngredientAmounts(result)
     result = migrateRecipeManagerByKeyValues(result)
     result = migratePlayerSleepInBedEventSource(result)
     result = migrateHolderIterableElementAccess(result)
@@ -2136,8 +2129,8 @@ internal fun StructuralRefactorPass.migrateVanilla121ApiSource(
     result = migrateLegacyRecipeProviderSource(result, recipeProviderClasses, projectModIdExpression)
     result = threadLookupProviderIntoStaticDatagenHelpers(result, recipeProviderClasses.concrete)
     result = migrateLegacyRecipeBuilderSource(result, recipeSerializerFactoryHints)
-    result = migrateCreateRecipeConstructionBoundaries(result)
-    result = migrateCreateLegacyRecipeSerializationBoundaries(result)
+    result = migrateLegacyRecipeConstructionSurfaces(result)
+    result = migrateLegacyRecipeSerializationSurfaces(result, recipeSerializerFactoryHints)
     result = migrateLegacyLootProviderHolderLookupSource(result, lootTableProviderClasses, lootTableProviderFactoryMethods)
     result = migrateLegacyGlobalLootModifierProviderSource(result, globalLootModifierProviderClasses)
     result = migrateLegacyEntityLootSubProviderSource(result)
@@ -2158,7 +2151,7 @@ internal fun StructuralRefactorPass.migrateVanilla121ApiSource(
     result = migrateLegacyTooltipContextAndEntityDataSource(result)
     result = migrateClientLevelEntityInsertionCalls(result)
     result = migrateCommandSourceStackLevelAccess(result)
-    result = migrateCreateHighlightPrefixedCommandResult(result)
+    result = migrateLegacyCommandResults(result)
     result = migrateLegacyStaticFmlModEventBusAccess(result)
     result = migrateCuriosInventoryOptionalTypes(result)
     result = migrateLegacyCuriosInventoryCapabilities(result)
@@ -2563,11 +2556,11 @@ internal fun StructuralRefactorPass.migrateVanilla121ApiSource(
             "new MerchantOffer(\n                                            new ItemCost(${match.groupValues[1]}, ${match.groupValues[2]}),"
         }
 
-    val potionStacksMigrated = PotionUtilsStackCalls.migrate(result) {
-        "${generatedCompatPackage()}.LegacyPotionUtils.EMPTY"
-    }
+    val potionStacksMigrated = PotionUtilsStackCalls.migrate(result)
     if (potionStacksMigrated != result) {
         result = potionStacksMigrated
+        needsDataComponents = true
+        needsPotionContents = true
         if (!maskJavaCommentsAndLiterals(result).contains("PotionUtils.")) {
             result = removeImport(result, "net.minecraft.world.item.alchemy.PotionUtils")
         }
@@ -2587,6 +2580,10 @@ internal fun StructuralRefactorPass.migrateVanilla121ApiSource(
             Regex("""Potion\.byName\(\s*([^)]+)\s*\)""")
         ) { match ->
             "net.minecraft.core.registries.BuiltInRegistries.POTION.get(net.minecraft.resources.ResourceLocation.parse(${match.groupValues[1].trim()}))"
+        }
+        if (maskJavaCommentsAndLiterals(result).contains("Potions.EMPTY")) {
+            val emptyPotion = "${generatedCompatPackage()}.LegacyPotionUtils.EMPTY"
+            result = replaceExecutableRegex(result, Regex("""\bPotions\.EMPTY(?:\.value\(\))?(?![\w$])""")) { emptyPotion }
         }
         result = replaceExecutableRegex(
             result,
@@ -2610,7 +2607,8 @@ internal fun StructuralRefactorPass.migrateVanilla121ApiSource(
         result = addImportIfMissing(result, "net.minecraft.world.entity.player.Player")
     }
 
-    result = migrateCreateInteractionCompilerSurfaces(result)
+    result = migrateLegacyInteractionApiSurfaces(result)
+    result = migrateLegacyEmptyStackMaxSize(result)
     result = migrateJava21StrictWarningSource(result)
     result = migrateDuplicateHolderLookupConstructorArguments(result)
 
@@ -2672,7 +2670,7 @@ internal fun StructuralRefactorPass.migrateVanilla121ApiSource(
     result = migrateHolderElementCalls(result)
     result = migrateEnchantmentHolderCollections(result)
     result = migrateRecipeHolderStreamValues(result)
-    result = migrateCreateRecipeBoundaryValues(result)
+    result = migrateLegacyRecipeBoundaryValues(result)
     result = migrateLegacyScoreboardValues(result)
     result = migrateContainerRecipeArguments(result)
     result = migrateLegacyRegistryValueHolders(result)

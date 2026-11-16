@@ -14,12 +14,12 @@ class LegacyMapDecorationSubclassesTest {
         StructuralRefactorPass().apply {
             projectValueFacts = ProjectValueFacts(
                 parents = mapOf(
-                    "com.simibubi.create.content.trains.station.StationMarker.Decoration" to
+                    "example.map.Markers.Decoration" to
                         "net.minecraft.world.level.saveddata.maps.MapDecoration"
                 ),
                 types = setOf(
-                    "com.simibubi.create.content.trains.station.StationMarker.Decoration",
-                    "com.simibubi.create.foundation.map.CustomRenderedMapDecoration"
+                    "example.map.Markers.Decoration",
+                    "example.map.SelfRenderedDecoration"
                 )
             )
         }
@@ -145,27 +145,23 @@ class LegacyMapDecorationSubclassesTest {
     }
 
     @Test
-    fun `custom rendered subclass becomes associated composition and preserves interfaces`() {
+    fun `custom rendered subclass is rebuilt from its record and keeps its interfaces`() {
         val source = """
-            package example;
+            package example.map;
 
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import net.minecraft.client.renderer.MultiBufferSource;
             import net.minecraft.network.chat.Component;
             import net.minecraft.world.level.saveddata.maps.MapDecoration;
+            import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
 
-            final class StationMarker {
+            final class Markers {
                 static final MapDecoration.Type TYPE = MapDecoration.Type.RED_MARKER;
 
                 public static class Decoration extends MapDecoration
-                        implements CustomRenderedMapDecoration {
+                        implements SelfRenderedDecoration {
                     public Decoration(byte x, byte y, Component name) {
                         super(TYPE, x, y, (byte) 18, name);
-                    }
-
-                    static Decoration from(MapDecoration decoration) {
-                        return new Decoration(
-                            decoration.getX(),
-                            decoration.getY(),
-                            decoration.getName());
                     }
 
                     @Override
@@ -174,8 +170,8 @@ class LegacyMapDecorationSubclassesTest {
                     }
 
                     @Override
-                    public void render(Object pose, Object buffers, boolean active,
-                            int light, Object mapData, int index) {
+                    public void render(PoseStack poseStack, MultiBufferSource bufferSource, boolean active,
+                            int light, MapItemSavedData mapData, int index) {
                     }
 
                     @Override
@@ -190,7 +186,7 @@ class LegacyMapDecorationSubclassesTest {
             StructuralRefactorPass().migrateFinalMapDecorationSubclassSource(source)
 
         assertTrue(
-            Regex("""class\s+Decoration\s+implements\s+CustomRenderedMapDecoration""")
+            Regex("""class\s+Decoration\s+implements\s+SelfRenderedDecoration""")
                 .containsMatchIn(migrated),
             migrated
         )
@@ -203,30 +199,59 @@ class LegacyMapDecorationSubclassesTest {
             migrated
         )
         assertTrue(migrated.contains("this.modporter\$rot = modporter\$decoration.rot();"), migrated)
-        assertTrue(migrated.contains("decoration.name().orElse(null)"), migrated)
+        // 1.21.1 hands a renderer the record: the class is rebuilt from it to run its render code
+        assertTrue(migrated.contains("return new MapDecoration(type(), x(), y(), rot(), name());"), migrated)
+        assertTrue(migrated.contains("private Decoration(MapDecoration modporter\$decoration) {"), migrated)
         assertTrue(
-            migrated.filterNot(Char::isWhitespace).contains(
-                "CustomRenderedMapDecoration.associate(" +
-                    "new MapDecoration(type(), x(), y(), rot(), name()), this)"
-                        .filterNot(Char::isWhitespace)
+            migrated.contains(
+                "public static Decoration modporter\$fromDecoration(MapDecoration decoration) {\n" +
+                    "\t\t\treturn new Decoration(decoration);"
+            ) || migrated.contains(
+                "public static Decoration modporter\$fromDecoration(MapDecoration decoration) {\n" +
+                    "            return new Decoration(decoration);"
             ),
             migrated
         )
-        assertTrue(
-            Regex("""@Override\s+public boolean renderOnFrame\(\)""")
-                .containsMatchIn(migrated),
-            migrated
-        )
-        assertTrue(
-            Regex("""@Override\s+public boolean render\(int index\)""")
-                .containsMatchIn(migrated),
-            migrated
-        )
+        assertFalse(migrated.contains("associate("), migrated)
+        // the type now says whether it shows in item frames and NeoForge asks its renderer: nothing overridden
+        assertFalse(Regex("""@Override\s+public boolean renderOnFrame\(\)""").containsMatchIn(migrated), migrated)
+        assertFalse(Regex("""@Override\s+public boolean render\(int index\)""").containsMatchIn(migrated), migrated)
+        assertTrue(Regex("""@Override\s+public void render\(PoseStack poseStack""").containsMatchIn(migrated), migrated)
         assertFalse(migrated.contains("extends MapDecoration"), migrated)
         assertEquals(
             migrated,
             StructuralRefactorPass().migrateFinalMapDecorationSubclassSource(migrated)
         )
+    }
+
+    @Test
+    fun `custom rendered subclass with state beyond the record stays as it is`() {
+        val source = """
+            package example.map;
+
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import net.minecraft.client.renderer.MultiBufferSource;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.level.saveddata.maps.MapDecoration;
+            import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
+
+            final class Markers {
+                public static class Decoration extends MapDecoration {
+                    private final int color;
+
+                    public Decoration(byte x, byte y, Component name, int color) {
+                        super(MapDecoration.Type.RED_MARKER, x, y, (byte) 0, name);
+                        this.color = color;
+                    }
+
+                    public void render(PoseStack poseStack, MultiBufferSource bufferSource, boolean active,
+                            int light, MapItemSavedData mapData, int index) {
+                    }
+                }
+            }
+        """.trimIndent()
+
+        assertEquals(source, StructuralRefactorPass().migrateFinalMapDecorationSubclassSource(source))
     }
 
     @Test
@@ -258,7 +283,7 @@ class LegacyMapDecorationSubclassesTest {
             ),
             migrated
         )
-        assertFalse(migrated.contains("CustomRenderedMapDecoration.associate"), migrated)
+        assertFalse(migrated.contains("associate("), migrated)
         assertTrue(migrated.contains("public boolean render(int index)"), migrated)
         assertFalse(
             Regex("""@Override\s+public boolean render\(int index\)""")
@@ -269,7 +294,6 @@ class LegacyMapDecorationSubclassesTest {
         val unsupported = """
             package example;
 
-            import com.simibubi.create.content.trains.station.StationMarker;
             import net.minecraft.world.level.saveddata.maps.MapDecoration;
 
             final class Markers {
@@ -292,93 +316,17 @@ class LegacyMapDecorationSubclassesTest {
     }
 
     @Test
-    fun `renderer interface and packet seams retain wrapper association`() {
-        val rendererInterface = """
-            package com.simibubi.create.foundation.map;
-
-            interface CustomRenderedMapDecoration {
-                void render(Object pose, Object buffers, boolean active,
-                    int packedLight, Object mapData, int index);
-            }
-        """.trimIndent()
-        val migratedInterface =
-            createProjectPass().migrateFinalMapDecorationSubclassSource(rendererInterface)
-        assertTrue(
-            migratedInterface.contains(
-                "Collections.synchronizedMap(new WeakHashMap<>())"
-            ),
-            migratedInterface
-        )
-        assertTrue(migratedInterface.contains("boolean renderOnFrame();"), migratedInterface)
-        assertTrue(migratedInterface.contains("boolean render(int index);"), migratedInterface)
-        assertTrue(
-            migratedInterface.contains(
-                "static MapDecoration associate("
-            ),
-            migratedInterface
-        )
-        assertTrue(
-            migratedInterface.contains(
-                "static CustomRenderedMapDecoration find(MapDecoration decoration)"
-            ),
-            migratedInterface
-        )
-        assertEquals(
-            migratedInterface,
-            createProjectPass()
-                .migrateFinalMapDecorationSubclassSource(migratedInterface)
-        )
-
-        val packet = """
-            package com.simibubi.create.foundation.mixin;
-
-            import java.util.List;
-            import com.simibubi.create.content.trains.station.StationMarker;
-            import net.minecraft.world.level.saveddata.maps.MapDecoration;
-
-            final class ClientboundMapItemDataPacketMixin {
-                private List<MapDecoration> decorations;
-
-                void repair(MapDecoration decoration, int index) {
-                    if (decoration instanceof StationMarker.Decoration) {
-                        decorations.set(
-                            index,
-                            StationMarker.Decoration.from(decoration));
-                    }
-                }
-            }
-        """.trimIndent()
-        val migratedPacket =
-            createProjectPass().migrateFinalMapDecorationSubclassSource(packet)
-        assertTrue(
-            migratedPacket.contains(
-                "CustomRenderedMapDecoration.find(decoration) != null"
-            ),
-            migratedPacket
-        )
-        assertTrue(
-            migratedPacket.contains(
-                "StationMarker.Decoration.from(decoration).asMapDecoration()"
-            ),
-            migratedPacket
-        )
-        assertTrue(
-            migratedPacket.contains(
-                "import com.simibubi.create.foundation.map.CustomRenderedMapDecoration;"
-            ),
-            migratedPacket
-        )
-
+    fun `typed creations of a proven source subclass become records`() {
         val storage = """
             package example;
 
-            import com.simibubi.create.content.trains.station.StationMarker;
+            import example.map.Markers;
             import net.minecraft.world.level.saveddata.maps.MapDecoration;
 
             final class Storage {
                 void put(byte x, byte y) {
                     MapDecoration decoration =
-                        new StationMarker.Decoration(x, y, null);
+                        new Markers.Decoration(x, y, null);
                 }
             }
         """.trimIndent()
@@ -386,7 +334,7 @@ class LegacyMapDecorationSubclassesTest {
             createProjectPass().migrateFinalMapDecorationSubclassSource(storage)
         assertTrue(
             migratedStorage.contains(
-                "new StationMarker.Decoration(x, y, null).asMapDecoration()"
+                "new Markers.Decoration(x, y, null).asMapDecoration()"
             ),
             migratedStorage
         )
@@ -395,12 +343,12 @@ class LegacyMapDecorationSubclassesTest {
             package example;
 
             import net.minecraft.world.level.saveddata.maps.MapDecoration;
-            import some.other.StationMarker;
+            import some.other.Markers;
 
             final class Storage {
                 void put(byte x, byte y) {
                     MapDecoration decoration =
-                        new StationMarker.Decoration(x, y, null);
+                        new Markers.Decoration(x, y, null);
                 }
             }
         """.trimIndent()
@@ -408,80 +356,6 @@ class LegacyMapDecorationSubclassesTest {
             guessedStorage,
             createProjectPass()
                 .migrateFinalMapDecorationSubclassSource(guessedStorage)
-        )
-    }
-
-    @Test
-    fun `legacy map renderer injections become modern wrap operations`() {
-        val source = """
-            package com.simibubi.create.foundation.mixin.client;
-
-            import java.util.Iterator;
-            import org.joml.Matrix4f;
-            import org.objectweb.asm.Opcodes;
-            import org.spongepowered.asm.mixin.Mixin;
-            import org.spongepowered.asm.mixin.Shadow;
-            import org.spongepowered.asm.mixin.injection.At;
-            import org.spongepowered.asm.mixin.injection.Group;
-            import org.spongepowered.asm.mixin.injection.Inject;
-            import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-            import org.spongepowered.asm.mixin.injection.callback.LocalCapture;
-            import com.mojang.blaze3d.vertex.PoseStack;
-            import com.mojang.blaze3d.vertex.VertexConsumer;
-            import com.simibubi.create.foundation.map.CustomRenderedMapDecoration;
-            import net.minecraft.client.renderer.MultiBufferSource;
-            import net.minecraft.world.level.saveddata.maps.MapDecoration;
-            import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
-
-            @Mixin(targets = "net.minecraft.client.gui.MapRenderer${'$'}MapInstance")
-            final class MapRendererMapInstanceMixin {
-                @Shadow
-                private MapItemSavedData data;
-
-                @Group(name = "custom_decoration_rendering", min = 1, max = 1)
-                @Inject(method = "draw(Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;ZI)V", at = @At(value = "INVOKE", target = "Lnet/minecraft/world/level/saveddata/maps/MapDecoration;render(I)Z", remap = false), locals = LocalCapture.CAPTURE_FAILHARD)
-                private void create${'$'}onDraw(PoseStack poseStack, MultiBufferSource bufferSource, boolean active, int packedLight, CallbackInfo ci, int index, Iterator<MapDecoration> iterator, MapDecoration decoration) {
-                    if (decoration instanceof CustomRenderedMapDecoration renderer) {
-                        renderer.render(poseStack, bufferSource, active, packedLight, data, index);
-                    }
-                }
-
-                @Group(name = "custom_decoration_rendering")
-                @Inject(method = "draw(Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;ZI)V", at = @At(value = "FIELD", target = "net/optifine/reflect/Reflector.ForgeMapDecoration_render:Lnet/optifine/reflect/ReflectorMethod;", opcode = Opcodes.GETSTATIC, ordinal = 1, remap = false), locals = LocalCapture.CAPTURE_FAILHARD)
-                private void create${'$'}onDrawOptifine(PoseStack poseStack, MultiBufferSource bufferSource, boolean active, int packedLight, CallbackInfo ci, int index, Iterator<MapDecoration> iterator, MapDecoration decoration) {
-                    if (decoration instanceof CustomRenderedMapDecoration renderer) {
-                        renderer.render(poseStack, bufferSource, active, packedLight, data, index);
-                    }
-                }
-            }
-        """.trimIndent()
-
-        val migrated =
-            StructuralRefactorPass().migrateFinalMapDecorationSubclassSource(source)
-
-        assertTrue(migrated.contains("@WrapOperation("), migrated)
-        assertTrue(
-            migrated.contains("MapDecoration;renderOnFrame()Z"),
-            migrated
-        )
-        assertTrue(
-            migrated.contains("MapDecorationRendererManager;render("),
-            migrated
-        )
-        assertTrue(
-            migrated.contains(
-                "CustomRenderedMapDecoration.find(decoration)"
-            ),
-            migrated
-        )
-        assertTrue(migrated.contains("return renderer.render(index);"), migrated)
-        assertTrue(migrated.contains("original.call(decoration)"), migrated)
-        assertFalse(migrated.contains("MapDecoration;render(I)Z"), migrated)
-        assertFalse(migrated.contains("ForgeMapDecoration_render"), migrated)
-        assertFalse(migrated.contains("LocalCapture"), migrated)
-        assertEquals(
-            migrated,
-            StructuralRefactorPass().migrateFinalMapDecorationSubclassSource(migrated)
         )
     }
 }

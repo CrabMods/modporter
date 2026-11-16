@@ -253,8 +253,7 @@ class MountedStorageProviderGraphTest {
         assertTrue(
             Regex(
                 """static\s+Carriage\s+read\s*\(\s*CompoundTag\s+tag\s*,""" +
-                    """\s*DimensionPalette\s+dimensions\s*,""" +
-                    """\s*(?:net\.minecraft\.core\.)?HolderLookup\.Provider\s+registries\s*\)"""
+                    """\s*DimensionPalette\s+dimensions\s*,\s*HolderLookup\.Provider\s+registries\s*\)"""
             ).containsMatchIn(carriageResult),
             carriageResult
         )
@@ -265,10 +264,7 @@ class MountedStorageProviderGraphTest {
             carriageResult
         )
         assertTrue(
-            Regex(
-                """void\s+read\(\s*CompoundTag\s+tag\s*,""" +
-                    """\s*(?:net\.minecraft\.core\.)?HolderLookup\.Provider\s+registries\s*\)"""
-            ).containsMatchIn(carriageResult),
+            carriageResult.contains("void read(CompoundTag tag, HolderLookup.Provider registries)"),
             carriageResult
         )
         assertTrue(

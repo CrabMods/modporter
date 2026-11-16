@@ -102,7 +102,7 @@
         assertTrue(transformed.contains("targetBE.loadWithComponents(sourceBE.saveWithoutMetadata(targetBE.getLevel().registryAccess()), targetBE.getLevel().registryAccess());"))
         assertTrue(transformed.contains("stack.getEnchantmentLevel(net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(Enchantments.EFFICIENCY))"))
         assertTrue(transformed.contains("stack.enchant(net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(Enchantments.EFFICIENCY), 1)"))
-        assertTrue(transformed.contains("stack.getOrCreateTag().putLong(\"cooldown\", 123L);"))
+        assertTrue(transformed.contains("CustomData.update(net.minecraft.core.component.DataComponents.CUSTOM_DATA, stack, customDataTag -> customDataTag.putLong(\"cooldown\", 123L));"))
         assertTrue(transformed.contains("public boolean supportsEnchantment(ItemStack stack, net.minecraft.core.Holder<Enchantment> enchantment)"))
         assertTrue(transformed.contains("return enchantment.is(Enchantments.EFFICIENCY);"))
     }

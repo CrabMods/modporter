@@ -132,11 +132,13 @@ internal data class ProjectValueFacts(
                         }
                         else -> return null
                     }
-                    if (open < 0 || base in registryEntries) return base
+                    if (open < 0) return base
                     val close = value.lastIndexOf('>')
-                    if (close < open) return null
+                    if (close < open) return if (base in registryEntries) base else null
+                    // A registry entry keeps its entry type when that type resolves, so `ENTRY.get()`
+                    // is typed; an unresolved entry type still leaves the raw entry known.
                     val arguments = JavaSourceText.splitTopLevelArgs(value.substring(open + 1, close))
-                        .map { canonical(it) ?: return null }
+                        .map { canonical(it) ?: return if (base in registryEntries) base else null }
                     return "$base<${arguments.joinToString(",")}>"
                 }
                 for (block in blocks) {

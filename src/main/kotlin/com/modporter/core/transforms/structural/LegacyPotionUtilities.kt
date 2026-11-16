@@ -1,13 +1,5 @@
 package com.modporter.core.transforms.structural
 
-import com.github.javaparser.JavaParser
-import com.github.javaparser.ParserConfiguration
-import com.github.javaparser.StaticJavaParser
-import com.github.javaparser.ast.body.MethodDeclaration
-import com.github.javaparser.ast.expr.FieldAccessExpr
-import com.github.javaparser.ast.expr.LambdaExpr
-import com.github.javaparser.ast.stmt.ReturnStmt
-import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter
 import com.modporter.core.pipeline.Change
 import com.modporter.core.pipeline.Confidence
 import java.nio.file.Path
@@ -41,7 +33,6 @@ internal fun StructuralRefactorPass.migrateLegacyPotionUtilities(project: Path, 
                 }
             }
         }
-        result = rewriteExactLegacyPotionEmptyReturns(result, compat)
         // getPotion's legacy return value was a raw Potion, including the unregistered empty sentinel.
         result = replaceExecutableJavaRegex(result, Regex("""\.potion\(\)\.orElse\((?:${Regex.escape(compat)}\.)?LegacyPotionUtils\.EMPTY\)""")) {
             ".potion().map(net.minecraft.core.Holder::value).orElse($compat.LegacyPotionUtils.EMPTY)"
@@ -64,40 +55,4 @@ internal fun StructuralRefactorPass.migrateLegacyPotionUtilities(project: Path, 
         changes += Change(generated, 1, "Generate legacy potion NBT adapters using target potion contents", "", "LegacyPotionUtils", Confidence.HIGH, "struct-legacy-potion-utilities")
     }
     return changes
-}
-
-private fun StructuralRefactorPass.rewriteExactLegacyPotionEmptyReturns(source: String, compat: String): String {
-    if (!maskJavaCommentsAndLiterals(source).contains("Potions.EMPTY")) return source
-    val parser = JavaParser(
-        ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
-    )
-    val unit = parser.parse(source).result.orElse(null) ?: return source
-    val exact = ExactJavaSemantics(unit)
-    LexicalPreservingPrinter.setup(unit)
-    var changed = false
-    for (statement in unit.findAll(ReturnStmt::class.java)) {
-        if (statement.findAncestor(LambdaExpr::class.java).isPresent) continue
-        val empty = statement.expression.orElse(null) as? FieldAccessExpr ?: continue
-        if (empty.nameAsString != "EMPTY" ||
-            !exact.exactStaticScope(
-                empty.scope,
-                "Potions",
-                "net.minecraft.world.item.alchemy.Potions",
-            )
-        ) {
-            continue
-        }
-        val method = statement.findAncestor(MethodDeclaration::class.java).orElse(null) ?: continue
-        if (!exact.exactTypeReference(
-                method.typeAsString,
-                "Potion",
-                "net.minecraft.world.item.alchemy.Potion",
-            )
-        ) {
-            continue
-        }
-        empty.replace(StaticJavaParser.parseExpression("$compat.LegacyPotionUtils.EMPTY"))
-        changed = true
-    }
-    return if (changed) LexicalPreservingPrinter.print(unit) else source
 }

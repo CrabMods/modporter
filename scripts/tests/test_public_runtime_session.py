@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 
@@ -200,6 +201,217 @@ if ($milliseconds -gt 0) {
         environment["PUBLIC_RUNTIME_HARNESS_PATH"] = str(harness_path)
         environment["PUBLIC_RUNTIME_FIXTURE_MODE"] = mode
         return environment
+
+    def test_command_output_is_relayed_while_the_command_runs(self) -> None:
+        """A server-style command prints its ready line, then waits for a stop line."""
+        case = self.root / "streaming"
+        case.mkdir()
+        receipt = case / "session.json"
+        child = self._write_script(
+            "ready-then-stop.ps1",
+            r"""
+[Console]::Out.WriteLine('fixture ready')
+[Console]::Out.Flush()
+$stopLine = [Console]::In.ReadLine()
+[Console]::Out.WriteLine("fixture stopped by '$stopLine'")
+""",
+        )
+        process = subprocess.Popen(
+            self._command(
+                runtime_directory=case / "runtime",
+                executable=child,
+                receipt_path=receipt,
+                timeout_seconds=60,
+            ),
+            cwd=self.root,
+            env=self.environment,
+            text=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=CREATE_NO_WINDOW,
+        )
+        try:
+            first_line: list[str] = []
+            reader = threading.Thread(
+                target=lambda: first_line.append(process.stdout.readline()),
+                daemon=True,
+            )
+            reader.start()
+            reader.join(timeout=40)
+            self.assertFalse(reader.is_alive(), "no output arrived while the command was running")
+            self.assertIn("fixture ready", first_line[0])
+            self.assertIsNone(process.poll(), "the command must still be running at its ready line")
+            assert process.stdin is not None
+            process.stdin.write("stop\n")
+            process.stdin.flush()
+            stdout, stderr = process.communicate(timeout=40)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+        self.assertEqual(0, process.returncode, stdout + stderr)
+        self.assertIn("fixture stopped by 'stop'", stdout)
+        self.assertEqual(1, (first_line[0] + stdout).count("fixture ready"))
+        session = self._read_json(receipt)
+        self.assertTrue(session["passed"])
+
+    def _coordinator_writer(self) -> Path:
+        """Writes one child receipt and a coordinator receipt in the shape the in-game harness uses."""
+        return self._write_script(
+            "write-coordinator.ps1",
+            r"""
+$directory = Split-Path -Parent $env:PUBLIC_RUNTIME_HARNESS_PATH
+$artifactPath = Join-Path $directory 'trace.json'
+[IO.File]::WriteAllText($artifactPath, '{"trace":true}')
+$artifactSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $artifactPath).Hash.ToLowerInvariant()
+$mode = $env:PUBLIC_RUNTIME_FIXTURE_MODE
+$row = [ordered]@{
+    id = 'alpha'
+    passed = $true
+    cleanupPassed = $true
+    startedAtTick = 10
+    finishedAtTick = 12
+    artifacts = @([ordered]@{ path = $artifactPath; sha256 = $artifactSha })
+}
+if ($mode -eq 'child-without-ticks') {
+    $row.Remove('startedAtTick')
+}
+$child = [ordered]@{
+    schema = 'fixture.child.v1'
+    sessionId = $env:MINECRAFT_MOD_TEST_SESSION_ID
+    status = 'PASS'
+    processStartCount = 1
+    worldLoadCount = 1
+    scenarioCount = 1
+    failedCount = 0
+    cleanupFailureCount = 0
+    allScenariosPassed = $true
+    requestedScenarios = @('alpha')
+    observedScenarios = @('alpha')
+    scenarios = @($row)
+}
+$childPath = Join-Path $directory 'child.json'
+$child | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $childPath -Encoding utf8
+$childSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $childPath).Hash.ToLowerInvariant()
+if ($mode -eq 'bad-child-hash') {
+    $childSha = '0' * 64
+}
+$childIndex = if ($mode -eq 'wrong-child-row') { 1 } else { 0 }
+$coordinator = [ordered]@{
+    schema = 'fixture.coordinator.v1'
+    sessionId = $env:MINECRAFT_MOD_TEST_SESSION_ID
+    status = 'PASS'
+    processStartCount = 1
+    worldLoadCount = 1
+    scenarioCount = 1
+    failedCount = 0
+    cleanupFailureCount = 0
+    allScenariosPassed = $true
+    requestedScenarios = @('alpha')
+    observedScenarios = @('alpha')
+    children = [ordered]@{
+        only = [ordered]@{ path = $childPath; sha256 = $childSha; scenarioCount = 1 }
+    }
+    scenarios = @([ordered]@{
+        id = 'alpha'
+        child = 'only'
+        childIndex = $childIndex
+        passed = $true
+        cleanupPassed = $true
+    })
+}
+$coordinator | ConvertTo-Json -Depth 20 |
+    Set-Content -LiteralPath $env:PUBLIC_RUNTIME_HARNESS_PATH -Encoding utf8
+""",
+        )
+
+    def test_coordinator_receipt_is_validated_through_its_child_receipts(self) -> None:
+        case = self.root / "coordinator"
+        case.mkdir()
+        harness = case / "harness.json"
+        receipt = case / "session.json"
+        result = self._run(
+            runtime_directory=case / "runtime",
+            executable=self._coordinator_writer(),
+            receipt_path=receipt,
+            harness_path=harness,
+            environment=self._harness_environment(harness, "ok"),
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        outer = self._read_json(receipt)
+        self.assertTrue(outer["passed"])
+        self.assertTrue(outer["harnessValidated"])
+        self.assertEqual(
+            outer["harnessReceiptSha256"],
+            hashlib.sha256(harness.read_bytes()).hexdigest(),
+        )
+
+    def test_coordinator_receipt_with_unproved_children_is_rejected(self) -> None:
+        for mode, expected_failure in (
+            ("bad-child-hash", "sha256 does not match the child receipt"),
+            ("wrong-child-row", "does not match its child receipt row"),
+            ("child-without-ticks", "must record startedAtTick and finishedAtTick"),
+        ):
+            with self.subTest(mode=mode):
+                case = self.root / f"coordinator-{mode}"
+                case.mkdir()
+                harness = case / "harness.json"
+                receipt = case / "session.json"
+                result = self._run(
+                    runtime_directory=case / "runtime",
+                    executable=self._coordinator_writer(),
+                    receipt_path=receipt,
+                    harness_path=harness,
+                    environment=self._harness_environment(harness, mode),
+                )
+                self.assertNotEqual(result.returncode, 0)
+                outer = self._read_json(receipt)
+                self.assertEqual(outer["exitCode"], 74)
+                self.assertFalse(outer["passed"])
+                self.assertFalse(outer["harnessValidated"])
+                self.assertIn(expected_failure, outer["failure"])
+
+    def test_receipt_older_than_its_session_is_rejected(self) -> None:
+        case = self.root / "stale"
+        case.mkdir()
+        harness = case / "harness.json"
+        receipt = case / "session.json"
+        writer = self._write_script(
+            "write-stale.ps1",
+            r"""
+$receipt = [ordered]@{
+    sessionId = $env:MINECRAFT_MOD_TEST_SESSION_ID
+    processStartCount = 1
+    worldLoadCount = 1
+    scenarioCount = 1
+    failedCount = 0
+    cleanupFailureCount = 0
+    allScenariosPassed = $true
+    requestedScenarios = @('alpha')
+    observedScenarios = @('alpha')
+    scenarios = @([ordered]@{
+        id = 'alpha'; passed = $true; cleanupPassed = $true
+        startedAtTick = 1; finishedAtTick = 2; artifacts = @()
+    })
+}
+$receipt | ConvertTo-Json -Depth 20 |
+    Set-Content -LiteralPath $env:PUBLIC_RUNTIME_HARNESS_PATH -Encoding utf8
+(Get-Item -LiteralPath $env:PUBLIC_RUNTIME_HARNESS_PATH).LastWriteTimeUtc =
+    [DateTime]::UtcNow.AddHours(-1)
+""",
+        )
+        result = self._run(
+            runtime_directory=case / "runtime",
+            executable=writer,
+            receipt_path=receipt,
+            harness_path=harness,
+            environment=self._harness_environment(harness, "ok"),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        outer = self._read_json(receipt)
+        self.assertEqual(outer["exitCode"], 74)
+        self.assertIn("predates the runtime session", outer["failure"])
 
     def test_valid_harness_binds_artifact_and_harness_hash(self) -> None:
         case = self.root / "valid"

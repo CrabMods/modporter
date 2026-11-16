@@ -274,13 +274,45 @@ function Invoke-OwnedCommand {
         if (-not $process.Start()) {
             throw "Failed to start runtime command: $FilePath"
         }
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
-        $finished = if ($CommandTimeoutSeconds -eq 0) {
-            $process.WaitForExit()
-            $true
+        # A server or client session is observed through this stream while it runs (its
+        # ready line, then a stop command on the inherited standard input), so every line
+        # is relayed as it arrives instead of after the command has exited.
+        $deadlineUtc = if ($CommandTimeoutSeconds -eq 0) {
+            [DateTime]::MaxValue
         } else {
-            $process.WaitForExit($CommandTimeoutSeconds * 1000)
+            $startedAtUtc.AddSeconds($CommandTimeoutSeconds)
+        }
+        $relay = [Console]::Out
+        $pendingLine = $process.StandardOutput.ReadLineAsync()
+        $quietPollsAfterExit = 0
+        $finished = $true
+        while ($true) {
+            if ($pendingLine.Wait(200)) {
+                $line = $pendingLine.GetAwaiter().GetResult()
+                if ($null -eq $line) { break }
+                $relay.WriteLine($line)
+                $relay.Flush()
+                $quietPollsAfterExit = 0
+                $pendingLine = $process.StandardOutput.ReadLineAsync()
+            } elseif ([DateTime]::UtcNow -ge $deadlineUtc) {
+                $finished = $false
+                break
+            } elseif ($process.HasExited) {
+                # A descendant can keep the pipe open after the command itself has exited.
+                $quietPollsAfterExit++
+                if ($quietPollsAfterExit -ge 25) { break }
+            }
+        }
+        if ($finished -and -not $process.HasExited) {
+            $finished = if ($CommandTimeoutSeconds -eq 0) {
+                $process.WaitForExit()
+                $true
+            } else {
+                $remainingMilliseconds = [int][Math]::Max(
+                    1, ($deadlineUtc - [DateTime]::UtcNow).TotalMilliseconds)
+                $process.WaitForExit($remainingMilliseconds)
+            }
         }
         if (-not $finished) {
             $timedOut = $true
@@ -300,8 +332,13 @@ function Invoke-OwnedCommand {
             }
         }
         $process.WaitForExit()
-        $stdout = $stdoutTask.GetAwaiter().GetResult()
-        $stderr = $stderrTask.GetAwaiter().GetResult()
+        # Standard output was relayed line by line above and is not returned again.
+        $stdout = ''
+        $stderr = if ($stderrTask.Wait(5000)) {
+            $stderrTask.GetAwaiter().GetResult()
+        } else {
+            ''
+        }
         return [pscustomobject][ordered]@{
             processId = $process.Id
             startedAtUtc = $startedAtUtc
@@ -333,12 +370,162 @@ function Test-StringSequenceEqual {
     return $true
 }
 
+function Get-ScenarioEvidenceErrors {
+    param(
+        [Parameter(Mandatory)][object]$Scenario,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    $errors = [Collections.Generic.List[string]]::new()
+    $properties = $Scenario.PSObject.Properties
+    if ($null -eq $properties['startedAtTick'] -or
+            $null -eq $properties['finishedAtTick']) {
+        $errors.Add("$Label must record startedAtTick and finishedAtTick")
+    } elseif ([long]$Scenario.startedAtTick -lt 0 -or
+            [long]$Scenario.finishedAtTick -lt
+                [long]$Scenario.startedAtTick) {
+        $errors.Add("$Label has invalid tick bounds")
+    }
+    if ($null -eq $properties['artifacts']) {
+        $errors.Add("$Label.artifacts is required")
+    }
+    return $errors
+}
+
+function Get-ReceiptFreshnessErrors {
+    param(
+        [Parameter(Mandatory)][string]$ReceiptPath,
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][datetime]$SessionStartedAtUtc
+    )
+
+    $errors = [Collections.Generic.List[string]]::new()
+    $writtenAtUtc = (Get-Item -LiteralPath $ReceiptPath -Force).LastWriteTimeUtc
+    if ($writtenAtUtc -lt $SessionStartedAtUtc) {
+        $errors.Add("$Label predates the runtime session")
+    } elseif ($writtenAtUtc -gt [DateTime]::UtcNow.AddMinutes(5)) {
+        $errors.Add("$Label write time is implausibly in the future")
+    }
+    return $errors
+}
+
+# A coordinator receipt aggregates the receipts of several in-game harnesses that shared one
+# process and one world. Every child is bound by path and SHA-256 and is validated here as
+# strictly as a single harness receipt; the validated children are returned through
+# $ChildReceipts so the coordinator rows can be matched against them.
+function Get-CoordinatorChildErrors {
+    param(
+        [Parameter(Mandatory)][object]$Children,
+        [Parameter(Mandatory)][string]$SessionId,
+        [Parameter(Mandatory)][datetime]$SessionStartedAtUtc,
+        [Parameter(Mandatory)][hashtable]$ChildReceipts
+    )
+
+    $errors = [Collections.Generic.List[string]]::new()
+    foreach ($property in $Children.PSObject.Properties) {
+        $name = [string]$property.Name
+        $label = "children.$name"
+        $descriptor = $property.Value
+        if ($descriptor -isnot [Management.Automation.PSCustomObject] -or
+                $null -eq $descriptor.PSObject.Properties['path'] -or
+                $null -eq $descriptor.PSObject.Properties['sha256']) {
+            $errors.Add("$label must contain path and sha256")
+            continue
+        }
+        $childPath = [string]$descriptor.path
+        $expectedSha256 = [string]$descriptor.sha256
+        if ([string]::IsNullOrWhiteSpace($childPath) -or
+                -not [IO.Path]::IsPathRooted($childPath) -or
+                -not (Test-Path -LiteralPath $childPath -PathType Leaf)) {
+            $errors.Add("$label.path must be an existing absolute file path")
+            continue
+        }
+        if ($expectedSha256 -cnotmatch '^[0-9a-f]{64}$') {
+            $errors.Add("$label.sha256 must be 64 lowercase hexadecimal characters")
+            continue
+        }
+        $observedSha256 = (Get-FileHash -Algorithm SHA256 `
+            -LiteralPath $childPath).Hash.ToLowerInvariant()
+        if ($observedSha256 -cne $expectedSha256) {
+            $errors.Add("$label.sha256 does not match the child receipt")
+            continue
+        }
+        foreach ($errorText in @(Get-ReceiptFreshnessErrors `
+                -ReceiptPath $childPath -Label $label `
+                -SessionStartedAtUtc $SessionStartedAtUtc)) {
+            $errors.Add($errorText)
+        }
+        try {
+            $child = Get-Content -Raw -LiteralPath $childPath | ConvertFrom-Json
+        } catch {
+            $errors.Add("$label is not valid JSON: $($_.Exception.Message)")
+            continue
+        }
+        if ([string]$child.sessionId -cne $SessionId) {
+            $errors.Add("$label sessionId mismatch")
+        }
+        if ([int]$child.processStartCount -ne $ExpectedProcessStartCount) {
+            $errors.Add("$label processStartCount must be $ExpectedProcessStartCount")
+        }
+        if ([int]$child.worldLoadCount -ne $ExpectedWorldLoadCount) {
+            $errors.Add("$label worldLoadCount must be $ExpectedWorldLoadCount")
+        }
+        if ([int]$child.failedCount -ne 0) {
+            $errors.Add("$label failedCount must be 0")
+        }
+        if ([int]$child.cleanupFailureCount -ne 0) {
+            $errors.Add("$label cleanupFailureCount must be 0")
+        }
+        if (-not (Test-JsonBooleanTrue $child.allScenariosPassed)) {
+            $errors.Add("$label allScenariosPassed must be the JSON boolean true")
+        }
+        $childRequested = @($child.requestedScenarios | ForEach-Object { [string]$_ })
+        $childObserved = @($child.observedScenarios | ForEach-Object { [string]$_ })
+        $childRows = @($child.scenarios)
+        if (-not (Test-StringSequenceEqual -Left $childRequested -Right $childObserved)) {
+            $errors.Add("$label requestedScenarios and observedScenarios must match exactly")
+        }
+        if ([int]$child.scenarioCount -ne $childRequested.Count -or
+                $childRows.Count -ne $childRequested.Count) {
+            $errors.Add("$label must contain exactly one row per requested scenario")
+            continue
+        }
+        if ($null -ne $descriptor.PSObject.Properties['scenarioCount'] -and
+                [int]$descriptor.scenarioCount -ne $childRows.Count) {
+            $errors.Add("$label.scenarioCount does not match the child receipt")
+        }
+        for ($index = 0; $index -lt $childRows.Count; $index++) {
+            $row = $childRows[$index]
+            if ([string]$row.id -cne $childRequested[$index]) {
+                $errors.Add("$label.scenario[$index].id does not match requested order")
+            }
+            if (-not (Test-JsonBooleanTrue $row.passed)) {
+                $errors.Add("$label.scenario[$index].passed must be the JSON boolean true")
+            }
+            if (-not (Test-JsonBooleanTrue $row.cleanupPassed)) {
+                $errors.Add("$label.scenario[$index].cleanupPassed must be the JSON boolean true")
+            }
+            foreach ($errorText in @(Get-ScenarioEvidenceErrors `
+                    -Scenario $row -Label "$label.scenario[$index]")) {
+                $errors.Add($errorText)
+            }
+        }
+        foreach ($errorText in @(Get-EmbeddedArtifactErrors `
+                -Value $child -Label $label)) {
+            $errors.Add($errorText)
+        }
+        $ChildReceipts[$name] = $child
+    }
+    return $errors
+}
+
 function Get-HarnessErrors {
     param(
         [Parameter(Mandatory)][object]$Harness,
         [Parameter(Mandatory)][string]$SessionId,
         [Parameter(Mandatory)][string]$CanonicalRuntimeDirectory,
-        [Parameter(Mandatory)][datetime]$SessionStartedAtUtc
+        [Parameter(Mandatory)][datetime]$SessionStartedAtUtc,
+        [string]$HarnessPath = ''
     )
 
     $errors = [Collections.Generic.List[string]]::new()
@@ -382,6 +569,27 @@ function Get-HarnessErrors {
             -not (Test-StringSequenceEqual -Left $effectiveExpectedScenarioIds -Right $requested)) {
         $errors.Add('requestedScenarios do not match ExpectedScenarioIds')
     }
+    $childrenProperty = $Harness.PSObject.Properties['children']
+    $coordinator = $null -ne $childrenProperty -and
+        $childrenProperty.Value -is [Management.Automation.PSCustomObject]
+    $childReceipts = @{}
+    $claimedChildRows = [Collections.Generic.HashSet[string]]::new()
+    if ($coordinator) {
+        foreach ($errorText in @(Get-CoordinatorChildErrors `
+                -Children $childrenProperty.Value `
+                -SessionId $SessionId `
+                -SessionStartedAtUtc $SessionStartedAtUtc `
+                -ChildReceipts $childReceipts)) {
+            $errors.Add($errorText)
+        }
+        $childRowCount = 0
+        foreach ($child in $childReceipts.Values) {
+            $childRowCount += @($child.scenarios).Count
+        }
+        if ($childRowCount -ne $requested.Count) {
+            $errors.Add('child receipts must account for every requested scenario exactly once')
+        }
+    }
     if ($scenarios.Count -ne $requested.Count) {
         $errors.Add('scenarios must contain exactly one row per requested scenario')
     } else {
@@ -401,19 +609,48 @@ function Get-HarnessErrors {
                         [bool]$scenario.unexecuted)) {
                 $errors.Add("scenario[$index].unexecuted must be the JSON boolean false")
             }
-            if ([long]$scenario.startedAtTick -lt 0 -or
-                    [long]$scenario.finishedAtTick -lt
-                        [long]$scenario.startedAtTick) {
-                $errors.Add("scenario[$index] has invalid tick bounds")
-            }
-            if ($null -eq $scenario.PSObject.Properties['artifacts']) {
-                $errors.Add("scenario[$index].artifacts is required")
+            if ($coordinator) {
+                # The row's ticks and artifacts are recorded by the child that ran it.
+                $childName = $scenario.PSObject.Properties['child']
+                $childIndex = $scenario.PSObject.Properties['childIndex']
+                if ($null -eq $childName -or $null -eq $childIndex) {
+                    $errors.Add("scenario[$index] must name its child receipt and row")
+                    continue
+                }
+                $child = $childReceipts[[string]$childName.Value]
+                if ($null -eq $child) {
+                    $errors.Add("scenario[$index].child does not name a validated child receipt")
+                    continue
+                }
+                $childRows = @($child.scenarios)
+                $rowIndex = [int]$childIndex.Value
+                if ($rowIndex -lt 0 -or $rowIndex -ge $childRows.Count -or
+                        [string]$childRows[$rowIndex].id -cne [string]$scenario.id) {
+                    $errors.Add("scenario[$index] does not match its child receipt row")
+                } elseif (-not $claimedChildRows.Add("$($childName.Value)#$rowIndex")) {
+                    $errors.Add("scenario[$index] claims a child receipt row twice")
+                }
+            } else {
+                foreach ($errorText in @(Get-ScenarioEvidenceErrors `
+                        -Scenario $scenario -Label "scenario[$index]")) {
+                    $errors.Add($errorText)
+                }
             }
         }
     }
     if ($null -eq $Harness.PSObject.Properties['sealedAtUtc'] -or
             [string]::IsNullOrWhiteSpace([string]$Harness.sealedAtUtc)) {
-        $errors.Add('sealedAtUtc is required')
+        # The in-game harness receipts carry no seal time; the file's own write time, bounded
+        # by this session, proves the same freshness.
+        if ([string]::IsNullOrWhiteSpace($HarnessPath)) {
+            $errors.Add('sealedAtUtc is required')
+        } else {
+            foreach ($errorText in @(Get-ReceiptFreshnessErrors `
+                    -ReceiptPath $HarnessPath -Label 'harness receipt' `
+                    -SessionStartedAtUtc $SessionStartedAtUtc)) {
+                $errors.Add($errorText)
+            }
+        }
     } else {
         $sealedValue = $Harness.PSObject.Properties['sealedAtUtc'].Value
         $sealedAtUtc = [DateTimeOffset]::MinValue
@@ -711,7 +948,8 @@ try {
                         -Harness $harness `
                         -SessionId $sessionId `
                         -CanonicalRuntimeDirectory $canonicalRuntimeDirectory `
-                        -SessionStartedAtUtc $startedAtUtc)
+                        -SessionStartedAtUtc $startedAtUtc `
+                        -HarnessPath $resolvedHarness)
                     if ($harnessErrors.Count -gt 0) {
                         $failure = 'Invalid harness receipt: ' +
                             ($harnessErrors -join '; ')

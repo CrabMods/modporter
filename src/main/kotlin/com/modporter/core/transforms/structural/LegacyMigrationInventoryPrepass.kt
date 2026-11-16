@@ -626,11 +626,6 @@ internal object ParsedLegacyMigrationSurfaceDetector : LegacyMigrationSurfaceDet
     private const val DIRECTION = "net.minecraft.core.Direction"
     private const val PLAYER = "net.minecraft.world.entity.player.Player"
     private const val SERVER_PLAYER = "net.minecraft.server.level.ServerPlayer"
-    private const val CREATE_COPYCAT_PACKAGE =
-        "com.simibubi.create.content.decoration.copycat"
-    private const val FILTERED_BLOCK_AND_TINT_GETTER =
-        "$CREATE_COPYCAT_PACKAGE.FilteredBlockAndTintGetter"
-    private const val COPYCAT_BLOCK = "$CREATE_COPYCAT_PACKAGE.CopycatBlock"
     private const val OLD_MODEL_DATA_MANAGER =
         "net.minecraftforge.client.model.data.ModelDataManager"
     private const val TARGET_MODEL_DATA_MANAGER =
@@ -675,7 +670,7 @@ internal object ParsedLegacyMigrationSurfaceDetector : LegacyMigrationSurfaceDet
         if (units.any { hasExactRemovedType(it, index, lootingTypes) }) {
             candidates += "looting"
         }
-        if (index.hasOwnedModelDataManagerSurface()) {
+        if (LegacyModelDataManagerCompatMigration.hasLegacySurface(units.map { it.unit })) {
             candidates += "model-data-manager"
         }
 
@@ -800,16 +795,12 @@ internal object ParsedLegacyMigrationSurfaceDetector : LegacyMigrationSurfaceDet
         val blockStartHint = Regex(
             """(?<![\w$])onBlockStartBreak\s*\("""
         ).containsMatchIn(masked)
+        // A block-getter manager query or override the parser could not read may be a
+        // model-data family member; the detector cannot rule it out.
         val modelDataManagerHint = Regex(
             """(?<![\w$])${Regex.escape(MODEL_DATA_MANAGER_GETTER)}\s*\("""
         ).containsMatchIn(masked) &&
-            Regex(
-                """(?m)^\s*package\s+${Regex.escape(CREATE_COPYCAT_PACKAGE)}\s*;"""
-            ).containsMatchIn(masked) &&
-            Regex(
-                """(?<![\w$])(?:class|interface)\s+""" +
-                    """(?:FilteredBlockAndTintGetter|CopycatBlock)(?![\w$])"""
-            ).containsMatchIn(masked)
+            Regex("""(?<![\w$])BlockAndTintGetter(?![\w$])""").containsMatchIn(masked)
         return plantOverrideHint || blockStartHint || modelDataManagerHint
     }
 
@@ -921,92 +912,6 @@ internal object ParsedLegacyMigrationSurfaceDetector : LegacyMigrationSurfaceDet
                 ) return true
             }
             return units.any(::hasOwnedBlockStartCall)
-        }
-
-        fun hasOwnedModelDataManagerSurface(): Boolean =
-            hasExactFilteredManagerOverride() || hasExactCopycatManagerQuery()
-
-        private fun hasExactFilteredManagerOverride(): Boolean {
-            val pair = declaredTypes[FILTERED_BLOCK_AND_TINT_GETTER] ?: return false
-            val owner = pair.first as? ClassOrInterfaceDeclaration ?: return false
-            val source = pair.second
-            val implementsBlockGetter = owner.implementedTypes.any {
-                resolve(source, it.nameWithScope) == BLOCK_AND_TINT_GETTER
-            }
-            val hasWrappedGetter = owner.fields.flatMap { it.variables }.any {
-                it.nameAsString == "wrapped" &&
-                    resolve(source, it.typeAsString) == BLOCK_AND_TINT_GETTER
-            }
-            if (!implementsBlockGetter || !hasWrappedGetter) return false
-            return owner.methods.any { method ->
-                if (method.nameAsString != MODEL_DATA_MANAGER_GETTER ||
-                    method.parameters.isNotEmpty() ||
-                    !method.isPublic ||
-                    method.isStatic ||
-                    method.annotations.none {
-                        it.nameAsString.substringAfterLast('.') == "Override"
-                    } ||
-                    resolve(source, method.typeAsString) !in
-                    setOf(OLD_MODEL_DATA_MANAGER, TARGET_MODEL_DATA_MANAGER) ||
-                    method.findAll(
-                        com.github.javaparser.ast.expr.AnnotationExpr::class.java
-                    ).none {
-                        it.nameAsString.substringAfterLast('.') == "Nullable"
-                    }
-                ) {
-                    return@any false
-                }
-                val returned = method.body.orElse(null)?.statements?.singleOrNull()
-                    ?.let { it as? com.github.javaparser.ast.stmt.ReturnStmt }
-                    ?.expression?.orElse(null) as? MethodCallExpr
-                    ?: return@any false
-                if (returned.nameAsString != MODEL_DATA_MANAGER_GETTER ||
-                    returned.arguments.isNotEmpty()
-                ) {
-                    return@any false
-                }
-                when (val scope = returned.scope.orElse(null)) {
-                    is NameExpr -> scope.nameAsString == "wrapped"
-                    is com.github.javaparser.ast.expr.FieldAccessExpr ->
-                        scope.scope.toString() == "this" &&
-                            scope.nameAsString == "wrapped"
-                    else -> false
-                }
-            }
-        }
-
-        private fun hasExactCopycatManagerQuery(): Boolean {
-            val pair = declaredTypes[COPYCAT_BLOCK] ?: return false
-            val owner = pair.first as? ClassOrInterfaceDeclaration ?: return false
-            val source = pair.second
-            return owner.methods.any { method ->
-                if (method.nameAsString != "getAppearance" ||
-                    !method.isPublic ||
-                    method.annotations.none {
-                        it.nameAsString.substringAfterLast('.') == "Override"
-                    } ||
-                    resolve(source, method.typeAsString) != BLOCK_STATE ||
-                    method.parameters.map {
-                        resolve(source, it.typeAsString)
-                    } != listOf(
-                        BLOCK_STATE,
-                        BLOCK_AND_TINT_GETTER,
-                        BLOCK_POS,
-                        DIRECTION,
-                        BLOCK_STATE,
-                        BLOCK_POS
-                    )
-                ) {
-                    return@any false
-                }
-                val receiver = method.parameters[1].nameAsString
-                method.findAll(MethodCallExpr::class.java).any { call ->
-                    call.nameAsString == MODEL_DATA_MANAGER_GETTER &&
-                        call.arguments.isEmpty() &&
-                        (call.scope.orElse(null) as? NameExpr)
-                            ?.nameAsString == receiver
-                }
-            }
         }
 
         private fun hasOwnedBlockStartCall(source: JavaSourceUnit): Boolean {

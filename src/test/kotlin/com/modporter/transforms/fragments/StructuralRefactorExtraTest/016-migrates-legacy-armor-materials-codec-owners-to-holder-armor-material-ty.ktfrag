@@ -957,7 +957,7 @@
         assertTrue(migrated.contains("new MerchantOffer(new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, emeraldCost), new ItemStack(Items.DIRT, 2), 16, 2, 0.05F)"), migrated)
         assertTrue(migrated.contains("new MerchantOffer(new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, 10), new ItemStack(Items.DIRT), 16, 2, 0.05F)"), migrated)
         assertFalse(migrated.contains("priceMultiplier);"), migrated)
-        assertTrue(migrated.contains("(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"))
+        assertTrue(migrated.contains("stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"))
         assertTrue(migrated.contains("EnchantmentHelper.has(stack, EnchantmentEffectComponents.PREVENT_ARMOR_CHANGE)"))
         assertTrue(migrated.contains("EnchantmentHelper.has(stack, EnchantmentEffectComponents.PREVENT_EQUIPMENT_DROP)"))
         assertTrue(migrated.contains("import net.minecraft.world.item.enchantment.EnchantmentEffectComponents;"))

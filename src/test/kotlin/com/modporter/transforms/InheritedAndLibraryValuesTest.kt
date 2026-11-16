@@ -37,7 +37,7 @@ class InheritedAndLibraryValuesTest {
             import net.minecraft.world.level.Level;
             class Child extends Parent<String> {
                 CompoundTag item(Level level) { return Catalog.EXAMPLE.asStack().serializeNBT(); }
-                CompoundTag handler(Level level) { return inventory.serializeNBT(); }
+                CompoundTag handler() { return inventory.serializeNBT(); }
                 CompoundTag own(Level level) {
                     Other inventory = new Other();
                     return inventory.serializeNBT();
@@ -49,7 +49,7 @@ class InheritedAndLibraryValuesTest {
         assertTrue(receipt.errors.isEmpty(), receipt.errors.joinToString("\n"))
         val source = file.readText()
         assertTrue(source.contains("Catalog.EXAMPLE.asStack().saveOptional(level.registryAccess())"), source)
-        assertTrue(source.contains("inventory.serializeNBT(level.registryAccess())"), source)
+        assertTrue(source.contains("inventory.serializeNBT(player.registryAccess())"), source)
         assertTrue(source.contains("return inventory.serializeNBT();"), source)
     }
 }

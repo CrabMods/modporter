@@ -1,0 +1,51 @@
+{
+  "description": "Library builders whose callback lambdas leave a parameter type implicit. A lambda parameter is typed only when the fluent chain reaching the callback method is proven: it starts at a listed root method on a value whose type is (or extends) the root owner, and every further call is a listed self-returning builder method or the transform method applied to a project function of a listed functional type whose result type argument is the builder. Verified with javap on both library builds (see notes); scripts/mixin_target_facts.py verify-library rechecks it.",
+  "builders": [
+    {
+      "type": "com.tterrag.registrate.builders.BlockBuilder",
+      "roots": [
+        {
+          "owner": "com.tterrag.registrate.AbstractRegistrate",
+          "methods": ["block"]
+        }
+      ],
+      "selfReturning": [
+        "properties",
+        "initialProperties",
+        "addLayer",
+        "simpleItem",
+        "simpleBlockEntity",
+        "color",
+        "defaultBlockstate",
+        "blockstate",
+        "defaultLang",
+        "lang",
+        "defaultLoot",
+        "loot",
+        "recipe",
+        "tag"
+      ],
+      "transform": "transform",
+      "transformFunctions": [
+        {
+          "type": "com.tterrag.registrate.util.nullness.NonNullFunction",
+          "result": 1
+        },
+        {
+          "type": "com.tterrag.registrate.util.nullness.NonNullUnaryOperator",
+          "result": 0
+        }
+      ],
+      "callbacks": [
+        {
+          "method": "loot",
+          "argument": 0,
+          "lambdaParameter": 0,
+          "parameterType": "com.tterrag.registrate.providers.loot.RegistrateBlockLootTables",
+          "platformSupertype": "net.minecraft.data.loot.packs.VanillaBlockLoot"
+        }
+      ],
+      "notes": "Registrate-MC1.20-1.3.3 and Registrate-MC1.21-1.3.0+67: every AbstractRegistrate#block overload returns BlockBuilder; the listed BlockBuilder methods return BlockBuilder<T, P>; Builder#transform(NonNullFunction<S, S2>) returns S2; BlockBuilder#loot(NonNullBiConsumer<RegistrateBlockLootTables, T>); RegistrateBlockLootTables extends net.minecraft.data.loot.packs.VanillaBlockLoot."
+    }
+  ]
+}

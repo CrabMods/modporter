@@ -37,7 +37,6 @@ import com.modporter.core.pipeline.Change
 import com.modporter.core.pipeline.Confidence
 import com.modporter.core.transforms.util.JavaSourceText
 import java.nio.file.Path
-import java.security.MessageDigest
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.extension
@@ -68,63 +67,13 @@ internal object LegacyBlockEntityCapabilityQueries {
     private const val OPTIONAL = "java.util.Optional"
     private const val CLASS = "java.lang.Class"
 
-    /**
-     * Create 0.5.1 source profiles reviewed after the legacy Forge-to-NeoForge query
-     * normalization pass. Retained wrappers are admitted only at these exact project paths;
-     * a comment, string, added alias/caller or changed consumer body changes a digest and
-     * falls back to the ordinary lifecycle-closure gate. FluidTank delegates wrapper reads
-     * to IHaveGoggleInformation, so that external consumer is part of its reviewed profile.
-     * The second Schematicannon digest is the exact executable unit-test fixture.
-     */
-    private data class ReviewedRetainedSourceProfile(
-        val sourceDigests: Set<String>,
-        val dependencyDigests: Map<String, Set<String>> = emptyMap()
-    )
-
-    private val reviewedRetainedSourceProfiles = mapOf(
-        "src/main/java/com/simibubi/create/content/fluids/FlowSource.java" to
-            ReviewedRetainedSourceProfile(
-                setOf("273cf38dc11bfa48cd1f33931adb08720b20bb3fed64b4215afa68d62247d28d")
-            ),
-        "src/main/java/com/simibubi/create/content/fluids/tank/FluidTankBlockEntity.java" to
-            ReviewedRetainedSourceProfile(
-                sourceDigests = setOf(
-                    "b9f7588f83df79f05d0f38af77e34db7dfc7407c652019d4d35e0f07c2d2014d"
-                ),
-                dependencyDigests = mapOf(
-                    "src/main/java/com/simibubi/create/api/equipment/goggles/IHaveGoggleInformation.java" to
-                        setOf("5bee65849fb6955e23006064e586ed528c320ad2cd4d0570bcac832d0c657053")
-                )
-            ),
-        "src/main/java/com/simibubi/create/content/kinetics/mechanicalArm/ArmInteractionPoint.java" to
-            ReviewedRetainedSourceProfile(
-                setOf("4898572486cdcc925dd861744502f6343b4d8a61e5677702d3d29112cfc79030")
-            ),
-        "src/main/java/com/simibubi/create/content/logistics/chute/ChuteBlockEntity.java" to
-            ReviewedRetainedSourceProfile(
-                setOf("73d71e1ccdfdb41bbceb8834aa88aaad7e1fe2851b1a03aa7b2b98bc5cdd274a")
-            ),
-        "src/main/java/com/simibubi/create/content/logistics/tunnel/BrassTunnelBlockEntity.java" to
-            ReviewedRetainedSourceProfile(
-                setOf("3d4488256e745a5b1d91a98d7c50e29c8a22dbb02612cd87579efd4fdd825823")
-            ),
-        "src/main/java/com/simibubi/create/content/schematics/cannon/SchematicannonBlockEntity.java" to
-            ReviewedRetainedSourceProfile(
-                setOf(
-                    "a7f0ce4469a1e9b61c09c571070f67ced67bdfb946e174159665957c41af41be",
-                    "efa8a9a3e21511d948811e021b93089185bf2421cbdbd4bbe3b10faa1eca9919"
-                )
-            )
-    )
-
     private val parser = JavaParser(
         ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
     )
 
     data class Result(
         val changes: List<Change>,
-        val gates: List<String>,
-        val retainedFiles: Set<Path> = emptySet()
+        val gates: List<String>
     ) {
         companion object {
             val EMPTY = Result(emptyList(), emptyList())
@@ -197,8 +146,7 @@ internal object LegacyBlockEntityCapabilityQueries {
 
     private data class FileMigration(
         val edits: MutableList<Edit> = mutableListOf(),
-        val imports: MutableSet<String> = linkedSetOf(),
-        var retainedQuery: Boolean = false
+        val imports: MutableSet<String> = linkedSetOf()
     )
 
     private data class Parsed(
@@ -566,34 +514,18 @@ internal object LegacyBlockEntityCapabilityQueries {
 
         snapshot = parseAll(normalized)
         index = buildIndex(snapshot.parsed.values, compatPackage)
-        val reviewedProjectDigests = snapshot.parsed.entries.associate { (file, parsed) ->
-            projectRelativePath(projectDir, file) to sha256(parsed.source)
-        }
         val migrated = normalized.toMutableMap()
-        val retainedFiles = linkedSetOf<Path>()
         var queryChanged = normalized.values.any {
             it.contains("LegacyBlockEntityCapabilityQueries.get(") ||
-                it.contains("LegacyBlockEntityCapabilityQueries.getRetained(") ||
-                it.contains("$compatPackage.LegacyBlockEntityCapabilityQueries.get(") ||
-                it.contains("$compatPackage.LegacyBlockEntityCapabilityQueries.getRetained(")
+                it.contains("$compatPackage.LegacyBlockEntityCapabilityQueries.get(")
         }
 
         for ((file, parsed) in snapshot.parsed) {
-            val migration = rewriteQueries(
-                parsed,
-                index,
-                compatPackage,
-                projectDir,
-                reviewedProjectDigests,
-                gates
-            )
+            val migration = rewriteQueries(parsed, index, compatPackage, projectDir, gates)
             if (migration.edits.isEmpty()) continue
             if (!nonOverlapping(migration.edits)) {
                 gates += "Legacy block entity capability query migration found overlapping edits in ${projectDir.relativize(file)}"
                 continue
-            }
-            if (migration.retainedQuery) {
-                retainedFiles.add(file.toAbsolutePath().normalize())
             }
             var source = applyEdits(parsed.source, migration.edits)
             migration.imports.forEach { source = JavaSourceText.addImport(source, it) }
@@ -638,56 +570,6 @@ internal object LegacyBlockEntityCapabilityQueries {
                 )
             }
         }
-        val retainedQueryUsed = migrated.values.any {
-            it.contains("LegacyBlockEntityCapabilityQueries.getRetained(") ||
-                it.contains("$compatPackage.LegacyBlockEntityCapabilityQueries.getRetained(")
-        }
-        val mixinDir = srcDir.resolve(compatPackage.replace('.', '/')).resolve("mixin")
-        val runtimeSources = mapOf(
-            mixinDir.resolve("LegacyCapabilityServerLevelMixin.java") to
-                serverLevelMixinSource(compatPackage),
-            mixinDir.resolve("LegacyCapabilityLevelExtensionMixin.java") to
-                levelExtensionMixinSource(compatPackage)
-        )
-        val mixinConfig = projectDir.resolve("src/main/resources")
-            .resolve("modporter-legacy-capability-query.mixins.json")
-        if (retainedQueryUsed || runtimeSources.keys.any { it.exists() } || mixinConfig.exists()) {
-            for ((file, expected) in runtimeSources) {
-                val before = if (file.exists()) file.readText() else null
-                if (before == expected) continue
-                if (!dryRun) {
-                    file.parent.createDirectories()
-                    file.writeText(expected)
-                }
-                changes += Change(
-                    file = file,
-                    line = 1,
-                    description = "Generate retained capability invalidation mixin",
-                    before = before ?: "(absent)",
-                    after = file.fileName.toString(),
-                    confidence = Confidence.HIGH,
-                    ruleId = RULE_ID
-                )
-            }
-            val expectedConfig = retainedMixinConfigSource(compatPackage)
-            val beforeConfig = if (mixinConfig.exists()) mixinConfig.readText() else null
-            if (beforeConfig != expectedConfig) {
-                if (!dryRun) {
-                    mixinConfig.parent.createDirectories()
-                    mixinConfig.writeText(expectedConfig)
-                }
-                changes += Change(
-                    file = mixinConfig,
-                    line = 1,
-                    description = "Register retained capability invalidation mixins",
-                    before = beforeConfig ?: "(absent)",
-                    after = expectedConfig,
-                    confidence = Confidence.HIGH,
-                    ruleId = RULE_ID
-                )
-            }
-        }
-
         // The boundary and the normalized legacy keys name LegacyCapabilities and
         // LegacyCapabilityProvider; a project with queries but no adapted block entity
         // has no other source of those two types. Only this migration's own output
@@ -712,7 +594,7 @@ internal object LegacyBlockEntityCapabilityQueries {
                 )
             }
         }
-        return Result(changes, gates.distinct(), retainedFiles)
+        return Result(changes, gates.distinct())
     }
 
     private fun normalizeLegacyKeysAndImports(
@@ -806,7 +688,6 @@ internal object LegacyBlockEntityCapabilityQueries {
         index: Index,
         compatPackage: String,
         projectDir: Path,
-        reviewedProjectDigests: Map<String, String>,
         gates: MutableList<String>
     ): FileMigration {
         val migration = FileMigration()
@@ -890,40 +771,17 @@ internal object LegacyBlockEntityCapabilityQueries {
                     it.nameAsString == "invalidate" &&
                     it.arguments.isEmpty()
             }
-            val relativePath = projectRelativePath(projectDir, parsed.file)
-            val sourceStageDigest = sha256(parsed.source)
-            val retainedSourceEscape = outer == null &&
-                createRetainedSourceEscape(
-                    call,
-                    parsed,
-                    keyProof,
-                    relativePath,
-                    reviewedProjectDigests
-                )
             if (outer == null &&
-                !retainedSourceEscape &&
                 !consumerClosureProven(call, parsed, index, values, compatPackage)
             ) {
                 gates += "Legacy block entity capability query migration cannot prove " +
                     "LazyOptional lifecycle use at ${projectDir.relativize(parsed.file)}:" +
-                    call.range.map { it.begin.line }.orElse(1) +
-                    reviewedRetainedSourceProfileObservation(
-                        relativePath,
-                        sourceStageDigest,
-                        reviewedProjectDigests
-                    )
+                    call.range.map { it.begin.line }.orElse(1)
                 continue
             }
             val target = outer ?: call
-            val method = when {
-                outer != null -> "invalidate"
-                retainedSourceEscape -> "getRetained"
-                else -> "get"
-            }
+            val method = if (outer == null) "get" else "invalidate"
             range(target, parsed)?.let {
-                if (retainedSourceEscape) {
-                    migration.retainedQuery = true
-                }
                 migration.edits += Edit(
                     it.first,
                     it.last + 1,
@@ -933,189 +791,6 @@ internal object LegacyBlockEntityCapabilityQueries {
         }
         return migration
     }
-
-    /**
-     * Create 0.5.1 retains these wrappers beyond one expression. Admission is tied to the
-     * source-visible refresh and read topology, while all other escaping wrappers remain gated.
-     */
-    private fun createRetainedSourceEscape(
-        call: MethodCallExpr,
-        parsed: Parsed,
-        keyProof: Set<Key>,
-        relativePath: String,
-        reviewedProjectDigests: Map<String, String>
-    ): Boolean {
-        if (!reviewedRetainedSourceDigestProfile(
-                relativePath,
-                sha256(parsed.source),
-                reviewedProjectDigests
-            )
-        ) return false
-        val path = relativePath
-        val method = call.findAncestor(MethodDeclaration::class.java).orElse(null) ?: return false
-        val owner = call.findAncestor(ClassOrInterfaceDeclaration::class.java).orElse(null) ?: return false
-        val key = keyProof.singleOrNull() ?: return false
-        val parent = call.parentNode.orElse(null)
-        val methodText = parsed.text(method)
-        val ownerText = parsed.text(owner)
-        if (method.findAll(MethodCallExpr::class.java).any {
-                it.nameAsString in setOf("addListener", "removeListener", "invalidate")
-            }
-        ) {
-            return false
-        }
-
-        fun exactOwner(packageName: String, className: String, methodName: String): Boolean =
-            parsed.unit.packageDeclaration.map { it.nameAsString }.orElse("") == packageName &&
-                owner.nameAsString == className &&
-                method.nameAsString == methodName
-
-        fun methodHas(vararg snippets: String): Boolean = snippets.all(methodText::contains)
-        fun ownerHas(vararg snippets: String): Boolean = snippets.all(ownerText::contains)
-
-        return when {
-            path.endsWith("/com/simibubi/create/content/fluids/FlowSource.java") &&
-                key == Key.FLUID &&
-                exactOwner("com.simibubi.create.content.fluids", "FluidHandler", "manageSource") -> {
-                val assignment = parent as? AssignExpr
-                assignment?.value === call && parsed.text(assignment.target) == "fluidHandler" &&
-                    methodHas("fluidHandler.isPresent()", "% 20 != 0", "world.getBlockEntity(") &&
-                    ownerHas("LazyOptional<IFluidHandler> fluidHandler", "return fluidHandler")
-            }
-            path.endsWith("/com/simibubi/create/content/fluids/tank/FluidTankBlockEntity.java") &&
-                key == Key.FLUID &&
-                exactOwner(
-                    "com.simibubi.create.content.fluids.tank",
-                    "FluidTankBlockEntity",
-                    "addToGoggleTooltip"
-                ) -> {
-                val consumer = parent as? MethodCallExpr
-                consumer?.nameAsString == "containedFluidTooltip" &&
-                    consumer.arguments.indexOf(call) == 2 &&
-                    methodHas("controllerBE.boiler.addToGoggleTooltip", "containedFluidTooltip")
-            }
-            path.endsWith("/com/simibubi/create/content/kinetics/mechanicalArm/ArmInteractionPoint.java") &&
-                key == Key.ITEM &&
-                exactOwner(
-                    "com.simibubi.create.content.kinetics.mechanicalArm",
-                    "ArmInteractionPoint",
-                    "getHandler"
-                ) -> {
-                val assignment = parent as? AssignExpr
-                assignment?.value === call && parsed.text(assignment.target) == "cachedHandler" &&
-                    methodHas(
-                        "!cachedHandler.isPresent()",
-                        "level.getBlockEntity(pos)",
-                        "return cachedHandler.orElse(null)"
-                    ) &&
-                    ownerHas("protected LazyOptional<IItemHandler> cachedHandler")
-            }
-            path.endsWith("/com/simibubi/create/content/logistics/chute/ChuteBlockEntity.java") &&
-                key == Key.ITEM &&
-                exactOwner(
-                    "com.simibubi.create.content.logistics.chute",
-                    "ChuteBlockEntity",
-                    "grabCapability"
-                ) -> (parent as? ReturnStmt)?.expression?.orElse(null) === call &&
-                method.isPrivate &&
-                methodHas(
-                    "worldPosition.relative(side)",
-                    "level.getBlockEntity(pos)",
-                    "side.getOpposite()"
-                )
-            path.endsWith("/com/simibubi/create/content/logistics/tunnel/BrassTunnelBlockEntity.java") &&
-                key == Key.ITEM &&
-                exactOwner(
-                    "com.simibubi.create.content.logistics.tunnel",
-                    "BrassTunnelBlockEntity",
-                    "getBeltCapability"
-                ) -> {
-                val assignment = parent as? AssignExpr
-                assignment?.value === call && parsed.text(assignment.target) == "beltCapability" &&
-                    methodHas(
-                        "!beltCapability.isPresent()",
-                        "worldPosition.below()",
-                        "return beltCapability"
-                    ) &&
-                    ownerHas("LazyOptional<IItemHandler> beltCapability")
-            }
-            path.endsWith("/com/simibubi/create/content/schematics/cannon/SchematicannonBlockEntity.java") &&
-                key == Key.ITEM &&
-                exactOwner(
-                    "com.simibubi.create.content.schematics.cannon",
-                    "SchematicannonBlockEntity",
-                    "findInventories"
-                ) -> {
-                val variable = parent as? VariableDeclarator
-                val references = method.findAll(NameExpr::class.java)
-                    .filter { it.nameAsString == "capability" }
-                val presenceReads = references.count { reference ->
-                    val consumer = reference.parentNode.orElse(null) as? MethodCallExpr
-                    consumer != null && consumer.scope.orElse(null) === reference &&
-                        consumer.nameAsString == "isPresent" && consumer.arguments.isEmpty()
-                }
-                val retainedWrites = references.count { reference ->
-                    val consumer = reference.parentNode.orElse(null) as? MethodCallExpr
-                    consumer != null && consumer.nameAsString == "add" &&
-                        consumer.scope.map(parsed::text).orElse("") == "attachedInventories" &&
-                        consumer.arguments.singleOrNull() === reference
-                }
-                variable?.initializer?.orElse(null) === call &&
-                    variable.nameAsString == "capability" &&
-                    references.size == 2 && presenceReads == 1 && retainedWrites == 1 &&
-                    methodHas(
-                        "attachedInventories.clear()",
-                        "level.isLoaded(worldPosition.relative(facing))"
-                    ) &&
-                    ownerHas("LinkedHashSet<LazyOptional<IItemHandler>> attachedInventories")
-            }
-            else -> false
-        }
-    }
-
-    private fun reviewedRetainedSourceProfileObservation(
-        relativePath: String,
-        sourceDigest: String,
-        projectDigests: Map<String, String>
-    ): String {
-        val normalizedPath = relativePath.replace('\\', '/')
-        val profile = reviewedRetainedSourceProfiles[normalizedPath] ?: return ""
-        return buildString {
-            append(" [sourceStageSha256=")
-            append(sourceDigest)
-            profile.dependencyDigests.keys.sorted().forEach { dependencyPath ->
-                append(", ")
-                append(dependencyPath)
-                append("=")
-                append(projectDigests[dependencyPath] ?: "missing")
-            }
-            append("]")
-        }
-    }
-
-    internal fun reviewedRetainedSourceDigestProfile(
-        relativePath: String,
-        sourceDigest: String,
-        projectDigests: Map<String, String>
-    ): Boolean {
-        val normalizedPath = relativePath.replace('\\', '/')
-        val profile = reviewedRetainedSourceProfiles[normalizedPath] ?: return false
-        if (sourceDigest !in profile.sourceDigests) return false
-        return profile.dependencyDigests.all { (dependencyPath, allowedDigests) ->
-            projectDigests[dependencyPath]?.let(allowedDigests::contains) == true
-        }
-    }
-
-    private fun projectRelativePath(projectDir: Path, file: Path): String =
-        projectDir.toAbsolutePath().normalize()
-            .relativize(file.toAbsolutePath().normalize())
-            .toString()
-            .replace('\\', '/')
-
-    private fun sha256(source: String): String =
-        MessageDigest.getInstance("SHA-256")
-            .digest(source.toByteArray(Charsets.UTF_8))
-            .joinToString("") { byte -> "%02x".format(byte) }
 
     private val optionalReadTerminals = mapOf(
         "ifPresent" to 1,
@@ -1970,128 +1645,19 @@ internal object LegacyBlockEntityCapabilityQueries {
         return result
     }
 
-    private fun serverLevelMixinSource(compatPackage: String): String = """
-        |package $compatPackage.mixin;
-        |
-        |import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
-        |import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
-        |import $compatPackage.LegacyBlockEntityCapabilityQueries;
-        |import net.minecraft.core.BlockPos;
-        |import net.minecraft.server.level.ServerLevel;
-        |import net.minecraft.world.level.ChunkPos;
-        |import org.spongepowered.asm.mixin.Mixin;
-        |
-        |@Mixin(ServerLevel.class)
-        |public abstract class LegacyCapabilityServerLevelMixin {
-        |    @WrapMethod(
-        |        method = "invalidateCapabilities(Lnet/minecraft/core/BlockPos;)V",
-        |        remap = false,
-        |        require = 1,
-        |        expect = 1
-        |    )
-        |    private void modporter${'$'}wrapPosition(BlockPos pos, Operation<Void> original) {
-        |        LegacyBlockEntityCapabilityQueries.runInvalidation(
-        |            (ServerLevel) (Object) this, pos, () -> original.call(pos)
-        |        );
-        |    }
-        |
-        |    @WrapMethod(
-        |        method = "invalidateCapabilities(Lnet/minecraft/world/level/ChunkPos;)V",
-        |        remap = false,
-        |        require = 1,
-        |        expect = 1
-        |    )
-        |    private void modporter${'$'}wrapChunk(ChunkPos pos, Operation<Void> original) {
-        |        LegacyBlockEntityCapabilityQueries.runInvalidation(
-        |            (ServerLevel) (Object) this, pos, () -> original.call(pos)
-        |        );
-        |    }
-        |}
-        |""".trimMargin()
-
-    private fun levelExtensionMixinSource(compatPackage: String): String = """
-        |package $compatPackage.mixin;
-        |
-        |import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
-        |import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
-        |import $compatPackage.LegacyBlockEntityCapabilityQueries;
-        |import net.minecraft.core.BlockPos;
-        |import net.minecraft.world.level.ChunkPos;
-        |import net.minecraft.world.level.Level;
-        |import net.neoforged.neoforge.common.extensions.ILevelExtension;
-        |import org.spongepowered.asm.mixin.Mixin;
-        |
-        |@Mixin(value = ILevelExtension.class, remap = false)
-        |public interface LegacyCapabilityLevelExtensionMixin {
-        |    @WrapMethod(
-        |        method = "invalidateCapabilities(Lnet/minecraft/core/BlockPos;)V",
-        |        remap = false,
-        |        require = 1,
-        |        expect = 1
-        |    )
-        |    private void modporter${'$'}wrapPosition(BlockPos pos, Operation<Void> original) {
-        |        LegacyBlockEntityCapabilityQueries.runInvalidation(
-        |            (Level) (Object) this, pos, () -> original.call(pos)
-        |        );
-        |    }
-        |
-        |    @WrapMethod(
-        |        method = "invalidateCapabilities(Lnet/minecraft/world/level/ChunkPos;)V",
-        |        remap = false,
-        |        require = 1,
-        |        expect = 1
-        |    )
-        |    private void modporter${'$'}wrapChunk(ChunkPos pos, Operation<Void> original) {
-        |        LegacyBlockEntityCapabilityQueries.runInvalidation(
-        |            (Level) (Object) this, pos, () -> original.call(pos)
-        |        );
-        |    }
-        |}
-        |""".trimMargin()
-
-    private fun retainedMixinConfigSource(compatPackage: String): String = """
-        |{
-        |  "required": true,
-        |  "minVersion": "0.8",
-        |  "package": "$compatPackage.mixin",
-        |  "compatibilityLevel": "JAVA_21",
-        |  "mixins": [
-        |    "LegacyCapabilityServerLevelMixin",
-        |    "LegacyCapabilityLevelExtensionMixin"
-        |  ],
-        |  "injectors": {
-        |    "defaultRequire": 1
-        |  }
-        |}
-        |""".trimMargin()
-
     private fun helperSource(compatPackage: String): String = """
         |package $compatPackage;
         |
-        |import java.lang.ref.WeakReference;
-        |import java.util.ArrayList;
-        |import java.util.HashMap;
-        |import java.util.List;
-        |import java.util.Map;
-        |import java.util.WeakHashMap;
-        |import net.minecraft.core.BlockPos;
         |import net.minecraft.core.Direction;
-        |import net.minecraft.world.level.ChunkPos;
         |import net.minecraft.world.level.Level;
         |import net.minecraft.world.level.block.entity.BlockEntity;
         |import net.neoforged.neoforge.capabilities.Capabilities;
         |
         |/**
-        | * Adapts source-owned legacy capability queries to NeoForge level lookups. Retained
-        | * wrappers are used only by the source-verified Create call sites admitted by the
-        | * migration; arbitrary escaping calls remain hard errors.
+        | * Preserves source-owned legacy capability queries while adapting ordinary block entities
+        | * to NeoForge's level lookup.
         | */
         |public final class LegacyBlockEntityCapabilityQueries {
-        |    private static final Map<BlockEntity, Map<QueryKey, WeakReference<LazyOptional<?>>>> RETAINED =
-        |        new WeakHashMap<>();
-        |    private static final ThreadLocal<InvalidationDispatch> INVALIDATIONS =
-        |        ThreadLocal.withInitial(InvalidationDispatch::new);
-        |
         |    private LegacyBlockEntityCapabilityQueries() {
         |    }
         |
@@ -2101,135 +1667,10 @@ internal object LegacyBlockEntityCapabilityQueries {
         |        if (blockEntity instanceof LegacyCapabilityProvider provider) {
         |            return provider.getCapability(capability, side);
         |        }
+        |        // Forge's contract: a present LazyOptional never resolves to null, and an
+        |        // absent capability is LazyOptional.empty().
         |        T nativeValue = nativeCapability(blockEntity, capability, side);
-        |        return nativeValue == null ? LazyOptional.empty() : LazyOptional.ofNullable(nativeValue);
-        |    }
-        |
-        |    public static <T> LazyOptional<T> getRetained(
-        |        BlockEntity blockEntity, Capability<T> capability, Direction side
-        |    ) {
-        |        if (blockEntity instanceof LegacyCapabilityProvider provider) {
-        |            return provider.getCapability(capability, side);
-        |        }
-        |        if (!isNativeKey(capability) || !isQueryable(blockEntity)) {
-        |            return LazyOptional.empty();
-        |        }
-        |        synchronized (RETAINED) {
-        |            Map<QueryKey, WeakReference<LazyOptional<?>>> wrappers = RETAINED.computeIfAbsent(
-        |                blockEntity, ignored -> new HashMap<>()
-        |            );
-        |            QueryKey key = new QueryKey(capability, side);
-        |            WeakReference<LazyOptional<?>> retained = wrappers.get(key);
-        |            LazyOptional<?> existing = retained == null ? null : retained.get();
-        |            if (existing != null && existing.isValid()) {
-        |                return existing.cast();
-        |            }
-        |            if (retained != null) {
-        |                wrappers.remove(key);
-        |            }
-        |            T nativeValue = nativeCapability(blockEntity, capability, side);
-        |            if (nativeValue == null) {
-        |                return LazyOptional.empty();
-        |            }
-        |            LazyOptional<T> created = LazyOptional.ofNullable(nativeValue);
-        |            wrappers.put(key, new WeakReference<>(created));
-        |            return created;
-        |        }
-        |    }
-        |
-        |    public static void runInvalidation(Level level, BlockPos pos, Runnable nativeInvalidation) {
-        |        beginInvalidation(level, pos);
-        |        runAndComplete(nativeInvalidation);
-        |    }
-        |
-        |    public static void runInvalidation(Level level, ChunkPos pos, Runnable nativeInvalidation) {
-        |        beginInvalidation(level, pos);
-        |        runAndComplete(nativeInvalidation);
-        |    }
-        |
-        |    private static void runAndComplete(Runnable nativeInvalidation) {
-        |        Throwable nativeFailure = null;
-        |        try {
-        |            nativeInvalidation.run();
-        |        } catch (RuntimeException | Error failure) {
-        |            nativeFailure = failure;
-        |            throw failure;
-        |        } finally {
-        |            try {
-        |                completeInvalidation();
-        |            } catch (RuntimeException | Error listenerFailure) {
-        |                if (nativeFailure != null) {
-        |                    nativeFailure.addSuppressed(listenerFailure);
-        |                } else {
-        |                    throw listenerFailure;
-        |                }
-        |            }
-        |        }
-        |    }
-        |
-        |    public static void beginInvalidation(Level level, BlockPos pos) {
-        |        InvalidationDispatch dispatch = INVALIDATIONS.get();
-        |        dispatch.depth++;
-        |        dispatch.notifications.addAll(detach(level, pos, null));
-        |    }
-        |
-        |    public static void beginInvalidation(Level level, ChunkPos chunkPos) {
-        |        InvalidationDispatch dispatch = INVALIDATIONS.get();
-        |        dispatch.depth++;
-        |        dispatch.notifications.addAll(detach(level, null, chunkPos));
-        |    }
-        |
-        |    public static void completeInvalidation() {
-        |        InvalidationDispatch dispatch = INVALIDATIONS.get();
-        |        if (dispatch.depth <= 0) {
-        |            throw new IllegalStateException("Unbalanced capability invalidation bridge");
-        |        }
-        |        dispatch.depth--;
-        |        if (dispatch.depth != 0) {
-        |            return;
-        |        }
-        |        List<Runnable> notifications = List.copyOf(dispatch.notifications);
-        |        dispatch.notifications.clear();
-        |        INVALIDATIONS.remove();
-        |        for (Runnable notification : notifications) {
-        |            notification.run();
-        |        }
-        |    }
-        |
-        |    private static List<Runnable> detach(Level level, BlockPos pos, ChunkPos chunkPos) {
-        |        List<Runnable> notifications = new ArrayList<>();
-        |        synchronized (RETAINED) {
-        |            var owners = RETAINED.entrySet().iterator();
-        |            while (owners.hasNext()) {
-        |                var owner = owners.next();
-        |                BlockEntity blockEntity = owner.getKey();
-        |                if (blockEntity == null) {
-        |                    owners.remove();
-        |                    continue;
-        |                }
-        |                if (blockEntity.getLevel() != level) {
-        |                    continue;
-        |                }
-        |                BlockPos ownerPos = blockEntity.getBlockPos();
-        |                boolean matches = pos != null
-        |                    ? ownerPos.equals(pos)
-        |                    : ChunkPos.asLong(ownerPos) == chunkPos.toLong();
-        |                if (!matches) {
-        |                    continue;
-        |                }
-        |                for (WeakReference<LazyOptional<?>> retained : owner.getValue().values()) {
-        |                    LazyOptional<?> wrapper = retained.get();
-        |                    if (wrapper != null) {
-        |                        Runnable notification = wrapper.invalidateDeferred();
-        |                        if (notification != null) {
-        |                            notifications.add(notification);
-        |                        }
-        |                    }
-        |                }
-        |                owners.remove();
-        |            }
-        |        }
-        |        return notifications;
+        |        return nativeValue == null ? LazyOptional.empty() : LazyOptional.of(() -> nativeValue);
         |    }
         |
         |    public static <T> void invalidate(
@@ -2249,7 +1690,7 @@ internal object LegacyBlockEntityCapabilityQueries {
         |        BlockEntity blockEntity, Capability<T> capability, Direction side
         |    ) {
         |        Level level = blockEntity.getLevel();
-        |        if (!isQueryable(blockEntity, level)) {
+        |        if (level == null) {
         |            return null;
         |        }
         |        if (same(capability, LegacyCapabilities.ITEM_HANDLER)) {
@@ -2282,15 +1723,6 @@ internal object LegacyBlockEntityCapabilityQueries {
         |        return null;
         |    }
         |
-        |    private static boolean isQueryable(BlockEntity blockEntity) {
-        |        return isQueryable(blockEntity, blockEntity.getLevel());
-        |    }
-        |
-        |    private static boolean isQueryable(BlockEntity blockEntity, Level level) {
-        |        return level != null && !blockEntity.isRemoved() &&
-        |            level.getBlockEntity(blockEntity.getBlockPos()) == blockEntity;
-        |    }
-        |
         |    private static boolean isNativeKey(Capability<?> capability) {
         |        return same(capability, LegacyCapabilities.ITEM_HANDLER)
         |            || same(capability, LegacyCapabilities.FLUID_HANDLER)
@@ -2299,33 +1731,6 @@ internal object LegacyBlockEntityCapabilityQueries {
         |
         |    private static boolean same(Capability<?> left, Capability<?> right) {
         |        return left == right;
-        |    }
-        |
-        |    private static final class QueryKey {
-        |        private final Capability<?> capability;
-        |        private final Direction side;
-        |
-        |        private QueryKey(Capability<?> capability, Direction side) {
-        |            this.capability = capability;
-        |            this.side = side;
-        |        }
-        |
-        |        @Override
-        |        public boolean equals(Object other) {
-        |            return other instanceof QueryKey key
-        |                && capability == key.capability
-        |                && side == key.side;
-        |        }
-        |
-        |        @Override
-        |        public int hashCode() {
-        |            return 31 * System.identityHashCode(capability) + System.identityHashCode(side);
-        |        }
-        |    }
-        |
-        |    private static final class InvalidationDispatch {
-        |        private int depth;
-        |        private final List<Runnable> notifications = new ArrayList<>();
         |    }
         |}
         |""".trimMargin()

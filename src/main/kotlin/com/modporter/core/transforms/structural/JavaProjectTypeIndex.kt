@@ -1074,8 +1074,29 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
     fun hasClosedProjectMethodHierarchy(qualifiedName: String): Boolean =
         hasClosedProjectMethodHierarchy(qualifiedName, mutableSetOf())
 
+    /**
+     * The binary name of [qualifiedName] in the NeoForge 1.21.1 class table (nested types are
+     * dotted in source and `\$`-separated there), or null when it is not a platform class the
+     * table lists. Such a class has a closed method surface: every method it or a supertype
+     * declares is known.
+     */
+    private fun targetPlatformClass(qualifiedName: String): String? {
+        if (!com.modporter.mapping.TargetMembers.isPlatformClass(qualifiedName)) return null
+        var candidate = qualifiedName
+        while (true) {
+            if (com.modporter.mapping.TargetMembers.hasClass(candidate)) return candidate
+            val dot = candidate.lastIndexOf('.')
+            if (dot < 0) return null
+            val outer = candidate.substring(0, dot).substringAfterLast('.')
+            if (outer.firstOrNull()?.isUpperCase() != true) return null
+            candidate = candidate.substring(0, dot) + "\$" + candidate.substring(dot + 1)
+        }
+    }
+
     fun isProvenNonOverride(method: MethodDeclaration): Boolean {
         if (method.isPrivate) return true
+        // Java dispatch: a static method never overrides; at most it hides a same-signature static.
+        if (method.isStatic) return true
         if (method.annotations.any { it.nameAsString == "Override" }) return false
         val ownerDeclaration = exactEnclosingNamedClass(method) ?: return false
         val owner = typeInfo(ownerDeclaration) ?: return false
@@ -1113,7 +1134,11 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
                     }
             }
         }
-        val info = loadType(receiver.name) ?: return true
+        val info = loadType(receiver.name)
+            ?: return targetPlatformClass(receiver.name)?.let { platformClass ->
+                // Name and arity are enough to refuse: the migrated source compiles against this table.
+                com.modporter.mapping.TargetMembers.declaresInHierarchy(platformClass, name, parameterTypes.size)
+            } ?: true
         val substitutions = substitutions(info, receiver)
         val sameArity = methods(info).filter {
             !it.isPrivate && it.nameAsString == name && it.parameters.size == parameterTypes.size
@@ -1140,12 +1165,14 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         if (qualifiedName in knownClosedExternalMethodSurfaces ||
             ExactExternalTypeContracts.hasClosedMethodSurface(qualifiedName)
         ) return true
-        val info = loadType(qualifiedName) ?: return qualifiedName.startsWith("java.lang.")
+        val info = loadType(qualifiedName)
+            ?: return qualifiedName.startsWith("java.lang.") || targetPlatformClass(qualifiedName) != null
         return info.directSupers.all { raw ->
             val resolved = resolveDirectSuperType(raw, info, emptyMap()) ?: return@all false
             resolved.name.startsWith("java.lang.") ||
                 resolved.name in knownClosedExternalMethodSurfaces ||
                 ExactExternalTypeContracts.hasClosedMethodSurface(resolved.name) ||
+                targetPlatformClass(resolved.name) != null ||
                 (loadType(resolved.name) != null && hasClosedProjectMethodHierarchy(resolved.name, visited))
         }
     }

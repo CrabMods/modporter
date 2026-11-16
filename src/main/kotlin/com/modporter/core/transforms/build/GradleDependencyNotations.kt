@@ -7,8 +7,8 @@ import kotlin.io.path.exists
  * Dependency statements a Forge build writes in shapes that cannot be replaced as a whole:
  * ForgeGradle `mod*` configurations nested inside wrappers, and `jarJar(...)` wrapped notations
  * whose coordinates move to their NeoForge artifacts while the wrapper, its version constraints
- * and the author's `${property}` placeholders stay (ModDev accepts the same `jarJar` forms, see
- * Create 6's build). Whole-statement replacement stays with [BuildSystemPass.resolveDependencies].
+ * and the author's `${property}` placeholders stay (ModDev accepts the same `jarJar` forms).
+ * Whole-statement replacement stays with [BuildSystemPass.resolveDependencies].
  */
 internal object GradleDependencyNotations {
     /** Statement starts that declare dependencies inside a Gradle `dependencies {}` block. */

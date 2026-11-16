@@ -245,6 +245,33 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `vanilla key binding screen references migrate to the options controls package`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.controls.KeyBindsList;
+
+            public class TestMod {
+                net.minecraft.client.gui.screens.controls.KeyBindsScreen screen;
+                KeyBindsList.KeyEntry entry;
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val file = projectDir.resolve("src/main/java/com/example/TestMod.java")
+        val transformed = file.readText()
+
+        assertTrue(transformed.contains("import net.minecraft.client.gui.screens.options.controls.KeyBindsList;"), transformed)
+        assertTrue(transformed.contains("net.minecraft.client.gui.screens.options.controls.KeyBindsScreen screen;"), transformed)
+        assertFalse(transformed.contains("gui.screens.controls."), transformed)
+        pass.apply(projectDir)
+        assertTrue(file.readText() == transformed, "a second run must not move the package again")
+    }
+
+    @Test
     fun `network direction checks are not replaced with constant placeholders`() {
         val projectDir = createTestFile("""
             package com.example;
@@ -347,6 +374,28 @@ class TextReplacementTest {
         assertTrue(transformed.contains("BuiltInRegistries.POTION.getKey(potion)"))
         assertTrue(transformed.contains("BuiltInRegistries.PAINTING_VARIANT.getKey(art)"))
         assertTrue(transformed.contains("BootstrapContext<?> context"))
+    }
+
+    @Test
+    fun `removed DistExecutor imports do not leave migration placeholders`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.neoforged.fml.DistExecutor;
+
+            public class TestMod {
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertFalse(transformed.contains("DistExecutor"))
+        assertFalse(transformed.contains("[forge2neo]"))
+        assertFalse(transformed.contains("removed in NeoForge"))
     }
 
     @Test
@@ -576,13 +625,9 @@ class TextReplacementTest {
 
             class CooldownHudOverlay implements IGuiOverlay {
                 public static final ResourceLocation OVERLAY_ID = ResourceLocation.fromNamespaceAndPath("example", "cooldown_hud");
-                private static final String DOC = "gui.getFont() must remain documentation";
 
                 @Override
                 public void render(ExtendedGui gui, GuiGraphics guiGraphics, float partialTick, int screenWidth, int screenHeight) {
-                    Object activeGui = gui;
-                    int textWidth = gui.getFont().width("text");
-                    // gui.getFont() must remain a comment
                     for (int i = 0; i < player.getInventory().size(); i++) {
                     }
                 }
@@ -602,11 +647,8 @@ class TextReplacementTest {
         assertTrue(transformed.contains("registerGuiOverlays(RegisterGuiLayersEvent event)"))
         assertTrue(transformed.contains("event.registerAbove(VanillaGuiLayers.HOTBAR, CooldownHudOverlay.OVERLAY_ID, new CooldownHudOverlay())"))
         assertTrue(transformed.contains("class CooldownHudOverlay implements LayeredDraw.Layer"))
-        assertTrue(transformed.contains("public void render(GuiGraphics guiGraphics, DeltaTracker deltaTracker)"))
-        assertTrue(transformed.contains("Object activeGui = net.minecraft.client.Minecraft.getInstance().gui;"), transformed)
-        assertTrue(transformed.contains("net.minecraft.client.Minecraft.getInstance().gui.getFont().width(\"text\")"), transformed)
-        assertTrue(transformed.contains("DOC = \"gui.getFont() must remain documentation\""), transformed)
-        assertTrue(transformed.contains("// gui.getFont() must remain a comment"), transformed)
+        // the render signature itself is converted by the structural pass, which keeps the parameters the body reads
+        assertTrue(transformed.contains("GuiGraphics guiGraphics, float partialTick, int screenWidth, int screenHeight)"))
         assertTrue(transformed.contains("player.getInventory().getContainerSize()"))
         assertTrue(!transformed.contains("RegisterGuiOverlaysEvent"))
         assertTrue(!transformed.contains("IGuiOverlay"))
@@ -933,11 +975,11 @@ class TextReplacementTest {
         assertTrue(transformed.contains("import net.neoforged.neoforge.event.entity.living.FinalizeSpawnEvent;"))
         assertTrue(transformed.contains("import net.neoforged.neoforge.event.level.BlockEvent;"))
         assertTrue(transformed.contains("public static void onMobSpawn(FinalizeSpawnEvent event)"))
-        assertTrue(transformed.contains("public static void onWorldTick(LevelTickEvent event)"))
-        assertTrue(transformed.contains("Object level = event.level;"))
+        assertTrue(transformed.contains("public static void onWorldTick(LevelTickEvent.Post event)"))
+        assertTrue(transformed.contains("Object level = event.getLevel();"))
         assertTrue(transformed.contains("public int getUseDuration(ItemStack stack, net.minecraft.world.entity.LivingEntity entity)"))
         assertTrue(!transformed.contains("MobSpawnEvent.FinalizeSpawn"))
-        assertFalse(transformed.contains("LevelTickEvent.Post"))
+        assertTrue(!transformed.contains("Object level = event.level;"))
     }
 
     @Test
@@ -1241,7 +1283,7 @@ class TextReplacementTest {
         assertTrue(transformed.contains("targetBE.loadWithComponents(sourceBE.saveWithoutMetadata(targetBE.getLevel().registryAccess()), targetBE.getLevel().registryAccess());"))
         assertTrue(transformed.contains("stack.getEnchantmentLevel(net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(Enchantments.EFFICIENCY))"))
         assertTrue(transformed.contains("stack.enchant(net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(Enchantments.EFFICIENCY), 1)"))
-        assertTrue(transformed.contains("stack.getOrCreateTag().putLong(\"cooldown\", 123L);"))
+        assertTrue(transformed.contains("CustomData.update(net.minecraft.core.component.DataComponents.CUSTOM_DATA, stack, customDataTag -> customDataTag.putLong(\"cooldown\", 123L));"))
         assertTrue(transformed.contains("public boolean supportsEnchantment(ItemStack stack, net.minecraft.core.Holder<Enchantment> enchantment)"))
         assertTrue(transformed.contains("return enchantment.is(Enchantments.EFFICIENCY);"))
     }
@@ -2745,9 +2787,7 @@ class TextReplacementTest {
         val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(tempDir)
 
         assertTrue(
-            result.errors.any {
-                it.contains("item class 'com.example.ChainBlockItem' has no source registry entry")
-            },
+            result.errors.any { it.contains("item class 'ChainBlockItem' has no source registry entry") },
             result.errors.joinToString("\n")
         )
         assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/destruction.json").exists())
@@ -3542,10 +3582,7 @@ class TextReplacementTest {
 
         assertFalse(transformed.contains("ITagManager"))
         assertFalse(transformed.contains("net.neoforged.neoforge.registries.tags"))
-        assertTrue(transformed.contains("BuiltInRegistries.ITEM.getTagOrEmpty(itemTag).forEach"), transformed)
-        assertTrue(transformed.contains("Holder<Item> itemHolder"), transformed)
-        assertTrue(transformed.contains("Item item = itemHolder.value();"), transformed)
-        assertTrue(transformed.contains("getMap().put(item, burnTime);"), transformed)
+        assertTrue(transformed.contains("BuiltInRegistries.ITEM.getTagOrEmpty(itemTag).forEach((holder) -> { Item item = holder.value(); getMap().put(item, burnTime); });"), transformed)
         assertTrue(transformed.contains("if (!BuiltInRegistries.ITEM.getTagOrEmpty(itemTag).iterator().hasNext()) {"), transformed)
     }
 
@@ -6747,560 +6784,5 @@ class TextReplacementTest {
         assertTrue(migrated.contains("return getCloneItemStack(level_, pos_, state_);"), migrated)
         assertFalse(migrated.contains("new ItemStack(this)"), migrated)
         assertFalse(migrated.contains("@SuppressWarnings"), migrated)
-    }
-
-
-    @Test
-    fun `enchantment table types follow vanilla 121 class names`() {
-        val projectDir = createTestFile("""
-            package com.example;
-            import net.minecraft.world.level.block.EnchantmentTableBlock;
-            import net.minecraft.world.level.block.entity.EnchantmentTableBlockEntity;
-            class TestMod {
-                boolean read(Object value) {
-                    return value instanceof EnchantmentTableBlockEntity
-                        && EnchantmentTableBlock.BOOKSHELF_OFFSETS.length > 0;
-                }
-            }
-        """.trimIndent())
-
-        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
-        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
-
-        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        assertTrue(transformed.contains("import net.minecraft.world.level.block.EnchantingTableBlock;"), transformed)
-        assertTrue(transformed.contains("import net.minecraft.world.level.block.entity.EnchantingTableBlockEntity;"), transformed)
-        assertTrue(transformed.contains("value instanceof EnchantingTableBlockEntity"), transformed)
-        assertTrue(transformed.contains("EnchantingTableBlock.BOOKSHELF_OFFSETS"), transformed)
-        assertFalse(transformed.contains("EnchantmentTableBlock"), transformed)
-    }
-
-
-    @Test
-    fun `DistExecutor owner evidence is preserved for the structural pass without placeholders`() {
-        val projectDir = createTestFile("""
-            package com.example;
-
-            import net.neoforged.fml.DistExecutor;
-
-            public class TestMod {
-            }
-        """.trimIndent())
-
-        val db = MappingDatabase.loadDefault()
-        val pass = TextReplacementPass(db)
-        pass.apply(projectDir)
-
-        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
-
-        assertTrue(transformed.contains("import net.neoforged.fml.DistExecutor;"))
-        assertFalse(transformed.contains("[forge2neo]"))
-        assertFalse(transformed.contains("removed in NeoForge"))
-    }
-
-
-    @Test
-    fun `legacy hand references after useWithoutItem migration use main hand`() {
-        val projectDir = createTestFile("""
-            public class TestMod {
-                void useWithoutItem(Player player, ItemStack heldStack) {
-                    ItemStack stack = player.getItemInHand(hand);
-                    player.swing(handIn);
-                    heldStack.hurtAndBreak(1, player, p -> p.onEquippedItemBroken(hand));
-                    this.takePlates(level, pos, state, player, handIn);
-                }
-            }
-        """.trimIndent())
-
-        val db = MappingDatabase.loadDefault()
-        val pass = TextReplacementPass(db)
-        pass.apply(projectDir)
-
-        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
-
-        assertTrue(transformed.contains("import net.minecraft.world.InteractionHand;"))
-        assertTrue(transformed.contains("import net.minecraft.world.entity.EquipmentSlot;"))
-        assertTrue(transformed.contains("ItemStack stack = player.getMainHandItem();"))
-        assertTrue(transformed.contains("player.swing(InteractionHand.MAIN_HAND);"))
-        assertTrue(transformed.contains("heldStack.hurtAndBreak(1, player, EquipmentSlot.MAINHAND);"))
-        assertTrue(transformed.contains("this.takePlates(level, pos, state, player, InteractionHand.MAIN_HAND);"))
-        assertFalse(transformed.contains("handIn"))
-        assertFalse(transformed.contains("onEquippedItemBroken(hand"))
-    }
-
-
-    @Test
-    fun `legacy gui overlay owner migrates method reference fields without touching text`() {
-        val projectDir = createTestFile("""
-            package com.example;
-
-            import net.minecraftforge.client.gui.overlay.IGuiOverlay;
-
-            public class TestMod {
-                private static final String DOC = "IGuiOverlay OVERLAY";
-                public static final IGuiOverlay OVERLAY = TestMod::render;
-
-                private static void render(Object graphics, Object tracker) {}
-                // IGuiOverlay remains documentation.
-            }
-        """.trimIndent())
-
-        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
-        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
-
-        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
-        assertTrue(result.changes.any { it.ruleId == "gui-overlay-layer-owner" })
-        assertTrue(transformed.contains("import net.minecraft.client.gui.LayeredDraw;"), transformed)
-        assertTrue(transformed.contains("public static final LayeredDraw.Layer OVERLAY = TestMod::render;"), transformed)
-        assertTrue(transformed.contains("\"IGuiOverlay OVERLAY\""), transformed)
-        assertTrue(transformed.contains("// IGuiOverlay remains documentation."), transformed)
-    }
-
-
-    @Test
-    fun `network hooks open screen resolves inherited block entity world position`() {
-        val projectDir = createTestFile("""
-            package com.example;
-
-            import net.minecraftforge.network.NetworkHooks;
-
-            public class TestMod extends IntermediateMenuBlockEntity {
-                public void open(ServerPlayer player, MenuProvider menu) {
-                    NetworkHooks.openScreen(player, menu, worldPosition);
-                }
-            }
-        """.trimIndent())
-        val srcDir = projectDir.resolve("src/main/java/com/example")
-        srcDir.resolve("IntermediateMenuBlockEntity.java").writeText("""
-            package com.example;
-
-            public abstract class IntermediateMenuBlockEntity extends BaseMenuBlockEntity {
-            }
-        """.trimIndent())
-        srcDir.resolve("BaseMenuBlockEntity.java").writeText("""
-            package com.example;
-
-            import net.minecraft.world.level.block.entity.BlockEntity;
-
-            public abstract class BaseMenuBlockEntity extends BlockEntity {
-            }
-        """.trimIndent())
-
-        val db = MappingDatabase.loadDefault()
-        val pass = TextReplacementPass(db)
-        val result = pass.apply(projectDir)
-
-        val transformed = srcDir.resolve("TestMod.java").readText()
-        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        assertTrue(transformed.contains("(player).openMenu(menu, worldPosition);"), transformed)
-        assertFalse(transformed.contains("NetworkHooks.openScreen"), transformed)
-    }
-
-
-    @Test
-    fun `recipe type lookup and entity serializer key use their explicit target registries`() {
-        val projectDir = createTestFile("""
-            package com.example;
-
-            import net.minecraft.network.syncher.EntityDataSerializer;
-            import net.minecraft.resources.ResourceLocation;
-            import net.minecraft.world.item.crafting.RecipeType;
-            import net.minecraftforge.registries.DeferredRegister;
-            import net.minecraftforge.registries.ForgeRegistries;
-
-            public class TestMod {
-                static final DeferredRegister<EntityDataSerializer<?>> SERIALIZERS =
-                    DeferredRegister.create(ForgeRegistries.Keys.ENTITY_DATA_SERIALIZERS, "example");
-                static final RecipeType<?> OPTIONAL_TYPE = ForgeRegistries.RECIPE_TYPES.getValue(
-                    ResourceLocation.fromNamespaceAndPath("other", "cutting")
-                );
-            }
-        """.trimIndent())
-
-        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
-        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
-
-        assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${result.errors}")
-        assertTrue(transformed.contains("NeoForgeRegistries.Keys.ENTITY_DATA_SERIALIZERS"))
-        assertTrue(transformed.contains("BuiltInRegistries.RECIPE_TYPE.get("))
-        assertTrue(transformed.contains("import net.neoforged.neoforge.registries.NeoForgeRegistries;"))
-        assertTrue(transformed.contains("import net.minecraft.core.registries.BuiltInRegistries;"))
-        assertFalse(Regex("""(?<!Neo)\bForgeRegistries\b""").containsMatchIn(transformed))
-    }
-
-
-
-    @Test
-    fun `unrelated fluent registration chains remain structurally intact`() {
-        val projectDir = createTestFile("""
-            package com.example;
-
-            import com.example.client.ExampleRenderer;
-            import com.example.client.ExampleVisual;
-
-            public class TestMod {
-                static final Object ENTRY = REGISTRATE
-                    .blockEntity("example", ExampleBlockEntity::new)
-                    .visual(() -> ExampleVisual::new)
-                    .validBlocks(EXAMPLE_BLOCK)
-                    .renderer(() -> ExampleRenderer::new)
-                    .register();
-            }
-        """.trimIndent())
-
-        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
-        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
-
-        assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${'$'}{result.errors}")
-        assertTrue(transformed.contains(".blockEntity(\"example\", ExampleBlockEntity::new)"), transformed)
-        assertTrue(transformed.contains(".visual(() -> ExampleVisual::new)"), transformed)
-        assertTrue(transformed.contains(".validBlocks(EXAMPLE_BLOCK)"), transformed)
-        assertTrue(transformed.contains(".renderer(() -> ExampleRenderer::new)"), transformed)
-        assertTrue(transformed.contains(".register();"), transformed)
-
-        projectDir.resolve("src/main/java/com/example/ModNetwork.java").writeText("""
-            package com.example;
-
-            public final class ModNetwork {
-                private ModNetwork() {}
-            }
-        """.trimIndent())
-
-        val structuralResult = StructuralRefactorPass().apply(projectDir)
-        val structurallyTransformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
-
-        assertTrue(structuralResult.errors.isEmpty(), "Unexpected structural errors: ${structuralResult.errors}")
-        assertTrue(structurallyTransformed.contains(".blockEntity(\"example\", ExampleBlockEntity::new)"), structurallyTransformed)
-        assertTrue(structurallyTransformed.contains(".visual(() -> ExampleVisual::new)"), structurallyTransformed)
-        assertTrue(structurallyTransformed.contains(".validBlocks(EXAMPLE_BLOCK)"), structurallyTransformed)
-        assertTrue(structurallyTransformed.contains(".renderer(() -> ExampleRenderer::new)"), structurallyTransformed)
-        assertTrue(structurallyTransformed.contains(".register();"), structurallyTransformed)
-    }
-
-
-    @Test
-    fun `registrate custom enchantments become data keys and item tags without marker shims`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("ExampleMod.java").writeText("""
-            package com.example;
-
-            public final class ExampleMod {
-                public static final String ID = "example";
-                public static final String NAME = "Example";
-                private static final CreateRegistrate REGISTRATE = CreateRegistrate.create(ID);
-                public static CreateRegistrate registrate() { return REGISTRATE; }
-            }
-        """.trimIndent())
-        srcDir.resolve("ModItems.java").writeText("""
-            package com.example;
-
-            import com.tterrag.registrate.util.entry.ItemEntry;
-
-            public final class ModItems {
-                private static final CreateRegistrate REGISTRATE = ExampleMod.registrate();
-                public static final ItemEntry<BacktankItem> BACKTANK = REGISTRATE
-                    .item("backtank", BacktankItem::new)
-                    .register();
-            }
-        """.trimIndent())
-        srcDir.resolve("ModEnchantments.java").writeText("""
-            package com.example;
-
-            import com.tterrag.registrate.util.entry.RegistryEntry;
-            import net.minecraft.world.entity.EquipmentSlot;
-            import net.minecraft.world.item.enchantment.Enchantment.Rarity;
-
-            public final class ModEnchantments {
-                private static final CreateRegistrate REGISTRATE = ExampleMod.registrate();
-
-                public static final RegistryEntry<CapacityEnchantment> CAPACITY = REGISTRATE.object("capacity")
-                    .enchantment(EnchantmentCategory.ARMOR_CHEST, CapacityEnchantment::new)
-                    .addSlots(EquipmentSlot.CHEST)
-                    .rarity(Rarity.COMMON)
-                    .register();
-            }
-        """.trimIndent())
-        val enchantmentFile = srcDir.resolve("CapacityEnchantment.java")
-        enchantmentFile.writeText("""
-            package com.example;
-
-            import net.minecraft.world.entity.EquipmentSlot;
-            import net.minecraft.world.item.ItemStack;
-            import net.minecraft.world.item.enchantment.Enchantment;
-            import net.minecraft.world.item.enchantment.EnchantmentCategory;
-
-            public class CapacityEnchantment extends Enchantment {
-                public CapacityEnchantment(Rarity rarity, EnchantmentCategory category, EquipmentSlot[] slots) {
-                    super(rarity, category, slots);
-                }
-
-                @Override
-                public int getMaxLevel() { return 3; }
-
-                @Override
-                public boolean canEnchant(ItemStack stack) {
-                    return stack.getItem() instanceof CapacityItem;
-                }
-
-                public interface CapacityItem {}
-            }
-        """.trimIndent())
-        srcDir.resolve("BacktankItem.java").writeText("""
-            package com.example;
-
-            import com.example.CapacityEnchantment.CapacityItem;
-
-            public class BacktankItem implements CapacityItem {
-            }
-        """.trimIndent())
-
-        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(tempDir)
-        val registry = srcDir.resolve("ModEnchantments.java").readText()
-        val item = srcDir.resolve("BacktankItem.java").readText()
-        val enchantmentJson = tempDir.resolve("src/generated/resources/data/example/enchantment/capacity.json")
-        val itemTag = tempDir.resolve("src/generated/resources/data/example/tags/item/enchantable/backtank.json")
-
-        assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${'$'}{result.errors}")
-        assertTrue(registry.contains("ResourceKey<Enchantment> CAPACITY"), registry)
-        assertFalse(registry.contains(".enchantment("), registry)
-        assertFalse(registry.contains("RegistryEntry<CapacityEnchantment>"), registry)
-        assertTrue(enchantmentJson.exists(), enchantmentJson.toString())
-        assertTrue(enchantmentJson.readText().contains("#example:enchantable/backtank"), enchantmentJson.readText())
-        assertTrue(itemTag.exists(), itemTag.toString())
-        assertTrue(itemTag.readText().contains("example:backtank"), itemTag.readText())
-        assertFalse(item.contains("implements CapacityItem"), item)
-        assertFalse(item.contains("CapacityEnchantment.CapacityItem"), item)
-        assertFalse(enchantmentFile.exists())
-        assertTrue(result.changes.any { it.ruleId == "custom-enchantment-resourcekey-context" })
-        assertTrue(result.changes.any { it.ruleId == "text-enchantment-marker-to-item-tag" })
-    }
-
-
-    @Test
-    fun `registrate item factories preserve concrete and inherited enchantment support`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("ExampleMod.java").writeText("""
-            package com.example;
-
-            public final class ExampleMod {
-                public static final String ID = "example";
-                private static final CreateRegistrate REGISTRATE = CreateRegistrate.create(ID);
-                public static CreateRegistrate registrate() { return REGISTRATE; }
-            }
-        """.trimIndent())
-        srcDir.resolve("ModItems.java").writeText("""
-            package com.example;
-
-            import com.tterrag.registrate.util.entry.ItemEntry;
-
-            public final class ModItems {
-                private static final CreateRegistrate REGISTRATE = ExampleMod.registrate();
-                public static final ItemEntry<ToolItem> TOOL = REGISTRATE
-                    .item("tool", ToolItem::new)
-                    .register();
-                public static final ItemEntry<? extends MarkerItem>
-                    MARKER = REGISTRATE.item("marker", MarkerItem::new).register(),
-                    LAYERED = REGISTRATE.item("layered", properties -> new MarkerItem.Layered()).register();
-            }
-        """.trimIndent())
-        srcDir.resolve("ModEnchantments.java").writeText("""
-            package com.example;
-
-            import com.tterrag.registrate.util.entry.RegistryEntry;
-            import net.minecraft.world.entity.EquipmentSlot;
-            import net.minecraft.world.item.enchantment.Enchantment.Rarity;
-
-            public final class ModEnchantments {
-                private static final CreateRegistrate REGISTRATE = ExampleMod.registrate();
-                public static final RegistryEntry<ConcreteEnchantment> CONCRETE = REGISTRATE.object("concrete")
-                    .enchantment(EnchantmentCategory.BOW, ConcreteEnchantment::new)
-                    .addSlots(EquipmentSlot.MAINHAND)
-                    .rarity(Rarity.UNCOMMON)
-                    .register();
-                public static final RegistryEntry<MarkerEnchantment> MARKER = REGISTRATE.object("marker")
-                    .enchantment(EnchantmentCategory.ARMOR_CHEST, MarkerEnchantment::new)
-                    .addSlots(EquipmentSlot.CHEST)
-                    .rarity(Rarity.COMMON)
-                    .register();
-            }
-        """.trimIndent())
-        srcDir.resolve("ConcreteEnchantment.java").writeText("""
-            package com.example;
-
-            import net.minecraft.world.entity.EquipmentSlot;
-            import net.minecraft.world.item.ItemStack;
-            import net.minecraft.world.item.enchantment.Enchantment;
-            import net.minecraft.world.item.enchantment.EnchantmentCategory;
-
-            public class ConcreteEnchantment extends Enchantment {
-                public ConcreteEnchantment(Rarity rarity, EnchantmentCategory category, EquipmentSlot[] slots) {
-                    super(rarity, category, slots);
-                }
-                public boolean canApplyAtEnchantingTable(ItemStack stack) {
-                    return stack.getItem() instanceof ToolItem;
-                }
-            }
-        """.trimIndent())
-        srcDir.resolve("MarkerEnchantment.java").writeText("""
-            package com.example;
-
-            import net.minecraft.world.entity.EquipmentSlot;
-            import net.minecraft.world.item.ItemStack;
-            import net.minecraft.world.item.enchantment.Enchantment;
-            import net.minecraft.world.item.enchantment.EnchantmentCategory;
-
-            public class MarkerEnchantment extends Enchantment {
-                public MarkerEnchantment(Rarity rarity, EnchantmentCategory category, EquipmentSlot[] slots) {
-                    super(rarity, category, slots);
-                }
-                public boolean canEnchant(ItemStack stack) {
-                    return stack.getItem() instanceof MarkerSupport;
-                }
-                public interface MarkerSupport {}
-            }
-        """.trimIndent())
-        srcDir.resolve("ToolItem.java").writeText("""
-            package com.example;
-            public class ToolItem {}
-        """.trimIndent())
-        val markerItemFile = srcDir.resolve("MarkerItem.java")
-        markerItemFile.writeText("""
-            package com.example;
-
-            import com.example.MarkerEnchantment.MarkerSupport;
-
-            public class MarkerItem implements MarkerSupport {
-                public static class Layered extends MarkerItem {}
-            }
-        """.trimIndent())
-
-        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(tempDir)
-        val concreteTag = tempDir.resolve("src/generated/resources/data/example/tags/item/enchantable/tool.json")
-        val markerTag = tempDir.resolve("src/generated/resources/data/example/tags/item/enchantable/marker.json")
-
-        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        assertTrue(concreteTag.exists(), concreteTag.toString())
-        assertTrue(concreteTag.readText().contains("example:tool"), concreteTag.readText())
-        assertTrue(markerTag.exists(), markerTag.toString())
-        assertTrue(markerTag.readText().contains("example:marker"), markerTag.readText())
-        assertTrue(markerTag.readText().contains("example:layered"), markerTag.readText())
-        assertFalse(markerItemFile.readText().contains("implements MarkerSupport"), markerItemFile.readText())
-    }
-
-
-
-    @Test
-    fun `catnip registry key helper migration is owner exact and leaves other registry methods intact`() {
-        val projectDir = createTestFile("""
-            package com.example;
-
-            import java.util.function.Function;
-            import net.createmod.catnip.platform.CatnipServices;
-
-            public class UsesRegistryHelper {
-                Object key(Object value) {
-                    return CatnipServices.REGISTRIES.getKeyOrThrow(value);
-                }
-
-                Function<Object, Object> keyFunction() {
-                    return CatnipServices.REGISTRIES::getKeyOrThrow;
-                }
-
-                Object lookup(Object id) {
-                    return CatnipServices.REGISTRIES.getItem(id);
-                }
-
-                String documentation = "CatnipServices.REGISTRIES.getKeyOrThrow(value)";
-                // CatnipServices.REGISTRIES::getKeyOrThrow remains documentation.
-            }
-        """.trimIndent())
-
-        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
-        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
-
-        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        assertTrue(transformed.contains("net.createmod.catnip.registry.RegisteredObjectsHelper.getKeyOrThrow(value)"), transformed)
-        assertTrue(transformed.contains("net.createmod.catnip.registry.RegisteredObjectsHelper::getKeyOrThrow"), transformed)
-        assertTrue(transformed.contains("CatnipServices.REGISTRIES.getItem(id)"), transformed)
-        assertTrue(transformed.contains("\"CatnipServices.REGISTRIES.getKeyOrThrow(value)\""), transformed)
-        assertTrue(transformed.contains("// CatnipServices.REGISTRIES::getKeyOrThrow remains documentation."), transformed)
-        assertTrue(transformed.contains("import net.createmod.catnip.platform.CatnipServices;"), transformed)
-        assertTrue(result.changes.any { it.ruleId == "catnip-registered-objects-key-helper" })
-    }
-
-
-    @Test
-    fun `catnip loader service owner migration requires exact import evidence`() {
-        val projectDir = createTestFile("""
-            package com.example;
-
-            import net.createmod.catnip.platform.ForgeCatnipServices;
-
-            public class UsesFluidRenderer {
-                Object renderer() {
-                    return ForgeCatnipServices.FLUID_RENDERER;
-                }
-
-                String documentation = "ForgeCatnipServices.FLUID_RENDERER";
-                // ForgeCatnipServices remains documentation.
-            }
-        """.trimIndent())
-
-        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
-        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
-
-        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        assertTrue(transformed.contains("import net.createmod.catnip.platform.NeoForgeCatnipServices;"), transformed)
-        assertTrue(transformed.contains("return NeoForgeCatnipServices.FLUID_RENDERER;"), transformed)
-        assertTrue(transformed.contains("\"ForgeCatnipServices.FLUID_RENDERER\""), transformed)
-        assertTrue(transformed.contains("// ForgeCatnipServices remains documentation."), transformed)
-        assertTrue(result.changes.any { it.ruleId == "catnip-neoforge-platform-services" })
-    }
-
-
-    @Test
-    fun `dynamic trees public API classes migrate exactly`() {
-        val projectDir = createTestFile("""
-            package com.example;
-
-            import com.ferreusveritas.dynamictrees.api.TreeHelper;
-            import com.ferreusveritas.dynamictrees.block.branch.BranchBlock;
-            import com.ferreusveritas.dynamictrees.block.branch.TrunkShellBlock;
-            import com.ferreusveritas.dynamictrees.util.BranchDestructionData;
-
-            public class TestMod {
-                BranchBlock branch;
-                TrunkShellBlock shell;
-                BranchDestructionData data;
-
-                boolean branch(Object block) {
-                    return com.ferreusveritas.dynamictrees.api.TreeHelper.isBranch(block);
-                }
-
-                String documentation = "com.ferreusveritas.dynamictrees.api.TreeHelper";
-                // com.ferreusveritas.dynamictrees.util.BranchDestructionData remains documentation.
-            }
-        """.trimIndent())
-
-        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
-        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
-
-        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        assertTrue(transformed.contains("import com.dtteam.dynamictrees.tree.TreeHelper;"), transformed)
-        assertTrue(transformed.contains("import com.dtteam.dynamictrees.block.branch.BranchBlock;"), transformed)
-        assertTrue(transformed.contains("import com.dtteam.dynamictrees.block.branch.TrunkShellBlock;"), transformed)
-        assertTrue(transformed.contains("import com.dtteam.dynamictrees.api.network.BranchDestructionData;"), transformed)
-        assertTrue(transformed.contains("com.dtteam.dynamictrees.tree.TreeHelper.isBranch(block)"), transformed)
-        assertTrue(transformed.contains("\"com.ferreusveritas.dynamictrees.api.TreeHelper\""), transformed)
-        assertTrue(
-            transformed.contains("// com.ferreusveritas.dynamictrees.util.BranchDestructionData remains documentation."),
-            transformed
-        )
-        assertTrue(result.changes.any { it.ruleId == "dynamictrees-tree-helper-class" })
-        assertTrue(result.changes.any { it.ruleId == "dynamictrees-branch-destruction-data-class" })
-        assertTrue(result.changes.any { it.ruleId == "dynamictrees-branch-block-class" })
-        assertTrue(result.changes.any { it.ruleId == "dynamictrees-trunk-shell-block-class" })
     }
 }

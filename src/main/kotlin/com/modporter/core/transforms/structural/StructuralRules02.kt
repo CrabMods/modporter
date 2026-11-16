@@ -10,8 +10,6 @@ import com.github.javaparser.ast.body.MethodDeclaration
 import com.github.javaparser.ast.body.Parameter
 import com.github.javaparser.ast.body.VariableDeclarator
 import com.github.javaparser.ast.expr.*
-import com.github.javaparser.ast.stmt.IfStmt
-import com.github.javaparser.ast.stmt.ReturnStmt
 import com.github.javaparser.ast.type.ClassOrInterfaceType
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.*
@@ -21,7 +19,6 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.zip.GZIPInputStream
 import kotlin.io.path.*
-import kotlin.streams.toList
 
 // Structural migration rules, part 02 of 10, in pipeline order.
 // Rules are `internal fun StructuralRefactorPass.<name>` extensions; a rule is followed by the helpers it uses.
@@ -3600,281 +3597,143 @@ internal fun StructuralRefactorPass.migrateBlockEntityLegacyCapabilities(
     if (!srcDir.exists()) return changes
 
     val migrations = mutableListOf<BlockEntityLegacyCapabilityMigration>()
-    val javaFiles = Files.walk(srcDir).use { stream ->
-        stream.filter { it.extension == "java" }.toList()
-    }
-    val exactMigrationSources = javaFiles.associateWith { file -> file.readText() }
-    val initialErrorCount = errors.size
-    fun restoreExactMigrationSources() {
-        if (dryRun) return
-        exactMigrationSources.forEach { (file, source) ->
-            if (file.readText() != source) file.writeText(source)
+    val javaFiles = walkJavaSourceRoots(srcDir)
+        .filter { it.extension == "java" }
+        .toList()
+
+    for (javaFile in javaFiles) {
+        val original = javaFile.readText()
+        if (!original.contains("getCapability") ||
+            !original.contains("Capabilities.") ||
+            !original.contains("LazyOptional") ||
+            original.contains("registerCapabilities(RegisterCapabilitiesEvent")
+        ) {
+            continue
         }
-    }
 
-    try {
-        val registryGraph = ExactBlockEntityRegistryGraph.build(srcDir)
-        val legacyBlockCapabilityGraph = ExactLegacyBlockCapabilityGraph.build(srcDir)
-        val lazyOptionalProviderResolver = ExactLegacyLazyOptionalProviderResolver(srcDir)
-        val legacySourceIndex = JavaProjectTypeIndex.build(srcDir)
-        changes += legacyBlockCapabilityGraph.migrateDeclarationsAndPredicates(dryRun)
-
-        for (javaFile in javaFiles) {
-            val original = javaFile.readText()
-            if (!original.contains("getCapability") ||
-                !original.contains("LazyOptional") ||
-                original.contains("registerCapabilities(RegisterCapabilitiesEvent")
-            ) {
-                continue
-            }
-
-            val capabilityMethods = legacySourceIndex.unit(javaFile)
-                .findAll(MethodDeclaration::class.java)
-                .filter { method ->
-                    if (method.nameAsString != "getCapability") return@filter false
-                    val owner = exactEnclosingNamedClass(method)?.fullyQualifiedName?.orElse(null)
-                        ?: return@filter false
-                    legacySourceIndex.isTypeAssignableTo(
-                        owner,
-                        "net.minecraft.world.level.block.entity.BlockEntity"
-                    )
-                }
-            if (capabilityMethods.size > 1) {
-                val relative = projectDir.relativize(javaFile).invariantSeparatorsPathString
-                errors.add(
-                    "Cannot migrate BlockEntity getCapability in $relative: multiple BlockEntity capability " +
-                        "methods in one source file require separate owner edits"
-                )
-                continue
-            }
-            val capabilityMethod = capabilityMethods.singleOrNull() ?: continue
-            val ownerDeclaration = exactEnclosingNamedClass(capabilityMethod)
-                ?: throw IllegalStateException("Cannot resolve getCapability owner in $javaFile")
-            val blockEntityType = ownerDeclaration.fullyQualifiedName.orElse(null)
-                ?: throw IllegalStateException("Cannot resolve getCapability owner type in $javaFile")
-            val className = ownerDeclaration.nameAsString
-            val getCapabilityMethod = capabilityMethod.toString()
-            val capabilityTokens = legacyBlockEntityCapabilityTokens(getCapabilityMethod)
-            val externalContracts = legacyBlockCapabilityGraph.contractsUsedBy(
-                javaFile,
-                blockEntityType,
-                "getCapability"
-            )
-            val capabilityParameter = Regex(
-                """(?:Capability|[A-Za-z_$][\w$]*\.Capability)\s*<[^>]+>\s+([A-Za-z_$][\w$]*)"""
-            ).find(maskJavaCommentsAndLiterals(getCapabilityMethod))?.groupValues?.get(1)
-            val sideParameter = getCapabilityDirectionParameterName(getCapabilityMethod)
-            val exactLazyOptionalProvider = capabilityParameter?.let { parameterName ->
-                { returnExpression: String ->
-                    lazyOptionalProviderResolver.resolve(
-                        file = javaFile,
-                        ownerType = blockEntityType,
-                        methodName = "getCapability",
-                        returnExpression = returnExpression,
-                        capabilityParameter = parameterName,
-                        sideParameter = sideParameter
-                    )?.let(::LegacyCapabilityProvider)
-                }
-            }
-            val exactGuardedTailProvider = capabilityParameter?.let { parameterName ->
-                { contract: ExactLegacyBlockCapabilityGraph.PredicateContract ->
-                    lazyOptionalProviderResolver.resolveGuardedTail(
-                        file = javaFile,
-                        ownerType = blockEntityType,
-                        methodName = "getCapability",
-                        predicateMethod = contract.methodName,
-                        capabilityParameter = parameterName,
-                        sideParameter = sideParameter
-                    )
-                }
-            }
-            val exactInstanceExpression = { expression: String ->
-                lazyOptionalProviderResolver.rewriteInstanceExpression(
-                    file = javaFile,
-                    ownerType = blockEntityType,
-                    methodName = "getCapability",
-                    expressionText = expression,
-                    parameterRenames = mapOf(sideParameter to "side")
-                )
-            }
-            val graphRegistryRefs = registryGraph.referencesFor(blockEntityType)
-            val registryRefs = if (graphRegistryRefs.isNotEmpty()) {
-                graphRegistryRefs
-            } else {
-                registryGraph.referencesForAssignableTo(blockEntityType).ifEmpty {
-                    blockEntityRegistryRefFromConstructors(original)?.let { listOf("$it.get()") }.orEmpty()
-                }
-            }
-            if (registryRefs.isEmpty()) {
-                val relative = projectDir.relativize(javaFile).invariantSeparatorsPathString
-                errors.add(
-                    "Cannot migrate BlockEntity getCapability in $relative: no exact BlockEntityType registry " +
-                        "reference for $blockEntityType"
-                )
-                continue
-            }
-            val externalProviders = extractExternalBlockEntityCapabilityProviders(
-                getCapabilityMethod,
-                original,
-                externalContracts,
-                exactLazyOptionalProvider,
-                exactGuardedTailProvider,
-                exactInstanceExpression
-            )
-            if (externalProviders.size != externalContracts.size) {
-                val relative = projectDir.relativize(javaFile).invariantSeparatorsPathString
-                errors.add(
-                    "Cannot migrate BlockEntity getCapability in $relative: external block capability " +
-                        "predicate/provider branch is not structurally closed"
-                )
-                continue
-            }
-            val providers = (
-                extractBlockEntityLegacyCapabilityProviders(
-                    getCapabilityMethod,
-                    original,
-                    exactLazyOptionalProvider,
-                    exactInstanceExpression
-                ) + externalProviders
-                ).distinctBy { it.capabilityExpression }
-            if (providers.isEmpty()) {
-                if (isNoOpLegacyBlockEntityCapabilityOverride(getCapabilityMethod, capabilityTokens)) {
-                    var modified = original
-                    modified = removeMethodByName(modified, "getCapability")
-                    modified = cleanupLegacyCapabilityOverrideImports(modified)
-                    if (modified != original) {
-                        if (!dryRun) {
-                            javaFile.writeText(modified)
-                        }
-                        changes.add(Change(
-                            file = javaFile,
-                            line = 0,
-                            description = "Remove no-op legacy BlockEntity getCapability override with no provider branch",
-                            before = "getCapability(Capabilities.*.BLOCK) { /* no provider */ }",
-                            after = "(override removed)",
-                            confidence = Confidence.HIGH,
-                            ruleId = "struct-blockentity-noop-capability-override"
-                        ))
+        val id = """[A-Za-z_$][\w$]*"""
+        val className = Regex("""\bclass\s+($id)\s+extends\s+(?:$id(?:\.$id)*\.)?(?:$id)?BlockEntity\b""")
+            .find(original)
+            ?.groupValues
+            ?.get(1)
+            ?: continue
+        val registryRef = blockEntityRegistryRefFromConstructors(original) ?: continue
+        val registryOwner = registryRef.substringBeforeLast('.')
+        val registryField = registryRef.substringAfterLast('.')
+        val getCapabilityMethod = javaDeclaredMethodText(original, "getCapability") ?: continue
+        val capabilityTokens = legacyBlockEntityCapabilityTokens(getCapabilityMethod)
+        val providers = extractBlockEntityLegacyCapabilityProviders(getCapabilityMethod, original)
+        if (providers.isEmpty()) {
+            if (isNoOpLegacyBlockEntityCapabilityOverride(getCapabilityMethod, capabilityTokens)) {
+                var modified = original
+                modified = removeMethodByName(modified, "getCapability")
+                modified = cleanupLegacyCapabilityOverrideImports(modified)
+                if (modified != original) {
+                    if (!dryRun) {
+                        javaFile.writeText(modified)
                     }
-                    continue
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Remove no-op legacy BlockEntity getCapability override with no provider branch",
+                        before = "getCapability(Capabilities.*.BLOCK) { /* no provider */ }",
+                        after = "(override removed)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-blockentity-noop-capability-override"
+                    ))
                 }
-                val relative = projectDir.relativize(javaFile).invariantSeparatorsPathString
-                errors.add(
-                    "Cannot migrate BlockEntity getCapability in $relative: no source-shaped provider for " +
-                        capabilityTokens.ifEmpty { listOf("Capabilities.*") }.joinToString(", ")
-                )
                 continue
             }
-            val unconsumedBranches = unconsumedLegacyCapabilityBranches(
-                getCapabilityMethod,
-                providers,
-                externalContracts
+            val relative = projectDir.relativize(javaFile).invariantSeparatorsPathString
+            errors.add(
+                "Cannot migrate BlockEntity getCapability in $relative: no source-shaped provider for " +
+                    capabilityTokens.ifEmpty { listOf("Capabilities.*") }.joinToString(", ")
             )
-            if (unconsumedBranches.isNotEmpty()) {
-                val relative = projectDir.relativize(javaFile).invariantSeparatorsPathString
-                errors.add(
-                    "Cannot partially migrate BlockEntity getCapability in $relative: unproven predicate branches " +
-                        unconsumedBranches.joinToString("; ")
-                )
-                continue
-            }
-            val migratedCapabilities = providers.map { it.capabilityExpression }.toSet()
-            val unmigratedCapabilities = capabilityTokens.filterNot { it in migratedCapabilities }
-            if (unmigratedCapabilities.isNotEmpty()) {
-                val relative = projectDir.relativize(javaFile).invariantSeparatorsPathString
-                errors.add(
-                    "Cannot partially migrate BlockEntity getCapability in $relative: unsupported capability branches " +
-                        unmigratedCapabilities.joinToString(", ")
-                )
-                continue
-            }
-
-            var modified = original
-            val consumedFields = providers.flatMap { it.consumedLazyOptionalFields }.toSet()
-            modified = removeMethodByName(modified, "getCapability")
-            modified = migrateLegacyCapabilityReviveCapsSource(modified)
-            modified = removeLegacyCapabilityCacheState(modified, consumedFields, className)
-            modified = cleanupLegacyCapabilityOverrideImports(modified)
-            modified = addImportIfMissing(modified, "net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent")
-            if (providers.any { it.capabilityExpression.startsWith("Capabilities.") }) {
-                modified = Regex(
-                    """(?m)^[ \t]*import\s+com\.modporter\.generated\.[\w.]+\.compat\.Capabilities;\s*\r?\n"""
-                ).replace(modified, "")
-                modified = addImportIfMissing(modified, "net.neoforged.neoforge.capabilities.Capabilities")
-            }
-
-            val registerMethod = renderBlockEntityCapabilityRegistrationMethod(
-                registryRefs = registryRefs,
-                providers = providers
+            continue
+        }
+        val migratedCapabilities = providers.map { it.capabilityExpression }.toSet()
+        val unmigratedCapabilities = capabilityTokens.filterNot { it in migratedCapabilities }
+        if (unmigratedCapabilities.isNotEmpty()) {
+            val relative = projectDir.relativize(javaFile).invariantSeparatorsPathString
+            errors.add(
+                "Cannot partially migrate BlockEntity getCapability in $relative: unsupported capability branches " +
+                    unmigratedCapabilities.joinToString(", ")
             )
-            modified = insertBeforeExactClassClosingBrace(modified, className, registerMethod)
+            continue
+        }
 
-            if (modified == original) continue
-            if (!dryRun) {
-                javaFile.writeText(modified)
-            }
-            migrations.add(
-                BlockEntityLegacyCapabilityMigration(
-                    file = javaFile,
-                    packageName = packageNameOf(modified),
-                    className = className,
-                    preferredRegistryClassName = registryRefs.first()
-                        .removeSuffix(".get()")
-                        .substringBeforeLast('.')
-                        .substringAfterLast('.')
-                )
-            )
-            changes.add(Change(
+        var modified = original
+        val consumedFields = providers.flatMap { it.consumedLazyOptionalFields }.toSet()
+        modified = removeMethodByName(modified, "getCapability")
+        modified = migrateLegacyCapabilityReviveCapsSource(modified)
+        modified = removeLegacyCapabilityCacheState(modified, consumedFields, className)
+        modified = cleanupLegacyCapabilityOverrideImports(modified)
+        modified = addImportIfMissing(modified, "net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent")
+        if (providers.any { it.capabilityExpression.startsWith("Capabilities.") }) {
+            modified = addImportIfMissing(modified, "net.neoforged.neoforge.capabilities.Capabilities")
+        }
+
+        val registerMethod = renderBlockEntityCapabilityRegistrationMethod(
+            className = className,
+            registryRef = "$registryOwner.$registryField.get()",
+            providers = providers
+        )
+        modified = insertBeforeLastClassBrace(modified, registerMethod)
+
+        if (modified == original) continue
+        if (!dryRun) {
+            javaFile.writeText(modified)
+        }
+        migrations.add(
+            BlockEntityLegacyCapabilityMigration(
                 file = javaFile,
-                line = 0,
-                description = "Migrate source-shaped BlockEntity capabilities to RegisterCapabilitiesEvent",
-                before = "getCapability(Capabilities.*.BLOCK) LazyOptional branches",
-                after = "RegisterCapabilitiesEvent.registerBlockEntity providers",
-                confidence = Confidence.HIGH,
-                ruleId = "struct-blockentity-capability-provider"
-            ))
-        }
-
-        if (errors.size > initialErrorCount) {
-            restoreExactMigrationSources()
-            return emptyList()
-        }
-
-        if (migrations.isEmpty()) return changes
-
-        val mainClass = detectModMainClass(projectDir) ?: return changes
-        var mainText = mainClass.readText()
-        val originalMainText = mainText
-        val mainPackage = packageNameOf(mainText)
-        val constructorBusName = requireModEventBusName(mainText, "block entity capability listener registration")
-
-        for (migration in migrations) {
-            if (mainText.contains("${migration.className}::registerCapabilities")) continue
-            if (migration.packageName != mainPackage) {
-                mainText = addImportIfMissing(mainText, "${migration.packageName}.${migration.className}")
-            }
-            val registration = "        $constructorBusName.addListener(${migration.className}::registerCapabilities);"
-            mainText = insertModBusListener(mainText, constructorBusName, registration, migration.preferredRegistryClassName)
-            changes.add(Change(
-                file = mainClass,
-                line = 0,
-                description = "Register ${migration.className} block-entity capabilities on the mod event bus",
-                before = "(no block-entity capability listener)",
-                after = "$constructorBusName.addListener(${migration.className}::registerCapabilities)",
-                confidence = Confidence.HIGH,
-                ruleId = "struct-blockentity-capability-provider-listener"
-            ))
-        }
-
-        if (mainText != originalMainText && !dryRun) {
-            mainClass.writeText(mainText)
-        }
-
-        return changes
-    } catch (error: Exception) {
-        restoreExactMigrationSources()
-        throw error
+                packageName = packageNameOf(modified),
+                className = className,
+                preferredRegistryClassName = registryOwner.substringAfterLast('.')
+            )
+        )
+        changes.add(Change(
+            file = javaFile,
+            line = 0,
+            description = "Migrate source-shaped BlockEntity capabilities to RegisterCapabilitiesEvent",
+            before = "getCapability(Capabilities.*.BLOCK) LazyOptional branches",
+            after = "RegisterCapabilitiesEvent.registerBlockEntity providers",
+            confidence = Confidence.HIGH,
+            ruleId = "struct-blockentity-capability-provider"
+        ))
     }
+
+    if (migrations.isEmpty()) return changes
+
+    val mainClass = detectModMainClass(projectDir) ?: return changes
+    var mainText = mainClass.readText()
+    val originalMainText = mainText
+    val mainPackage = packageNameOf(mainText)
+    val constructorBusName = requireModEventBusName(mainText, "block entity capability listener registration")
+
+    for (migration in migrations) {
+        if (mainText.contains("${migration.className}::registerCapabilities")) continue
+        if (migration.packageName != mainPackage) {
+            mainText = addImportIfMissing(mainText, "${migration.packageName}.${migration.className}")
+        }
+        val registration = "        $constructorBusName.addListener(${migration.className}::registerCapabilities);"
+        mainText = insertModBusListener(mainText, constructorBusName, registration, migration.preferredRegistryClassName)
+        changes.add(Change(
+            file = mainClass,
+            line = 0,
+            description = "Register ${migration.className} block-entity capabilities on the mod event bus",
+            before = "(no block-entity capability listener)",
+            after = "$constructorBusName.addListener(${migration.className}::registerCapabilities)",
+            confidence = Confidence.HIGH,
+            ruleId = "struct-blockentity-capability-provider-listener"
+        ))
+    }
+
+    if (mainText != originalMainText && !dryRun) {
+        mainClass.writeText(mainText)
+    }
+
+    return changes
 }
 
 internal fun StructuralRefactorPass.blockEntityRegistryRefFromConstructors(source: String): String? {
@@ -3947,59 +3806,6 @@ internal fun StructuralRefactorPass.legacyBlockEntityCapabilityTokens(methodText
         .distinct()
         .toList()
 
-internal fun StructuralRefactorPass.unconsumedLegacyCapabilityBranches(
-    methodText: String,
-    providers: List<BlockEntityCapabilityProviderSpec>,
-    externalContracts: List<ExactLegacyBlockCapabilityGraph.PredicateContract>
-): List<String> {
-    val method = runCatching { com.github.javaparser.StaticJavaParser.parseMethodDeclaration(methodText) }
-        .getOrElse { error ->
-            throw IllegalStateException("Cannot parse legacy getCapability method: ${error.message}", error)
-        }
-    val capabilityParameters = method.parameters.filter { parameter ->
-        parameter.type.asClassOrInterfaceType().nameAsString == "Capability"
-    }
-    if (capabilityParameters.size != 1) {
-        throw IllegalStateException(
-            "Expected one legacy Capability parameter in getCapability, found ${capabilityParameters.size}"
-        )
-    }
-    val capabilityName = capabilityParameters.single().nameAsString
-    val capabilityExpressions = providers.map { it.capabilityExpression }.toSet()
-    val externalPredicates = externalContracts.map { it.receiverName to it.methodName }.toSet()
-    return method.findAll(IfStmt::class.java).mapNotNull { branch ->
-        if (branch.thenStmt.findAll(ReturnStmt::class.java).isEmpty()) return@mapNotNull null
-        val comparisons = branch.condition.findAll(BinaryExpr::class.java).mapNotNull { comparison ->
-            when {
-                comparison.left is NameExpr && comparison.left.asNameExpr().nameAsString == capabilityName ->
-                    comparison.right.toString()
-                comparison.right is NameExpr && comparison.right.asNameExpr().nameAsString == capabilityName ->
-                    comparison.left.toString()
-                else -> null
-            }
-        }
-        val predicateCalls = branch.condition.findAll(MethodCallExpr::class.java).mapNotNull { call ->
-            if (call.arguments.none { argument ->
-                    argument is NameExpr && argument.nameAsString == capabilityName
-                }
-            ) {
-                return@mapNotNull null
-            }
-            val receiver = when (val scope = call.scope.orElse(null)) {
-                is NameExpr -> scope.nameAsString
-                is FieldAccessExpr -> scope.nameAsString.takeIf { scope.scope is ThisExpr }
-                else -> null
-            }
-            receiver?.let { it to call.nameAsString }
-        }
-        if (comparisons.isEmpty() && predicateCalls.isEmpty()) return@mapNotNull null
-        val unknownComparisons = comparisons.filterNot { it in capabilityExpressions }
-        val unknownPredicates = predicateCalls.filterNot { it in externalPredicates }
-        if (unknownComparisons.isEmpty() && unknownPredicates.isEmpty()) return@mapNotNull null
-        branch.condition.toString()
-    }.distinct()
-}
-
 internal fun StructuralRefactorPass.isNoOpLegacyBlockEntityCapabilityOverride(methodText: String, capabilityTokens: List<String>): Boolean {
     if (capabilityTokens.isEmpty()) return false
     val executableMethod = maskJavaCommentsAndLiterals(methodText)
@@ -4018,9 +3824,7 @@ internal fun StructuralRefactorPass.isNoOpLegacyBlockEntityCapabilityOverride(me
 
 internal fun StructuralRefactorPass.extractBlockEntityLegacyCapabilityProviders(
     methodText: String,
-    source: String,
-    exactLazyOptionalProvider: ((String) -> LegacyCapabilityProvider?)? = null,
-    exactInstanceExpression: ((String) -> String?)? = null
+    source: String
 ): List<BlockEntityCapabilityProviderSpec> {
     val executableMethodText = maskJavaCommentsAndLiterals(methodText)
     val removedGuard = Regex("""!\s*(?:this\.)?isRemoved\s*\(\s*\)""").containsMatchIn(executableMethodText) ||
@@ -4032,14 +3836,13 @@ internal fun StructuralRefactorPass.extractBlockEntityLegacyCapabilityProviders(
             val provider = extractBlockEntityCapabilityProviderExpression(
                 branchBody = block.body,
                 source = source,
-                sideParameter = sideParameter,
-                exactLazyOptionalProvider = exactLazyOptionalProvider
+                sideParameter = sideParameter
             ) ?: return@mapNotNull null
             val providerGuard = blockEntityCapabilityProviderGuard(
                 condition = block.condition,
                 capabilityExpression = capability,
-                exactInstanceExpression = exactInstanceExpression
-            ) ?: return@mapNotNull null
+                sideParameter = sideParameter
+            )
             val guards = (if (removedGuard) listOf("!blockEntity.isRemoved()") else emptyList()) + providerGuard
             val guardedProvider = if (guards.isNotEmpty()) {
                 "(${guards.distinct().joinToString(" && ")}) ? ${provider.expression} : null"
@@ -4048,88 +3851,6 @@ internal fun StructuralRefactorPass.extractBlockEntityLegacyCapabilityProviders(
             }
             BlockEntityCapabilityProviderSpec(capability, guardedProvider, provider.consumedLazyOptionalFields)
         }
-}
-
-internal fun StructuralRefactorPass.extractExternalBlockEntityCapabilityProviders(
-    methodText: String,
-    source: String,
-    contracts: List<ExactLegacyBlockCapabilityGraph.PredicateContract>,
-    exactLazyOptionalProvider: ((String) -> LegacyCapabilityProvider?)? = null,
-    exactGuardedTailProvider: ((ExactLegacyBlockCapabilityGraph.PredicateContract) -> String?)? = null,
-    exactInstanceExpression: ((String) -> String?)? = null
-): List<BlockEntityCapabilityProviderSpec> {
-    if (contracts.isEmpty()) return emptyList()
-    val executableMethod = maskJavaCommentsAndLiterals(methodText)
-    val capabilityParameter = Regex(
-        """(?:Capability|[A-Za-z_$][\w$]*\.Capability)\s*<[^>]+>\s+([A-Za-z_$][\w$]*)"""
-    ).find(executableMethod)?.groupValues?.get(1) ?: return emptyList()
-    val id = """[A-Za-z_$][\w$]*"""
-    val sideParameter = getCapabilityDirectionParameterName(executableMethod)
-    return contracts.mapNotNull { contract ->
-        if (contract.providerStrategy == ExactLegacyBlockCapabilityGraph.ProviderStrategy.BRANCH_RETURN) {
-            exactGuardedTailProvider?.invoke(contract)?.let { provider ->
-                return@mapNotNull BlockEntityCapabilityProviderSpec(
-                    capabilityExpression = contract.targetExpression,
-                    providerExpression = provider
-                )
-            }
-        }
-        val receiverPrefix = contract.receiverName?.let { "(?:this\\.)?${Regex.escape(it)}\\." }
-            ?: "(?:this\\.)?"
-        val predicatePattern = Regex(
-            """$receiverPrefix${Regex.escape(contract.methodName)}\s*\(\s*${Regex.escape(capabilityParameter)}\s*\)"""
-        )
-        val block = findIfBlockContainingToken(
-            executableMethod,
-            contract.receiverName?.let { "$it.${contract.methodName}" } ?: "${contract.methodName}("
-        )
-            ?: return@mapNotNull null
-        if (!predicatePattern.containsMatchIn(block.condition) ||
-            Regex("""!\s*${predicatePattern.pattern}""").containsMatchIn(block.condition)
-        ) return@mapNotNull null
-        val guards = block.condition.split("&&")
-            .map { it.trim() }
-            .filter { it.isNotBlank() && !predicatePattern.containsMatchIn(it) }
-            .map { guard ->
-                exactInstanceExpression?.invoke(guard) ?: return@mapNotNull null
-            }
-        val provider = when (contract.providerStrategy) {
-            ExactLegacyBlockCapabilityGraph.ProviderStrategy.RECEIVER_LAZY_OPTIONAL -> {
-                val receiver = contract.receiverName ?: return@mapNotNull null
-                if (!Regex(
-                        """(?m)^[ \t]*(?:private|protected|public)\s+(?:final\s+)?[^;=()]+\s+${Regex.escape(receiver)}\s*(?:=|;)"""
-                    ).containsMatchIn(maskJavaCommentsAndLiterals(source))
-                ) {
-                    return@mapNotNull null
-                }
-                val providerMethod = Regex(
-                    """return\s+(?:this\.)?${Regex.escape(receiver)}\.($id)\s*\(\s*\)\s*;"""
-                ).find(block.body)?.groupValues?.get(1) ?: return@mapNotNull null
-                val typeWitness = when (contract.providerMethodTypeParameterCount) {
-                    0 -> "."
-                    1 -> ".<${contract.providerApiType ?: return@mapNotNull null}>"
-                    else -> return@mapNotNull null
-                }
-                LegacyCapabilityProvider("blockEntity.$receiver$typeWitness$providerMethod().orElse(null)")
-            }
-            ExactLegacyBlockCapabilityGraph.ProviderStrategy.BRANCH_RETURN ->
-                extractBlockEntityCapabilityProviderExpression(
-                    branchBody = block.body,
-                    source = source,
-                    sideParameter = sideParameter,
-                    exactLazyOptionalProvider = exactLazyOptionalProvider
-                ) ?: return@mapNotNull null
-        }
-        BlockEntityCapabilityProviderSpec(
-            capabilityExpression = contract.targetExpression,
-            providerExpression = if (guards.isEmpty()) {
-                provider.expression
-            } else {
-                "(${guards.joinToString(" && ")}) ? ${provider.expression} : null"
-            },
-            consumedLazyOptionalFields = provider.consumedLazyOptionalFields
-        )
-    }
 }
 
 internal fun StructuralRefactorPass.findIfBlockContainingToken(source: String, token: String): JavaIfBlock? {
@@ -4194,9 +3915,9 @@ internal fun StructuralRefactorPass.getCapabilityDirectionParameterName(methodTe
 internal fun StructuralRefactorPass.blockEntityCapabilityProviderGuard(
     condition: String,
     capabilityExpression: String,
-    exactInstanceExpression: ((String) -> String?)?
-): List<String>? {
-    val guards = condition.split("&&")
+    sideParameter: String
+): List<String> {
+    return condition.split("&&")
         .map { it.trim() }
         .filter { it.isNotEmpty() }
         .filterNot { part ->
@@ -4204,24 +3925,24 @@ internal fun StructuralRefactorPass.blockEntityCapabilityProviderGuard(
                 Regex("""\b(?:cap|capability)\b""").containsMatchIn(part) &&
                 part.contains("Capabilities.")
         }
-        .map { part ->
-            val removedGuard = when {
-                Regex("""^!\s*(?:this\.)?remove$""").matches(part) -> "!blockEntity.isRemoved()"
-                Regex("""^(?:this\.)?remove$""").matches(part) -> "blockEntity.isRemoved()"
-                else -> null
+        .mapNotNull { part ->
+            var migrated = part
+                .replace(Regex("""!\s*this\.remove\b"""), "!blockEntity.isRemoved()")
+                .replace(Regex("""!\s*remove\b"""), "!blockEntity.isRemoved()")
+                .replace(Regex("""this\.remove\b"""), "blockEntity.isRemoved()")
+                .replace(Regex("""\bthis\.isRemoved\s*\(\s*\)"""), "blockEntity.isRemoved()")
+            if (sideParameter != "side") {
+                migrated = Regex("""\b${Regex.escape(sideParameter)}\b""").replace(migrated, "side")
             }
-            val migrated = removedGuard ?: exactInstanceExpression?.invoke(part) ?: return null
-            if (migrated.contains("Capabilities.")) return null
-            migrated
+            migrated = migrated.replace("this.", "blockEntity.")
+            if (migrated.contains("Capabilities.")) null else migrated
         }
-    return guards
 }
 
 internal fun StructuralRefactorPass.extractBlockEntityCapabilityProviderExpression(
     branchBody: String,
     source: String,
-    sideParameter: String,
-    exactLazyOptionalProvider: ((String) -> LegacyCapabilityProvider?)? = null
+    sideParameter: String
 ): LegacyCapabilityProvider? {
     parseLegacyCapabilityReturnChain(branchBody, source, sideParameter)
         ?.let { return it }
@@ -4244,7 +3965,6 @@ internal fun StructuralRefactorPass.extractBlockEntityCapabilityProviderExpressi
 
     val directReturn = Regex("""return\s+([^;]+);""").find(branchBody) ?: return null
     return legacyCapabilityReturnToProvider(directReturn.groupValues[1], branchBody, source)
-        ?: exactLazyOptionalProvider?.invoke(directReturn.groupValues[1])
 }
 
 internal fun StructuralRefactorPass.parseLegacyCapabilityReturnChain(
@@ -4440,17 +4160,16 @@ internal fun StructuralRefactorPass.sidedInvWrapperProviderForIndex(fieldName: S
 }
 
 internal fun StructuralRefactorPass.renderBlockEntityCapabilityRegistrationMethod(
-    registryRefs: List<String>,
+    className: String,
+    registryRef: String,
     providers: List<BlockEntityCapabilityProviderSpec>
 ): String {
-    val registrations = registryRefs.flatMap { registryRef ->
-        providers.map { provider -> registryRef to provider }
-    }.joinToString("\n") { (registryRef, provider) ->
+    val registrations = providers.joinToString("\n") { provider ->
         """
         event.registerBlockEntity(
                 ${provider.capabilityExpression},
                 $registryRef,
-                (blockEntity, side) -> ${provider.providerExpression});
+                ($className blockEntity, net.minecraft.core.Direction side) -> ${provider.providerExpression});
 """.trimEnd()
     }
     return """
@@ -4459,39 +4178,6 @@ internal fun StructuralRefactorPass.renderBlockEntityCapabilityRegistrationMetho
 $registrations
     }
 """.trimEnd()
-}
-
-internal fun StructuralRefactorPass.insertBeforeExactClassClosingBrace(
-    source: String,
-    className: String,
-    insertion: String
-): String {
-    val unit = JavaParser(
-        ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
-    ).parse(source).result.orElseThrow {
-        IllegalStateException("Cannot parse block entity source while inserting registerCapabilities")
-    }
-    val owners = unit.findAll(ClassOrInterfaceDeclaration::class.java)
-        .filter { declaration -> declaration.nameAsString == className && !declaration.isInterface }
-    if (owners.size != 1) {
-        throw IllegalStateException(
-            "Expected one block entity owner $className while inserting registerCapabilities, found ${owners.size}"
-        )
-    }
-    val end = owners.single().range.orElseThrow {
-        IllegalStateException("Block entity owner $className has no source range")
-    }.end
-    val lineStarts = mutableListOf(0)
-    source.forEachIndexed { index, character ->
-        if (character == '\n') lineStarts += index + 1
-    }
-    val closeBrace = lineStarts.getOrNull(end.line - 1)
-        ?.plus(end.column - 1)
-        ?: throw IllegalStateException("Block entity owner $className has an invalid closing position $end")
-    if (source.getOrNull(closeBrace) != '}') {
-        throw IllegalStateException("Block entity owner $className does not end at a closing brace")
-    }
-    return source.substring(0, closeBrace) + insertion + source.substring(closeBrace)
 }
 
 internal fun StructuralRefactorPass.migrateLegacyCapabilityReviveCapsSource(source: String): String {
@@ -6653,14 +6339,9 @@ internal data class JavaClassDeclaration(
     val bodyRange: IntRange
 )
 
-internal data class JavaRegistryAccessField(
-    val expression: String,
-    val isFinal: Boolean
-)
-
 internal data class JavaInheritanceIndex(
     private val directSuperByClass: Map<String, String>,
-    private val registryAccessFieldByClass: Map<String, JavaRegistryAccessField> = emptyMap()
+    private val registryAccessFieldByClass: Map<String, String> = emptyMap()
 ) {
     fun inherits(directSuper: String, baseTypes: Set<String>): Boolean {
         var current = directSuper.substringAfterLast('.')
@@ -6674,20 +6355,11 @@ internal data class JavaInheritanceIndex(
         return false
     }
 
-    fun inheritedRegistryAccessField(className: String): String? =
-        inheritedRegistryAccessFieldInfo(className)?.expression
-
-    fun inheritedRegistryAccessFieldInfo(className: String): JavaRegistryAccessField? {
+    fun inheritedRegistryAccessField(className: String): String? {
         var current = className.substringAfterLast('.')
         val visited = mutableSetOf<String>()
         while (current.isNotBlank() && visited.add(current)) {
             registryAccessFieldByClass[current]?.let { return it }
-            // The pinned Minecraft BlockEntity owns a nullable Level field.
-            // The context resolver must still prove this.level non-null at
-            // the actual use before obtaining its registry provider.
-            if (current == "BlockEntity" && current !in directSuperByClass) {
-                return JavaRegistryAccessField("this.level", false)
-            }
             current = directSuperByClass[current]?.substringAfterLast('.') ?: return null
         }
         return null
@@ -6780,7 +6452,7 @@ internal data class JavaInheritanceIndex(
 
 internal fun StructuralRefactorPass.collectJavaInheritanceIndex(javaFiles: List<Path>): JavaInheritanceIndex {
     val directSuperByClass = linkedMapOf<String, String>()
-    val fieldsByClass = linkedMapOf<String, MutableList<Triple<String, String, Boolean>>>()
+    val fieldsByClass = linkedMapOf<String, MutableList<Pair<String, String>>>()
     javaFiles.forEach { javaFile ->
         val source = javaFile.readText()
         val declarations = collectJavaClassDeclarations(source)
@@ -6789,20 +6461,20 @@ internal fun StructuralRefactorPass.collectJavaInheritanceIndex(javaFiles: List<
             directSuperByClass.putIfAbsent(declaration.name, declaration.directSuper)
             val body = source.substring(declaration.bodyRange.first + 1, declaration.bodyRange.last)
             Regex(
-                """(?m)^[ \t]*(?:@\w+(?:\.\w+)*(?:\([^)]*\))?\s+)*(?:public|protected|private)\s+(?!static\b)(?:(final)\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s+([A-Za-z_$][\w$]*)\s*(?:=[^;\r\n]*)?;"""
+                """(?m)^[ \t]*(?:@\w+(?:\.\w+)*(?:\([^)]*\))?\s+)*(?:public|protected|private)\s+(?!static\b)(?:final\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s+([A-Za-z_$][\w$]*)\s*(?:=[^;\r\n]*)?;"""
             ).findAll(maskJavaCommentsAndLiterals(body))
                 .forEach fieldLoop@ { field ->
                     val offset = declaration.bodyRange.first + 1 + field.range.first
                     val owner = declarations.filter { offset in it.bodyRange }.minByOrNull { it.bodyRange.last - it.bodyRange.first }
                     if (owner?.name != declaration.name) return@fieldLoop
-                    var type = field.groupValues[2].substringAfterLast('.')
+                    var type = field.groupValues[1].substringAfterLast('.')
                     val seen = mutableSetOf<String>()
                     while (seen.add(type)) {
                         val bound = typeParameters.boundOf(type, offset) ?: break
                         type = bound.substringBefore('<').substringAfterLast('.').trim()
                     }
                     fieldsByClass.getOrPut(declaration.name) { mutableListOf() } +=
-                        Triple(type, field.groupValues[3], field.groupValues[1].isNotEmpty())
+                        type to field.groupValues[2]
                 }
         }
     }
@@ -6810,21 +6482,15 @@ internal fun StructuralRefactorPass.collectJavaInheritanceIndex(javaFiles: List<
     val entityBaseTypes = javaEntityBaseTypes()
     val blockEntityBaseTypes = javaBlockEntityBaseTypes()
     val registryAccessFields = fieldsByClass.mapNotNull { (className, fields) ->
-        val entityFields = fields.filter { (type, _, _) ->
+        val entityFields = fields.filter { (type, _) ->
             type in entityBaseTypes || provisional.inherits(type, entityBaseTypes)
         }
-        if (entityFields.size == 1) {
-            val (_, name, isFinal) = entityFields.single()
-            return@mapNotNull className to JavaRegistryAccessField(name, isFinal)
-        }
+        if (entityFields.size == 1) return@mapNotNull className to entityFields.single().second
         // A behaviour owning one block entity reads registries through that entity's level.
-        val blockEntityFields = fields.filter { (type, _, _) ->
+        val blockEntityFields = fields.filter { (type, _) ->
             type in blockEntityBaseTypes || provisional.inherits(type, blockEntityBaseTypes)
         }
-        if (blockEntityFields.size == 1) {
-            val (_, name, isFinal) = blockEntityFields.single()
-            return@mapNotNull className to JavaRegistryAccessField("$name.getLevel()", isFinal)
-        }
+        if (blockEntityFields.size == 1) return@mapNotNull className to "${blockEntityFields.single().second}.getLevel()"
         // a command source, a level or a command block carries the registries of its level
         // (CommandSourceStack#registryAccess, Level#registryAccess, BaseCommandBlock#getLevel in 1.21.1)
         listOf(
@@ -6832,9 +6498,7 @@ internal fun StructuralRefactorPass.collectJavaInheritanceIndex(javaFiles: List<
             setOf("ServerLevel", "Level") to "",
             setOf("BaseCommandBlock") to ".getLevel()"
         ).firstNotNullOfOrNull { (types, suffix) ->
-            fields.filter { (type, _, _) -> type in types }.singleOrNull()?.let { field ->
-                className to JavaRegistryAccessField("${field.second}$suffix", field.third)
-            }
+            fields.filter { (type, _) -> type in types }.singleOrNull()?.let { className to "${it.second}$suffix" }
         }
     }.toMap()
     return JavaInheritanceIndex(directSuperByClass, registryAccessFields)
@@ -6850,26 +6514,11 @@ internal fun StructuralRefactorPass.collectJavaClassNamesExtending(
         .map { it.name }
         .toSet()
 
-private object JavaClassDeclarationsSourceCache {
-    private var source: String? = null
-    private var declarations: List<JavaClassDeclaration> = emptyList()
-
-    @Synchronized
-    fun getOrCompute(currentSource: String, compute: () -> List<JavaClassDeclaration>): List<JavaClassDeclaration> {
-        if (source == currentSource) return declarations
-        val result = java.util.Collections.unmodifiableList(compute())
-        source = currentSource
-        declarations = result
-        return result
-    }
-}
-
-internal fun StructuralRefactorPass.collectJavaClassDeclarations(source: String): List<JavaClassDeclaration> =
-    JavaClassDeclarationsSourceCache.getOrCompute(source) {
+internal fun StructuralRefactorPass.collectJavaClassDeclarations(source: String): List<JavaClassDeclaration> {
     val classPattern = Regex(
         """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed)\s+)*class\s+([A-Za-z_$][\w$]*)(?:\s*<[^>{}]+>)?(?:\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?))?\b[^{]*\{"""
     )
-    classPattern.findAll(source).mapNotNull { match ->
+    return classPattern.findAll(source).mapNotNull { match ->
         val openBrace = source.indexOf('{', match.range.last)
         val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
         if (openBrace < 0 || closeBrace < 0) {

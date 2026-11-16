@@ -434,6 +434,12 @@ class BuildSystemPass(
         }
 
         try {
+            changes.addAll(cleanupSplitTickPhaseChecks(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to cleanup split tick phase checks: ${e.message}")
+        }
+
+        try {
             changes.addAll(migrateStructureTemplatePoolReflectionFields(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Failed to migrate structure template pool reflection fields: ${e.message}")
@@ -515,6 +521,12 @@ class BuildSystemPass(
             changes.addAll(migrateVarHandleFieldAccesses(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Failed to migrate VarHandle field access: ${e.message}")
+        }
+
+        try {
+            changes.addAll(ProtectedPlatformCalls.migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to route protected platform calls through invokers: ${e.message}")
         }
 
         try {
@@ -1407,8 +1419,8 @@ class BuildSystemPass(
             content = ensureGameTestDimensionDataPackTask(content, file.parent, changes, file)
         }
 
-        // 13. ModDev remaps archive tasks itself. Create's project.publishing block already publishes
-        // components.java, so its duplicate reobfJar artifact closure disappears; other publication
+        // 13. ModDev remaps archive tasks itself. A project.publishing block that already publishes
+        // components.java loses its duplicate reobfJar artifact closure; other publication
         // blocks keep their authored classifier and are retargeted to the ModDev jar task.
         val executableReobfuscationDsl = maskJavaCommentsAndLiterals(content)
         if (executableReobfuscationDsl.contains("project.publishing") &&
@@ -1524,6 +1536,27 @@ class BuildSystemPass(
             result = result.removeRange(lineStart, end)
         }
 
+        // A task dependency whose only target is the reobfuscation task, by name or reference,
+        // inside a task block or on a named task (`finalizedBy 'reobfJar'`,
+        // `jar.finalizedBy('reobfJar')`, `dependsOn(tasks.reobfJar)`): ModDev's jar output is
+        // already final, so the statement goes away. Comments are left as written.
+        val taskDependency = Regex(
+            """(?m)^[ \t]*(?:[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.)?(?:finalizedBy|dependsOn)\s*(?:\(\s*)?(?:(['"])reobfJar\1|(?:tasks\.)?reobfJar(?![\w$.]))\s*\)?[ \t]*;?[ \t]*(?:\r?\n|$)"""
+        )
+        val dependencyMatches = taskDependency.findAll(maskJavaCommentsAndTextBlocks(result)).toList()
+        for (match in dependencyMatches.asReversed()) {
+            changes += Change(
+                file = file,
+                line = result.lineNumberAt(match.range.first),
+                description = "Remove ForgeGradle reobfuscation task dependency; the ModDev jar is the final archive",
+                before = result.substring(match.range).trim(),
+                after = "(no reobfuscation task under ModDev)",
+                confidence = Confidence.HIGH,
+                ruleId = "build-migrate-reobfuscation-task-dependency"
+            )
+            result = result.removeRange(match.range)
+        }
+
         val replacements = listOf(
             Regex("""\bartifact\s*\(\s*tasks\.reobfJar\s*\)""") to "artifact(tasks.named(\"jar\"))",
             Regex("""\btasks\.reobfJar\.archiveFile\b""") to "tasks.named(\"jar\").flatMap { it.archiveFile }",
@@ -1546,8 +1579,13 @@ class BuildSystemPass(
             }
         }
 
+        // a task referenced by name in a string (finalizedBy 'reobfJar', tasks.named("reobfJar"))
+        // is still executable build logic; any other string value is not a task reference
         val remaining = Regex("""\breobf(?:Jar|uscate)\b""")
             .find(maskJavaCommentsAndLiterals(result))
+            ?: Regex(
+                """\b(?:finalizedBy|dependsOn|mustRunAfter|shouldRunAfter|named|getByName|findByName)\s*\(?\s*(['"])reobf(?:Jar|uscate)\1"""
+            ).find(maskJavaCommentsAndTextBlocks(result))
         if (remaining != null) {
             errors += "Unmigrated ForgeGradle reobfuscation DSL remains in $file:${result.lineNumberAt(remaining.range.first)}"
         }
@@ -3124,6 +3162,9 @@ public static void $methodName(EntityRenderersEvent.AddLayers $eventParam) {
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return emptyList()
         val changes = mutableListOf<Change>()
+        val accessorMigration = ThirdPartyReflectionMixinMigration()
+        val accessorFields = linkedSetOf<ThirdPartyReflectionMixinMigration.PlatformField>()
+        val accessorConsumers = mutableListOf<String>()
 
         Files.walk(srcDir)
             .filter { it.toString().endsWith(".java") }
@@ -3154,11 +3195,22 @@ public static void $methodName(EntityRenderersEvent.AddLayers $eventParam) {
                 val migratedBindings = mutableListOf<VarHandleBinding>()
                 val atEntries = linkedSetOf<String>()
                 for (binding in bindings) {
-                    val rewrite = if (
-                        binding.mapping.targetOwner == "net.neoforged.neoforge.client.model.generators.ModelBuilder" &&
-                        binding.mapping.targetName == "textures"
-                    ) {
-                        rewriteModelBuilderTextureVarHandleCalls(modified, binding)
+                    // A handle on a Minecraft field becomes direct access with an access-transformer
+                    // entry. Access transformers only reach Minecraft's own sources, so a handle on a
+                    // NeoForge field is read through a generated Mixin accessor instead. Neither path
+                    // swaps the field for a public method: ModelBuilder.texture(...) rejects a location
+                    // no resource pack contains yet, while the source writes ModelBuilder.textures
+                    // directly for textures generated elsewhere (paletted trim permutations).
+                    val platformField = binding.mapping.targetOwner.startsWith("net.neoforged.")
+                    val rewrite = if (platformField) {
+                        val field = platformFieldOf(binding.mapping) ?: continue
+                        val accessor = accessorMigration.platformAccessorName(projectDir, original, field) ?: continue
+                        rewriteVarHandleReadsThroughAccessor(
+                            modified,
+                            binding,
+                            accessor,
+                            accessorMigration.platformAccessorMethod(field.fieldName)
+                        ).also { if (it.changed) accessorFields += field }
                     } else {
                         rewriteVarHandleCalls(modified, binding)
                     }
@@ -3192,6 +3244,9 @@ public static void $methodName(EntityRenderersEvent.AddLayers $eventParam) {
                     ruleId = "build-varhandle-at-direct-field"
                 ))
                 if (!dryRun) javaFile.writeText(modified)
+                if (migratedBindings.any { it.mapping.targetOwner.startsWith("net.neoforged.") }) {
+                    accessorConsumers += original
+                }
                 if (atEntries.isNotEmpty()) {
                     changes.addAll(ensureAccessTransformerEntries(
                         projectDir = projectDir,
@@ -3202,41 +3257,50 @@ public static void $methodName(EntityRenderersEvent.AddLayers $eventParam) {
                     ))
                 }
             }
+        changes.addAll(accessorMigration.writePlatformAccessors(projectDir, accessorConsumers, accessorFields, dryRun))
         return changes
     }
 
-    private fun rewriteModelBuilderTextureVarHandleCalls(
+    /** The exact target field type (generic signature when the class table has one). */
+    private fun platformFieldOf(mapping: ReflectionFieldMapping): ThirdPartyReflectionMixinMigration.PlatformField? {
+        val owner = mapping.targetOwner
+        val signature = com.modporter.mapping.TargetMembers.fieldSignatures(owner)[mapping.targetName]
+        val descriptor = com.modporter.mapping.TargetMembers.fieldDescriptor(owner, mapping.targetName) ?: return null
+        val type = signature?.let { ThirdPartyReflectionMixinMigration.javaTypeOf(it) }
+            ?: ThirdPartyReflectionMixinMigration.javaTypeOf(descriptor)
+            ?: return null
+        return ThirdPartyReflectionMixinMigration.PlatformField(owner, mapping.targetName, type)
+    }
+
+    /**
+     * Reads through a generated accessor: handle.get(receiver) becomes accessor.modporter$getX().
+     * A handle that is also written keeps its reflection (the forbidden-reflection gate reports it):
+     * a write would need a mutable accessor for a field the platform declares final.
+     */
+    private fun rewriteVarHandleReadsThroughAccessor(
         source: String,
-        binding: VarHandleBinding
+        binding: VarHandleBinding,
+        accessorFqn: String,
+        accessorMethod: String
     ): DirectFieldRewrite {
-        val executable = maskJavaCommentsAndLiterals(source)
-        val declaration = Regex(
-            """(?m)^[ \t]*Map\s*<\s*String\s*,\s*String\s*>\s+([A-Za-z_$][\w$]*)\s*=\s*\(\s*Map\s*<\s*String\s*,\s*String\s*>\s*\)\s*${Regex.escape(binding.handleName)}\.get\(\s*([A-Za-z_$][\w$]*)\s*\)\s*;[ \t]*(?:\r?\n)?"""
-        ).find(executable) ?: return DirectFieldRewrite(source, false, false)
-        val textureMap = declaration.groupValues[1]
-        val modelBuilder = declaration.groupValues[2]
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (executableCode.contains("${binding.handleName}.set")) return DirectFieldRewrite(source, false, false)
         val replacements = mutableListOf<Pair<IntRange, String>>()
+        val token = "${binding.handleName}.get"
         var searchFrom = 0
-        val token = "$textureMap.put"
         while (true) {
-            val callStart = executable.indexOf(token, searchFrom)
+            val callStart = executableCode.indexOf(token, searchFrom)
             if (callStart < 0) break
-            val openParen = executable.indexOf('(', callStart + token.length)
-            val closeParen = if (openParen >= 0) findMatchingParen(executable, openParen) else -1
-            if (closeParen <= openParen) return DirectFieldRewrite(source, false, false)
-            val arguments = splitTopLevelArgs(source.substring(openParen + 1, closeParen))
-            if (arguments.size != 2) return DirectFieldRewrite(source, false, false)
-            val resourceVariable = Regex("""^([A-Za-z_$][\w$]*)\.toString\(\)$""")
-                .matchEntire(arguments[1].trim())
-                ?.groupValues
-                ?.get(1)
-                ?: return DirectFieldRewrite(source, false, false)
-            if (!Regex("""\b(?:net\.minecraft\.resources\.)?ResourceLocation\s+${Regex.escape(resourceVariable)}\b""")
-                    .containsMatchIn(executable)) {
+            val openParen = executableCode.indexOf('(', callStart + token.length)
+            if (openParen < 0) break
+            if (executableCode.substring(callStart + token.length, openParen).isNotBlank()) {
                 return DirectFieldRewrite(source, false, false)
             }
-            replacements += (callStart..closeParen) to
-                "$modelBuilder.texture(${arguments[0].trim()}, $resourceVariable)"
+            val closeParen = findMatchingParen(executableCode, openParen)
+            if (closeParen < 0) return DirectFieldRewrite(source, false, false)
+            val args = splitTopLevelArgs(source.substring(openParen + 1, closeParen))
+            if (args.size != 1) return DirectFieldRewrite(source, false, false)
+            replacements += (callStart..closeParen) to "(($accessorFqn) (Object) (${args[0].trim()})).$accessorMethod()"
             searchFrom = closeParen + 1
         }
         if (replacements.isEmpty()) return DirectFieldRewrite(source, false, false)
@@ -3244,17 +3308,7 @@ public static void $methodName(EntityRenderersEvent.AddLayers $eventParam) {
         replacements.sortedByDescending { it.first.first }.forEach { (range, replacement) ->
             result = result.replaceRange(range, replacement)
         }
-        result = result.replaceRange(declaration.range, "")
-        if (Regex("""\b${Regex.escape(textureMap)}\b""")
-                .containsMatchIn(maskJavaCommentsAndLiterals(result))) {
-            return DirectFieldRewrite(source, false, false)
-        }
-        return DirectFieldRewrite(
-            content = result,
-            changed = true,
-            writesField = false,
-            requiresAccessTransformer = false
-        )
+        return DirectFieldRewrite(result, changed = true, writesField = false, requiresAccessTransformer = false)
     }
 
     private fun rewriteVarHandleCalls(source: String, binding: VarHandleBinding): DirectFieldRewrite {
@@ -4858,6 +4912,209 @@ config="$configName"
         }
     }
 
+    private fun cleanupSplitTickPhaseChecks(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val changes = mutableListOf<Change>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                var modified = original
+                val executableOriginal = maskJavaCommentsAndLiterals(original)
+                // every phase check and import below names TickEvent in code
+                if (!executableOriginal.contains("TickEvent")) return@forEach
+                val hadStartPhase = executableOriginal.contains("event.phase == TickEvent.Phase.START") ||
+                    executableOriginal.contains("event.phase != TickEvent.Phase.START")
+
+                if (hadStartPhase) {
+                    // only the parameter of the handler whose own body checks START
+                    val handlers = splitTickHandlers(modified)
+                    modified = replaceExecutableRegex(
+                        modified,
+                        Regex("""\bRenderFrameEvent\.Post\b""")
+                    ) { match ->
+                        if (handlers.any { it.checksStartPhase && it.parameterType.first == match.range.first }) {
+                            "RenderFrameEvent.Pre"
+                        } else {
+                            match.groupValues[0]
+                        }
+                    }
+                }
+
+                splitTickHandlers(modified).let { handlers ->
+                    modified = replaceExecutableRegex(
+                        modified,
+                        Regex("""(?m)^[ \t]*if\s*\(\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\)\s*return;\s*\r?\n""")
+                    ) { match ->
+                        if (handlers.any { match.range.first in it.body }) "" else match.groupValues[0]
+                    }
+                }
+                splitTickHandlers(modified).let { handlers ->
+                    modified = replaceExecutableRegex(
+                        modified,
+                        Regex("""(?m)^[ \t]*if\s*\(\s*event\.phase\s*!=\s*TickEvent\.Phase\.START\s*\)\s*return;\s*\r?\n""")
+                    ) { match ->
+                        if (handlers.any { match.range.first in it.body }) "" else match.groupValues[0]
+                    }
+                }
+                splitTickHandlers(modified).let { handlers ->
+                    modified = replaceExecutableRegex(
+                        modified,
+                        Regex("""if\s*\(\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\|\|\s*([^{}\r\n;]+?)\s*\)\s*\{""")
+                    ) { match ->
+                        if (handlers.any { match.range.first in it.body }) "if (${match.groupValues[1].trim()}) {" else match.groupValues[0]
+                    }
+                }
+                splitTickHandlers(modified).let { handlers ->
+                    modified = replaceExecutableRegex(
+                        modified,
+                        Regex("""if\s*\(\s*([^{}\r\n;]+?)\s*\|\|\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\)\s*\{""")
+                    ) { match ->
+                        if (handlers.any { match.range.first in it.body }) "if (${match.groupValues[1].trim()}) {" else match.groupValues[0]
+                    }
+                }
+                splitTickHandlers(modified).let { handlers ->
+                    modified = replaceExecutableRegex(
+                        modified,
+                        Regex("""event\.phase\s*==\s*TickEvent\.Phase\.END\s*&&\s*""")
+                    ) { match ->
+                        if (handlers.any { match.range.first in it.body }) "" else match.groupValues[0]
+                    }
+                }
+                splitTickHandlers(modified).let { handlers ->
+                    modified = replaceExecutableRegex(
+                        modified,
+                        Regex("""\s*&&\s*event\.phase\s*==\s*TickEvent\.Phase\.END""")
+                    ) { match ->
+                        if (handlers.any { match.range.first in it.body }) "" else match.groupValues[0]
+                    }
+                }
+                splitTickHandlers(modified).let { handlers ->
+                    modified = replaceExecutableRegex(
+                        modified,
+                        Regex("""if\s*\(\s*event\.phase\s*==\s*TickEvent\.Phase\.START\s*\)\s*\{""")
+                    ) { match ->
+                        if (handlers.any { match.range.first in it.body }) "{" else match.groupValues[0]
+                    }
+                }
+                splitTickHandlers(modified).let { handlers ->
+                    modified = replaceExecutableRegex(
+                        modified,
+                        Regex("""event\.phase\s*==\s*TickEvent\.Phase\.START\s*&&\s*""")
+                    ) { match ->
+                        if (handlers.any { match.range.first in it.body }) "" else match.groupValues[0]
+                    }
+                }
+                splitTickHandlers(modified).let { handlers ->
+                    modified = replaceExecutableRegex(
+                        modified,
+                        Regex("""\s*&&\s*event\.phase\s*==\s*TickEvent\.Phase\.START""")
+                    ) { match ->
+                        if (handlers.any { match.range.first in it.body }) "" else match.groupValues[0]
+                    }
+                }
+
+                val executableModified = maskJavaCommentsAndLiterals(modified)
+                if (!executableModified.contains("TickEvent.Phase") &&
+                    (containsJavaIdentifier(executableModified, "TickEvent") || hasTickEventImportLine(executableModified))) {
+                    modified = removeJavaImport(modified, "net.minecraftforge.event.TickEvent")
+                    modified = removeJavaImport(modified, "net.neoforged.neoforge.event.TickEvent")
+                    modified = removeJavaImport(modified, "net.neoforged.neoforge.event.tick.TickEvent")
+                    // keep the file's own line separator rather than the host's
+                    val lineSeparator = if (original.contains("\r\n")) "\r\n" else "\n"
+                    modified = modified.lines()
+                        .filterNot { line ->
+                            line.trim() == "import net.minecraftforge.event.TickEvent;" ||
+                                line.trim() == "import net.neoforged.neoforge.event.TickEvent;" ||
+                                line.trim() == "import net.neoforged.neoforge.event.tick.TickEvent;"
+                        }
+                        .joinToString(lineSeparator)
+                }
+
+                if (modified != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 1,
+                        description = "Remove legacy TickEvent phase checks after NeoForge split tick events",
+                        before = "event.phase ==/!= TickEvent.Phase.*",
+                        after = "split Pre/Post event handlers without phase checks",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-cleanup-split-tick-phase"
+                    ))
+                    if (!dryRun) javaFile.writeText(modified)
+                }
+            }
+
+        return changes
+    }
+
+    private fun containsJavaIdentifier(source: String, identifier: String): Boolean {
+        var index = source.indexOf(identifier)
+        while (index >= 0) {
+            val before = source.getOrNull(index - 1)
+            val after = source.getOrNull(index + identifier.length)
+            if ((before == null || !Character.isJavaIdentifierPart(before)) &&
+                (after == null || !Character.isJavaIdentifierPart(after))) {
+                return true
+            }
+            index = source.indexOf(identifier, index + identifier.length)
+        }
+        return false
+    }
+
+    private fun hasTickEventImportLine(executableSource: String): Boolean =
+        executableSource.lineSequence().any { line ->
+            when (line.trim()) {
+                "import net.minecraftforge.event.TickEvent;",
+                "import net.neoforged.neoforge.event.TickEvent;",
+                "import net.neoforged.neoforge.event.tick.TickEvent;" -> true
+                else -> false
+            }
+        }
+
+    /** A method or lambda that declares one split tick event parameter, and its body. */
+    private data class SplitTickHandler(
+        val parameterType: IntRange,
+        val body: IntRange,
+        val checksStartPhase: Boolean
+    )
+
+    private fun splitTickHandlers(source: String): List<SplitTickHandler> {
+        val executable = maskJavaCommentsAndLiterals(source)
+        val parameter = Regex(
+            """\b(?:ClientTickEvent|ServerTickEvent|LevelTickEvent|PlayerTickEvent|EntityTickEvent|RenderFrameEvent)\.(?:Pre|Post)(?=\s+[A-Za-z_$][\w$]*\s*[,)])"""
+        )
+        return parameter.findAll(executable).mapNotNull { type ->
+            var depth = 0
+            var open = -1
+            for (index in type.range.first - 1 downTo 0) {
+                when (executable[index]) {
+                    ')' -> depth++
+                    '(' -> if (depth == 0) { open = index; break } else depth--
+                    '{', '}', ';' -> if (depth == 0) return@mapNotNull null
+                }
+            }
+            if (open < 0) return@mapNotNull null
+            val close = findMatchingParen(executable, open)
+            if (close < 0) return@mapNotNull null
+            // a method declaration (optionally with a throws clause) or a block lambda
+            val opening = Regex("""^\s*(?:throws\s+[\w$.,\s]+?\s*|->\s*)?\{""").find(executable.substring(close + 1))
+                ?: return@mapNotNull null
+            val bodyOpen = close + 1 + opening.range.last
+            val bodyClose = findMatchingBrace(executable, bodyOpen)
+            if (bodyClose < 0) return@mapNotNull null
+            val body = executable.substring(bodyOpen, bodyClose + 1)
+            SplitTickHandler(
+                parameterType = type.range,
+                body = bodyOpen..bodyClose,
+                checksStartPhase = body.contains("event.phase == TickEvent.Phase.START") ||
+                    body.contains("event.phase != TickEvent.Phase.START")
+            )
+        }.toList()
+    }
+
     private fun migrateRemovedTitleScreenAccessors(projectDir: Path, dryRun: Boolean): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return emptyList()
@@ -5749,7 +6006,8 @@ config="$configName"
     }
 
     private data class ExecutableRegexMatch(
-        val groupValues: List<String>
+        val groupValues: List<String>,
+        val range: IntRange = IntRange.EMPTY
     )
 
     private fun replaceExecutableRegex(
@@ -5782,7 +6040,7 @@ config="$configName"
             }
             result = result.replaceRange(
                 match.range,
-                replacement(ExecutableRegexMatch(groupValues))
+                replacement(ExecutableRegexMatch(groupValues, match.range))
             )
         }
         return result

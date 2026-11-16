@@ -1,0 +1,10 @@
+package @PACKAGE@;
+
+/** Typed methods woven onto PanoramaRenderer by the client-only compatibility mixin. */
+public interface LegacyPanoramaRendererBridge {
+    /** Virtual legacy entry point; source subclasses continue to override this signature. */
+    void render(float partialTick, float fade);
+
+    /** Calls the legacy base algorithm without redispatching to a source subclass override. */
+    void modporter$renderLegacyPanoramaBase(float partialTick, float fade);
+}

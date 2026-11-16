@@ -1,6 +1,8 @@
-# Managed minecraft-mod-testing files are hash-verified; never convert their line endings.
 * text=auto eol=lf
-src/test/resources/fixtures/** -text
+# Frozen release inputs are hash-bound to strict receipts; keep the same bytes in CI.
+src/** -text
+scripts/** -text
+gradle/** -text
 # Reference sources and upstream legal texts retain their exact whitespace.
 src/test/resources/fixtures/** -whitespace
 third_party/** -text -whitespace
@@ -9,5 +11,6 @@ third_party/** -text -whitespace
 *.ktfrag whitespace=-space-before-tab
 .agents/** -text
 .minecraft-mod-testing/** -text
+# Managed build launchers also retain their exact bytes.
 mod-build.ps1 -text
 mod-build.cmd -text

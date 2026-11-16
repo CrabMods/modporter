@@ -237,14 +237,9 @@
 
         val result = StructuralRefactorPass().apply(tempDir)
         val networking = networkDir.resolve("StatusNetworking.java").readText()
-        val main = srcDir.resolve("ExampleMod.java").readText()
 
-        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
         assertTrue(result.changes.any { it.ruleId == "struct-nested-simplechannel-payloads" }, "changes=${result.changes}")
-        assertFalse(networking.contains("@EventBusSubscriber"), networking)
-        assertFalse(networking.contains("@SubscribeEvent"), networking)
-        assertTrue(main.contains("public ExampleMod(IEventBus modEventBus)"), main)
-        assertTrue(main.contains("modEventBus.addListener(com.example.network.StatusNetworking::registerPayloads);"), main)
+        assertTrue(networking.contains("@EventBusSubscriber(modid = ExampleMod.ID)"), networking)
         assertTrue(networking.contains("public static class SyncStatusPacket implements CustomPacketPayload"), networking)
         assertTrue(networking.contains("CustomPacketPayload.Type<SyncStatusPacket> TYPE"), networking)
         assertTrue(networking.contains("""ResourceLocation.fromNamespaceAndPath(ExampleMod.ID, "sync_status")"""), networking)

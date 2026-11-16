@@ -465,7 +465,7 @@
       "status": "replacement",
       "replacementFor": "curse.maven:journeymap-32274",
       "replacementPolicy": "public-artifact-successor",
-      "notes": "JourneyMap 6.0.0 beta 54 is Create's native NeoForge 1.21.1 dependency; keep the full mod on compile and runtime classpaths because Create references JourneyMap internal UI classes"
+      "notes": "JourneyMap 6.0.0 beta 54 is the NeoForge 1.21.1 JourneyMap carrying the v2 client API; keep the full mod on compile and runtime classpaths because JourneyMap 5 consumers reference its internal UI classes (such as the Fullscreen screen)"
     },
     {
       "forgePrefix": "dev.engine-room.flywheel",
@@ -708,6 +708,9 @@
       "packagePrefixes": [
         "dev.ftb.mods.ftbchunks."
       ],
+      "modIds": [
+        "ftbchunks"
+      ],
       "neoforgeCoords": [
         {
           "config": "compileOnly",
@@ -717,7 +720,7 @@
       ],
       "mavenUrl": "https://maven.ftb.dev/releases",
       "status": "compile_only_compat",
-      "notes": "FTB Chunks 2101.1.x for NeoForge 1.21.1 on maven.ftb.dev; non-transitive so KubeJS and friends are not pulled in for a compile-only surface",
+      "notes": "FTB Chunks 2101.1.x for NeoForge 1.21.1 on maven.ftb.dev; non-transitive so KubeJS and friends are not pulled in for a compile-only surface. modIds from META-INF/neoforge.mods.toml of ftb-chunks-neoforge-2101.1.1.jar (modId = \"ftbchunks\")",
       "replacementFor": "dev.ftb.mods:ftb-chunks-forge",
       "replacementPolicy": "official-loader-artifact-rename"
     },

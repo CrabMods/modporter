@@ -1037,46 +1037,19 @@ internal fun StructuralRefactorPass.migrateLegacyAbstractArrowPickupItemSource(s
 
 internal fun StructuralRefactorPass.migrateLegacyTooltipPartHiding(source: String): String {
     val executableCode = maskJavaCommentsAndLiterals(source)
-    if (!executableCode.contains(".hideTooltipPart(")) return source
+    if (!executableCode.contains(".hideTooltipPart(") || !executableCode.contains("ItemStack.TooltipPart.ADDITIONAL")) return source
 
     var changed = false
-    var needsUnit = false
-    var needsAttributeModifiers = false
     var result = rewriteExecutableJavaCall(source, "hideTooltipPart") { receiver, args ->
-        if (args.size != 1) return@rewriteExecutableJavaCall null
-        when (args[0].trim()) {
-            "ItemStack.TooltipPart.ADDITIONAL", "TooltipPart.ADDITIONAL" -> {
-                changed = true
-                needsUnit = true
-                "$receiver.set(DataComponents.HIDE_ADDITIONAL_TOOLTIP, Unit.INSTANCE)"
-            }
-            "ItemStack.TooltipPart.MODIFIERS", "TooltipPart.MODIFIERS" -> {
-                changed = true
-                needsAttributeModifiers = true
-                "$receiver.set(DataComponents.ATTRIBUTE_MODIFIERS, " +
-                    "$receiver.getOrDefault(DataComponents.ATTRIBUTE_MODIFIERS, " +
-                    "ItemAttributeModifiers.EMPTY).withTooltip(false))"
-            }
-            else -> null
+        if (args.size != 1 || args[0].trim() != "ItemStack.TooltipPart.ADDITIONAL") {
+            return@rewriteExecutableJavaCall null
         }
+        changed = true
+        "$receiver.set(DataComponents.HIDE_ADDITIONAL_TOOLTIP, Unit.INSTANCE)"
     }
     if (!changed) return source
     result = addImportIfMissing(result, "net.minecraft.core.component.DataComponents")
-    if (needsUnit) {
-        result = addImportIfMissing(result, "net.minecraft.util.Unit")
-    }
-    if (needsAttributeModifiers) {
-        result = addImportIfMissing(
-            result,
-            "net.minecraft.world.item.component.ItemAttributeModifiers"
-        )
-    }
-    if (!maskJavaCommentsAndLiterals(result).contains("TooltipPart.")) {
-        result = removeImport(
-            result,
-            "net.minecraft.world.item.ItemStack.TooltipPart"
-        )
-    }
+    result = addImportIfMissing(result, "net.minecraft.util.Unit")
     return result
 }
 
@@ -1403,8 +1376,20 @@ internal fun StructuralRefactorPass.migrateHurtAndBreakEquipmentSlotSource(sourc
         if (args.size == 3 && callback != null) {
             val amount = args[0].trim()
             val entity = args[1].trim()
-            if (breakCall != null && breakCall.isOnlyStatement) {
-                val slot = normalizeBreakSlotExpression(breakCall.slotExpression) {
+            // The callback received the very entity passed as the second argument, so a slot read
+            // through the callback parameter (`p -> p.broadcastBreakEvent(p.getUsedItemHand())`)
+            // reads that entity once the callback is gone; only a side-effect-free entity expression
+            // may be repeated.
+            val parameterInSlot = breakCall != null &&
+                Regex("""(?<![\w$.])${Regex.escape(callback.parameter)}(?![\w$])""").containsMatchIn(breakCall.slotExpression)
+            val repeatableEntity = Regex("""^(?:this\.)?[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$""").matches(entity)
+            if (breakCall != null && breakCall.isOnlyStatement && (!parameterInSlot || repeatableEntity)) {
+                val slotExpression = if (parameterInSlot) {
+                    Regex("""(?<![\w$.])${Regex.escape(callback.parameter)}(?![\w$])""").replace(breakCall.slotExpression, entity)
+                } else {
+                    breakCall.slotExpression
+                }
+                val slot = normalizeBreakSlotExpression(slotExpression) {
                     needsEquipmentSlot = true
                 }
                 migrated.append(source, cursor, tokenIndex)
@@ -2687,21 +2672,107 @@ internal fun StructuralRefactorPass.migrateLegacyItemStackTagWrites(source: Stri
                 "${indent}net.minecraft.world.item.component.CustomData.update(net.minecraft.core.component.DataComponents.CUSTOM_DATA, $stack, tag -> tag.put($key, $value));"
             }
         }
+    val typing = SourceValueTypes(this, result)
+
     result = Regex("""(?m)^([ \t]*(?:\}\s*)?(?:else\s+)?)([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*(?:\(\))?)*)\s*\.setTag\(\s*([^;\r\n]+)\s*\);[ \t]*$""")
         .replace(result) { match ->
             val indent = match.groupValues[1]
             val stack = match.groupValues[2].replace(Regex("""\s+"""), "")
-            if (!isItemStackTagReceiver(stack)) return@replace match.value
+            // a field chain (`other.container`) is a stack when its project declaration says so;
+            // the typing reads the same text this replacement matches
+            if (!isItemStackTagReceiver(stack) &&
+                typing.typeOf(stack, match.groups[2]!!.range.first) != "net.minecraft.world.item.ItemStack"
+            ) {
+                return@replace match.value
+            }
             val tag = match.groupValues[3].trim()
+            val customData = "net.minecraft.core.component.DataComponents.CUSTOM_DATA"
+            // Forge's setTag(null) removed the tag; CustomData.of(null) would throw
+            if (tag == "null") return@replace "$indent$stack.remove($customData);"
             val customDataValue = legacyCustomDataValueExpressionForTagWrite(
                 tag,
                 itemStackNames,
                 itemStackReturningMethods,
                 knownItemStackAccessors
             )
-            "$indent$stack.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, $customDataValue);"
+            val provenNonNull = !customDataValue.startsWith("net.minecraft.world.item.component.CustomData.of(") ||
+                tag.startsWith("new ") ||
+                Regex("""\.(?:copyTag|copy)\(\s*\)$""").containsMatchIn(tag) ||
+                nullCheckedLocal(result, match.range.first, tag)
+            if (provenNonNull) {
+                "$indent$stack.set($customData, $customDataValue);"
+            } else {
+                var local = "modporterTag"
+                while (Regex("""\b${Regex.escape(local)}\b""").containsMatchIn(source)) local += "_"
+                "$indent{ net.minecraft.nbt.CompoundTag $local = $tag; " +
+                    "if ($local == null) $stack.remove($customData); " +
+                    "else $stack.set($customData, net.minecraft.world.item.component.CustomData.of($local)); }"
+            }
     }
     return result
+}
+
+/**
+ * Whether the local [name] is non-null at [offset]: a block enclosing it is the body of an
+ * `if (... name != null ...)` whose condition requires it (a top-level `&&` conjunct), and the
+ * block does not assign [name] before [offset].
+ */
+private fun StructuralRefactorPass.nullCheckedLocal(source: String, offset: Int, name: String): Boolean {
+    if (!Regex("""[A-Za-z_$][\w$]*""").matches(name)) return false
+    val masked = maskJavaCommentsAndLiterals(source)
+    var depth = 0
+    var index = offset - 1
+    while (index >= 0) {
+        when (masked[index]) {
+            '}' -> depth++
+            '{' -> if (depth > 0) depth-- else {
+                val before = masked.substring(0, index).trimEnd()
+                if (before.endsWith(")")) {
+                    val close = before.length - 1
+                    var parens = 0
+                    var open = close
+                    while (open >= 0) {
+                        when (before[open]) {
+                            ')' -> parens++
+                            '(' -> if (--parens == 0) break
+                        }
+                        open--
+                    }
+                    if (open > 0 && Regex("""\bif\s*$""").containsMatchIn(before.substring(0, open))) {
+                        val condition = before.substring(open + 1, close)
+                        val conjuncts = splitTopLevelConjuncts(condition)
+                        val required = conjuncts.any { Regex("""^\s*${Regex.escape(name)}\s*!=\s*null\s*$""").matches(it) }
+                        val reassigned = Regex("""(?<![\w$.])${Regex.escape(name)}\s*=(?!=)""").containsMatchIn(masked.substring(index, offset))
+                        if (required && !reassigned) return true
+                    }
+                }
+            }
+        }
+        index--
+    }
+    return false
+}
+
+private fun splitTopLevelConjuncts(condition: String): List<String> {
+    val parts = mutableListOf<String>()
+    var depth = 0
+    var start = 0
+    var index = 0
+    while (index < condition.length) {
+        when (condition[index]) {
+            '(' -> depth++
+            ')' -> depth--
+            '|' -> if (depth == 0 && condition.getOrNull(index + 1) == '|') return listOf(condition)
+            '&' -> if (depth == 0 && condition.getOrNull(index + 1) == '&') {
+                parts += condition.substring(start, index)
+                start = index + 2
+                index++
+            }
+        }
+        index++
+    }
+    parts += condition.substring(start)
+    return parts
 }
 
 internal fun StructuralRefactorPass.legacyCustomDataValueExpressionForTagWrite(
@@ -2749,7 +2820,7 @@ internal fun StructuralRefactorPass.migrateLegacyItemStackTagReads(source: Strin
         result = replaceExecutableRegex(result, Regex("""\b$receiver\.hasTag\s*\(\s*\)""")) {
             "$stack.has(net.minecraft.core.component.DataComponents.CUSTOM_DATA)"
         }
-        result = replaceExecutableRegex(result, Regex("""\b$receiver\.getTag\s*\(\s*\)""")) {
+        result = replaceExecutableRegex(result, Regex("""\b$receiver\.get(?:OrCreate)?Tag\s*\(\s*\)""")) {
             "$stack.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()"
         }
     }
@@ -2765,6 +2836,15 @@ internal fun StructuralRefactorPass.migrateLegacyItemStackTagReads(source: Strin
         "$stack.has(net.minecraft.core.component.DataComponents.CUSTOM_DATA)"
     }
     result = rewriteJavaCallWithOffset(result, "getTag") { receiver, args, _ ->
+        if (args.isNotEmpty()) return@rewriteJavaCallWithOffset null
+        val stack = receiver.trim()
+        if (Regex("""[A-Za-z_$][\w$]*""").matches(stack)) return@rewriteJavaCallWithOffset null
+        if (!isItemStackExpression(stack, itemStackVariables, itemStackReturningMethods, knownItemStackAccessors)) {
+            return@rewriteJavaCallWithOffset null
+        }
+        "$stack.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()"
+    }
+    result = rewriteJavaCallWithOffset(result, "getOrCreateTag") { receiver, args, _ ->
         if (args.isNotEmpty()) return@rewriteJavaCallWithOffset null
         val stack = receiver.trim()
         if (Regex("""[A-Za-z_$][\w$]*""").matches(stack)) return@rewriteJavaCallWithOffset null
@@ -3011,32 +3091,22 @@ internal fun StructuralRefactorPass.migrateLegacyEntityTypeSpawnCompoundTagSourc
     return if (changed) result else source
 }
 
-private object EnclosingMethodBodyRangesSourceCache {
-    private var source: String? = null
-    private var ranges: List<IntRange> = emptyList()
-
-    @Synchronized
-    fun getOrCompute(currentSource: String, compute: () -> List<IntRange>): List<IntRange> {
-        if (source == currentSource) return ranges
-        val result = java.util.Collections.unmodifiableList(compute())
-        source = currentSource
-        ranges = result
-        return result
-    }
-}
-
 internal fun StructuralRefactorPass.enclosingMethodRange(source: String, index: Int): IntRange? {
-    val ranges = EnclosingMethodBodyRangesSourceCache.getOrCompute(source) {
-        val methodPattern = Regex(
+    val methodPattern = Regex(
         """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private|static|final|synchronized)\s+)*(?:<[^>{};]+>\s*)?[A-Za-z_$][\w$<>\[\].?,\s]*\s+[A-Za-z_$][\w$]*\s*\([^;{}]*\)\s*(?:throws\s+[^{]+)?\{"""
-        )
-        methodPattern.findAll(source).mapNotNull { match ->
-            val openBrace = source.indexOf('{', match.range.last)
-            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
-            ((openBrace + 1) until closeBrace).takeIf { closeBrace > openBrace }
-        }.toList()
+    )
+    var best: IntRange? = null
+    methodPattern.findAll(source).forEach { match ->
+        val openBrace = source.indexOf('{', match.range.last)
+        val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+        if (closeBrace > openBrace && index in (openBrace + 1) until closeBrace) {
+            val candidate = (openBrace + 1) until closeBrace
+            if (best == null || candidate.count() < best!!.count()) {
+                best = candidate
+            }
+        }
     }
-    return ranges.filter { index in it }.minByOrNull { it.count() }
+    return best
 }
 
 internal fun StructuralRefactorPass.enclosingMethodText(source: String, index: Int): String? {
@@ -3585,9 +3655,7 @@ internal fun StructuralRefactorPass.registryAccessFromParameters(
     parameters: List<String>,
     javaInheritanceIndex: JavaInheritanceIndex
 ): String? {
-    val declaredProviders = holderLookupProviderNamesFromParameters(parameters)
-    if (declaredProviders.size == 1) return declaredProviders.single()
-    if (declaredProviders.size > 1) return null
+    holderLookupProviderFromParameters(parameters)?.let { return it }
     val tooltipContextRegistryAccess = parameters.mapNotNull { parameter ->
         Regex("""(?:final\s+)?(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*(?:(?:net\.minecraft\.world\.item\.)?Item\.)?TooltipContext\s+([A-Za-z_$][\w$]*)$""")
             .find(parameter.trim())
@@ -3595,6 +3663,8 @@ internal fun StructuralRefactorPass.registryAccessFromParameters(
             ?.get(1)
             ?.let { "$it.registries()" }
     }.distinct()
+    if (tooltipContextRegistryAccess.size == 1) return tooltipContextRegistryAccess.single()
+    if (tooltipContextRegistryAccess.size > 1) return null
     val lootParamsRegistryAccess = parameters.mapNotNull { parameter ->
         Regex("""(?:final\s+)?(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*(?:net\.minecraft\.world\.level\.storage\.loot\.)?LootParams\.Builder\s+([A-Za-z_$][\w$]*)$""")
             .find(parameter.trim())
@@ -3602,6 +3672,8 @@ internal fun StructuralRefactorPass.registryAccessFromParameters(
             ?.get(1)
             ?.let { "$it.getLevel().registryAccess()" }
     }.distinct()
+    if (lootParamsRegistryAccess.size == 1) return lootParamsRegistryAccess.single()
+    if (lootParamsRegistryAccess.size > 1) return null
     val parameterPattern = Regex("""(?:final\s+)?(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:<[^>]+>)?)\s+([A-Za-z_$][\w$]*)$""")
     val parsed = parameters.mapNotNull { parameter ->
         val cleaned = parameter.trim()
@@ -3612,26 +3684,36 @@ internal fun StructuralRefactorPass.registryAccessFromParameters(
         .filter { it.first == "RegistryAccess" }
         .map { it.second }
         .distinct()
+    if (explicitRegistryAccess.size == 1) return explicitRegistryAccess.single()
+    if (explicitRegistryAccess.size > 1) return null
 
     // a registry buffer carries the registries it encodes against (RegistryFriendlyByteBuf#registryAccess)
     val bufferRegistryAccess = parsed
         .filter { it.first == "RegistryFriendlyByteBuf" }
         .map { "${it.second}.registryAccess()" }
         .distinct()
+    if (bufferRegistryAccess.size == 1) return bufferRegistryAccess.single()
+    if (bufferRegistryAccess.size > 1) return null
 
     val carriedLevelRegistryAccess = parsed
         .mapNotNull { (type, name) -> projectLevelCarriers[type]?.let { "$name$it.registryAccess()" } }
         .distinct()
+    if (carriedLevelRegistryAccess.size == 1) return carriedLevelRegistryAccess.single()
+    if (carriedLevelRegistryAccess.size > 1) return null
 
     val levelRegistryAccess = parsed
         .filter { it.first in setOf("ServerLevel", "Level", "WorldGenLevel", "ServerLevelAccessor", "LevelAccessor", "LevelReader") }
         .map { "${it.second}.registryAccess()" }
         .distinct()
+    if (levelRegistryAccess.size == 1) return levelRegistryAccess.single()
+    if (levelRegistryAccess.size > 1) return null
 
     val inventoryRegistryAccess = parsed
         .filter { it.first == "Inventory" }
         .map { "${it.second}.player.registryAccess()" }
         .distinct()
+    if (inventoryRegistryAccess.size == 1) return inventoryRegistryAccess.single()
+    if (inventoryRegistryAccess.size > 1) return null
 
     // EntityEvent#getEntity is the live entity carried by player/living interaction events.
     // Resolve only unambiguous platform names, keeping same-named project classes out.
@@ -3642,6 +3724,8 @@ internal fun StructuralRefactorPass.registryAccessFromParameters(
                 com.modporter.mapping.TargetMembers.inheritsFrom(it, "net.neoforged.neoforge.event.entity.EntityEvent")
             }) "$name.getEntity().registryAccess()" else null
     }.distinct()
+    if (eventRegistryAccess.size == 1) return eventRegistryAccess.single()
+    if (eventRegistryAccess.size > 1) return null
 
     val entityRegistryAccess = parsed
         .filter { (type, _) ->
@@ -3650,17 +3734,8 @@ internal fun StructuralRefactorPass.registryAccessFromParameters(
         }
         .map { "${it.second}.registryAccess()" }
         .distinct()
-    return (
-        tooltipContextRegistryAccess +
-            lootParamsRegistryAccess +
-            explicitRegistryAccess +
-            bufferRegistryAccess +
-            carriedLevelRegistryAccess +
-            levelRegistryAccess +
-            inventoryRegistryAccess +
-            eventRegistryAccess +
-            entityRegistryAccess
-        ).distinct().firstOrNull()
+    // Every entity of one method shares its level's registry access, so the first parameter serves.
+    return entityRegistryAccess.firstOrNull()
 }
 
 internal fun StructuralRefactorPass.holderLookupProviderFromParameters(parameters: List<String>): String? {
@@ -3669,16 +3744,7 @@ internal fun StructuralRefactorPass.holderLookupProviderFromParameters(parameter
 }
 
 internal fun StructuralRefactorPass.holderLookupProviderNamesAt(source: String, offset: Int): Set<String> =
-    exactProviderJavaMethodAt(source, offset)
-        ?.parameters
-        .orEmpty()
-        .mapNotNull { (type, name) ->
-            name.takeIf {
-                type == "HolderLookup.Provider" ||
-                    type == "net.minecraft.core.HolderLookup.Provider"
-            }
-        }
-        .toSet()
+    holderLookupProviderNamesFromParameters(currentMethodParametersBeforeOffset(source, offset)).toSet()
 
 internal fun StructuralRefactorPass.holderLookupProviderNamesFromParameters(parameters: List<String>): List<String> {
     val parameterPattern = Regex("""(?:final\s+)?(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s+([A-Za-z_$][\w$]*)$""")
@@ -3701,8 +3767,6 @@ internal fun StructuralRefactorPass.registryAccessExpressionAt(
     offset: Int,
     javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
 ): String? {
-    exactExternalCallbackProviderExpressionAt(source, offset, javaInheritanceIndex)?.let { return it }
-    holderLookupProviderNamesAt(source, offset).singleOrNull()?.let { return it }
     val parameters = currentMethodParametersBeforeOffset(source, offset)
     registryAccessFromParameters(parameters, javaInheritanceIndex)?.let { return it }
     // a level or guarded entity bound where the call stands is closer than a carrier parameter
@@ -3717,12 +3781,14 @@ internal fun StructuralRefactorPass.registryAccessExpressionAt(
     // Entity instances always carry their constructor-bound level. Prefer that stable owner over a
     // merely declared entity field, which may be nullable or not initialized at this call site.
     if (selfRegistryAccess == "this.registryAccess()") return selfRegistryAccess
-    sourceProvenInheritedRegistryAccessExpressionAt(source, offset, javaInheritanceIndex)?.let { return it }
+    declaration
+        ?.name
+        ?.let { javaInheritanceIndex.inheritedRegistryAccessField(it) }
+        ?.let { return "$it.registryAccess()" }
     return selfRegistryAccess
 }
 
 internal fun StructuralRefactorPass.sourceProvenLocalRegistryAccessExpressionAt(source: String, offset: Int): String? {
-    if (!source.contains("Level")) return null
     val methodRange = enclosingMethodRange(source, offset) ?: return null
     val methodText = source.substring(methodRange)
     val offsetInMethod = offset - methodRange.first
@@ -6388,109 +6454,9 @@ internal data class HolderLookupNbtMethod(
     val owner: String,
     val methodName: String,
     val parameterCount: Int? = null,
-    val providerParameterIndex: Int? = null,
-    val legacyParameterTypes: List<String>? = null,
-    val requiresTypedCallResolution: Boolean = false
-) {
-    constructor(
-        owner: String,
-        methodName: String,
-        parameterCount: Int?,
-        firstParameterType: String?
-    ) : this(
-        owner = owner,
-        methodName = methodName,
-        parameterCount = parameterCount,
-        providerParameterIndex = null,
-        legacyParameterTypes = firstParameterType?.let(::listOf),
-        requiresTypedCallResolution = false
-    )
-
-    /** Compatibility view used by the pre-existing source-backed overload filters. */
-    val firstParameterType: String?
-        get() = legacyParameterTypes?.firstOrNull()?.substringAfterLast('.')
-}
-
-internal fun StructuralRefactorPass.resolveHolderLookupNbtMethodContract(
-    methods: Collection<HolderLookupNbtMethod>,
-    owner: String?,
-    methodName: String,
-    legacyArgumentCount: Int
-): HolderLookupNbtMethod? {
-    if (owner == null) return null
-    val matches = methods.filter { method ->
-        method.owner == owner &&
-            method.methodName == methodName &&
-            (method.parameterCount == null || method.parameterCount == legacyArgumentCount)
-    }
-    if (matches.isEmpty()) return null
-    if (matches.any { it.requiresTypedCallResolution }) return null
-    val providerIndices = matches.map { method ->
-        method.providerParameterIndex ?: legacyArgumentCount
-    }.distinct()
-    if (providerIndices.size != 1) {
-        throw IllegalStateException(
-            "Conflicting HolderLookup.Provider parameter positions for " +
-                "$owner.$methodName/$legacyArgumentCount: $providerIndices"
-        )
-    }
-    val providerIndex = providerIndices.single()
-    if (providerIndex !in 0..legacyArgumentCount) {
-        throw IllegalStateException(
-            "Invalid HolderLookup.Provider parameter position $providerIndex for " +
-                "$owner.$methodName/$legacyArgumentCount"
-        )
-    }
-    return matches.first()
-}
-
-internal fun StructuralRefactorPass.resolveHolderLookupNbtDeclarationContract(
-    methods: Collection<HolderLookupNbtMethod>,
-    owner: String?,
-    methodName: String,
-    legacyParameters: List<String>
-): HolderLookupNbtMethod? {
-    if (owner == null) return null
-    val declaredTypes = legacyParameters.map { parameter ->
-        parseJavaParameter(parameter)?.first?.let(::normalizeJavaTypeForContract) ?: return null
-    }
-    val matches = methods.filter { method ->
-        method.owner == owner &&
-            method.methodName == methodName &&
-            method.parameterCount == legacyParameters.size &&
-            method.legacyParameterTypes?.map(::normalizeJavaTypeForContract) == declaredTypes
-    }
-    if (matches.size > 1) {
-        throw IllegalStateException(
-            "Ambiguous typed HolderLookup.Provider declaration contract for " +
-                "$owner.$methodName$declaredTypes"
-        )
-    }
-    return matches.singleOrNull()
-}
-
-internal fun normalizeJavaTypeForContract(type: String): String =
-    type.replace(Regex("""@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*"""), "")
-        .replace(Regex("""\bfinal\s+"""), "")
-        .replace(Regex("""\s+"""), "")
-        .replace(Regex("""(?:[a-z_$][\w$]*\.)+([A-Z_$][\w$]*)"""), "${'$'}1")
-
-internal fun StructuralRefactorPass.insertHolderLookupProviderArgument(
-    arguments: List<String>,
-    providerExpression: String,
-    method: HolderLookupNbtMethod
-): List<String> {
-    val providerIndex = method.providerParameterIndex ?: arguments.size
-    if (providerIndex !in 0..arguments.size) {
-        throw IllegalStateException(
-            "Invalid HolderLookup.Provider parameter position $providerIndex for " +
-                "${method.owner}.${method.methodName}/${arguments.size}"
-        )
-    }
-    return arguments.map { it.trim() }.toMutableList().also {
-        it.add(providerIndex, providerExpression.trim())
-    }
-}
+    /** First parameter's simple type when the owner overloads the name with the same arity (`of(CompoundTag)` vs `of(ItemStack)`). */
+    val firstParameterType: String? = null
+)
 
 /** True when [argument] reads like a CompoundTag: the tag-typed overload is meant. */
 internal fun StructuralRefactorPass.looksLikeTagArgument(argument: String): Boolean {
@@ -6545,44 +6511,6 @@ internal fun StructuralRefactorPass.javaMethodParameterCount(methodHeader: Strin
     return if (parameters.isBlank()) 0 else splitTopLevelJavaArgs(parameters).size
 }
 
-internal fun StructuralRefactorPass.collectProviderAwareNbtMethodContracts(
-    javaFiles: List<Path>,
-    projectSerializableTypeFqns: Set<String>,
-    javaInheritanceIndex: JavaInheritanceIndex
-): Set<HolderLookupNbtMethod> {
-    val providerAwareTypeFqns = projectSerializableTypeFqns.toMutableSet()
-    javaFiles.forEach { javaFile ->
-        val source = runCatching { javaFile.readText() }.getOrDefault("")
-        val packageName = packageNameOf(source)
-        val declarations = collectJavaClassDeclarations(source).associateBy { it.name }
-        javaTypeContracts(source).forEach { type ->
-            val declaration = declarations[type.simpleName] ?: return@forEach
-            if (javaClassExtendsAny(declaration, setOf("ItemStackHandler"), javaInheritanceIndex)) {
-                providerAwareTypeFqns += if (packageName.isBlank()) {
-                    type.simpleName
-                } else {
-                    "$packageName.${type.simpleName}"
-                }
-            }
-        }
-    }
-    val simpleNameCollisions = providerAwareTypeFqns
-        .groupBy { it.substringAfterLast('.') }
-        .filterValues { fqns -> fqns.distinct().size > 1 }
-    if (simpleNameCollisions.isNotEmpty()) {
-        throw IllegalStateException(
-            "Provider-aware NBT type names are ambiguous across packages: $simpleNameCollisions"
-        )
-    }
-    return providerAwareTypeFqns.flatMapTo(linkedSetOf()) { fqn ->
-        val owner = fqn.substringAfterLast('.')
-        listOf(
-            HolderLookupNbtMethod(owner, "serializeNBT", 0, 0),
-            HolderLookupNbtMethod(owner, "deserializeNBT", 1, 0)
-        )
-    }
-}
-
 internal fun StructuralRefactorPass.collectSavedDataHolderLookupMethods(
     javaFiles: List<Path>,
     savedDataClassNames: Set<String>
@@ -6607,7 +6535,7 @@ internal fun StructuralRefactorPass.collectSavedDataHolderLookupMethods(
     return result
 }
 
-internal fun StructuralRefactorPass.collectLegacyCompatibleItemStackNbtMethodsNeedingHolderLookup(
+internal fun StructuralRefactorPass.collectItemStackNbtMethodsNeedingHolderLookup(
     javaFiles: List<Path>,
     javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY,
     // methods another rule gives a HolderLookup.Provider (SavedData load/save): their bodies are provider-aware call sites
@@ -6969,7 +6897,10 @@ internal fun StructuralRefactorPass.collectLegacyCompatibleItemStackNbtMethodsNe
         }
         val selfRegistryAccess = entitySelfRegistryAccessExpression(declaration, javaInheritanceIndex)
         if (selfRegistryAccess == "this.registryAccess()") return selfRegistryAccess
-        sourceProvenInheritedRegistryAccessExpressionAt(source, offset, javaInheritanceIndex)?.let { return it }
+        declaration
+            ?.name
+            ?.let { javaInheritanceIndex.inheritedRegistryAccessField(it) }
+            ?.let { return "$it.registryAccess()" }
         return selfRegistryAccess
     }
 
@@ -7403,30 +7334,6 @@ internal fun StructuralRefactorPass.collectLegacyCompatibleItemStackNbtMethodsNe
     return result
 }
 
-internal fun StructuralRefactorPass.collectItemStackNbtMethodsNeedingHolderLookup(
-    javaFiles: List<Path>,
-    javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY,
-    javaProjectTypeIndex: JavaProjectTypeIndex = JavaProjectTypeIndex.build(commonJavaSourceRoot(javaFiles))
-): Set<HolderLookupNbtMethod> = collectExactItemStackNbtMethodsNeedingHolderLookup(
-    javaFiles,
-    javaInheritanceIndex,
-    javaProjectTypeIndex
-)
-
-internal fun commonJavaSourceRoot(javaFiles: List<Path>): Path {
-    require(javaFiles.isNotEmpty()) { "Cannot build a Java project type index without Java source files" }
-    var root = javaFiles.first().toAbsolutePath().normalize().parent
-        ?: throw IllegalStateException("Java source file has no parent: ${javaFiles.first()}")
-    for (file in javaFiles.drop(1)) {
-        val normalized = file.toAbsolutePath().normalize()
-        while (!normalized.startsWith(root)) {
-            root = root.parent
-                ?: throw IllegalStateException("Java source files do not share a filesystem root")
-        }
-    }
-    return root
-}
-
 internal fun StructuralRefactorPass.collectItemStackNbtConstructorsNeedingHolderLookup(
     javaFiles: List<Path>,
     methods: Set<HolderLookupNbtMethod>,
@@ -7733,58 +7640,6 @@ internal fun StructuralRefactorPass.collectEntityCapabilityValueTypes(javaFiles:
                 }
             }
         }
-    }
-    return result
-}
-
-internal fun StructuralRefactorPass.collectEntityAttachmentValueTypes(
-    javaFiles: List<Path>
-): Map<String, String> {
-    val result = linkedMapOf<String, String>()
-    val declaration = Regex(
-        """\b(?:java\.util\.function\.)?Supplier\s*<\s*(?:net\.neoforged\.neoforge\.attachment\.)?AttachmentType\s*<\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>\s*>\s+([A-Z][A-Z0-9_]*)\b"""
-    )
-    fun record(key: String, valueType: String) {
-        val previous = result[key]
-        if (previous != null && previous != valueType) {
-            throw IllegalStateException(
-                "Conflicting entity attachment value types for '$key': $previous and $valueType"
-            )
-        }
-        result[key] = valueType
-    }
-    for (javaFile in javaFiles) {
-        val source = runCatching { javaFile.readText() }.getOrDefault("")
-        val packageName = packageNameOf(source)
-        val topLevel = classNameOfJavaSource(source)
-        declaration.findAll(maskJavaCommentsAndLiterals(source)).forEach { match ->
-            val valueType = match.groupValues[1].substringAfterLast('.')
-            val fieldName = match.groupValues[2]
-            record(fieldName, valueType)
-            if (topLevel != null) {
-                record("$topLevel.$fieldName", valueType)
-                if (packageName.isNotBlank()) {
-                    record("$packageName.$topLevel.$fieldName", valueType)
-                }
-            }
-        }
-    }
-    return result
-}
-
-internal fun StructuralRefactorPass.mergeEntityDataValueTypes(
-    capabilities: Map<String, String>,
-    attachments: Map<String, String>
-): Map<String, String> {
-    val result = linkedMapOf<String, String>()
-    (capabilities.entries + attachments.entries).forEach { (key, valueType) ->
-        val previous = result[key]
-        if (previous != null && previous != valueType) {
-            throw IllegalStateException(
-                "Conflicting entity data value types for '$key': $previous and $valueType"
-            )
-        }
-        result[key] = valueType
     }
     return result
 }

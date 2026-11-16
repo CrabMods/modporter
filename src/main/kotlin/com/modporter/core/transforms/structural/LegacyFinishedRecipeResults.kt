@@ -56,6 +56,8 @@ internal object LegacyFinishedRecipeResults {
         val sources = files.associateWith { runCatching { it.readText() }.getOrDefault("") }.toMutableMap()
         if (sources.values.none { it.contains("serializeRecipeData") }) return emptyList()
         val recipeTypes = projectRecipeTypes(sources.values)
+        val serializeRecipeReceivers = serializeRecipeReceivers(sources.values)
+        val projectSources = sources.values.toList()
         val changes = mutableListOf<Change>()
         val results = mutableListOf<Result>()
 
@@ -63,7 +65,9 @@ internal object LegacyFinishedRecipeResults {
             var updated = source
             while (true) {
                 val masked = JavaSourceText.maskCommentsAndLiterals(updated)
-                val (rewritten, result) = rewriteResultClass(updated, masked, recipeTypes) ?: break
+                val (rewritten, result) = rewriteResultClass(
+                    updated, masked, recipeTypes, serializeRecipeReceivers, projectSources
+                ) ?: break
                 updated = rewritten
                 results += result
             }
@@ -624,7 +628,13 @@ ${indent}}""".trim('\r', '\n').replace("\n", newline)
         return parents.any { isRecipeProviderType(it, supertypes, seen + type) }
     }
 
-    private fun rewriteResultClass(source: String, masked: String, recipeTypes: Set<String>): Pair<String, Result>? {
+    private fun rewriteResultClass(
+        source: String,
+        masked: String,
+        recipeTypes: Set<String>,
+        serializeRecipeReceivers: Set<String> = emptySet(),
+        projectSources: List<String> = emptyList()
+    ): Pair<String, Result>? {
         for (header in resultHeader.findAll(masked)) {
             val open = header.range.last
             val close = JavaSourceText.matchingBrace(masked, open)
@@ -643,6 +653,17 @@ ${indent}}""".trim('\r', '\n').replace("\n", newline)
                 type in recipeTypes || TargetMembers.classesNamed(type).any { TargetMembers.inheritsFrom(it, "net.minecraft.world.item.crafting.Recipe") }
             }?.groupValues?.get(2) ?: continue
             val conditionsField = Regex("""\bList\s*<\s*ICondition\s*>\s+($ID)\s*;""").find(body)?.groupValues?.get(1)
+            // Project code still reads the 1.20.1 FinishedRecipe.serializeRecipe() default of this result.
+            val retainedSerialization = if (header.groupValues[1] in serializeRecipeReceivers) {
+                retainedSerializeRecipe(
+                    source.substring(header.range.first, close + 1),
+                    recipeField,
+                    conditionsField,
+                    projectSources
+                )
+            } else {
+                null
+            }
 
             var text = source.substring(open + 1, close)
             for (method in contractMethods) {
@@ -652,13 +673,207 @@ ${indent}}""".trim('\r', '\n').replace("\n", newline)
             val indent = Regex("""(?m)^([ \t]+)\S""").find(text)?.groupValues?.get(1) ?: "    "
             val conditions = conditionsField?.let { ", $it.toArray(new net.neoforged.neoforge.common.conditions.ICondition[0])" } ?: ""
             val saveTo = "\n${indent}public void saveTo(net.minecraft.data.recipes.RecipeOutput output) {\n" +
-                "$indent${indent}output.accept(getId(), $recipeField, null$conditions);\n$indent}\n"
+                "$indent${indent}output.accept(getId(), $recipeField, null$conditions);\n$indent}\n" +
+                (retainedSerialization?.let { serializeRecipeMethod(indent, it) } ?: "")
             val interfaces = header.groupValues[3].removePrefix("implements").split(',').map { it.trim() }
                 .filter { it.isNotEmpty() && it != "RecipeOutput" && it != "FinishedRecipe" }
             val newHeader = source.substring(header.range.first, header.groups[3]!!.range.first) +
                 (if (interfaces.isEmpty()) "" else "implements ${interfaces.joinToString(", ")} ") + "{"
             val rewritten = source.substring(0, header.range.first) + newHeader + saveTo + text + source.substring(close)
             return rewritten to Result(header.groupValues[1], recipeField, conditionsField)
+        }
+        return null
+    }
+
+    private class RetainedSerialization(val recipeField: String, val conditionsField: String?)
+
+    /**
+     * 1.20.1 `FinishedRecipe.serializeRecipe()` (vanilla default; Forge 1.20.1 does not patch it) is
+     * `{"type": BuiltInRegistries.RECIPE_SERIALIZER.getKey(getType())}` followed by
+     * `serializeRecipeData(json)`. It is kept, through 1.21.1's `Recipe.CONDITIONAL_CODEC`, only when
+     * the source proves both halves are the recipe's own serialization:
+     * - `getType()` returns a field every constructor assigns from the held recipe's `getSerializer()`;
+     * - `serializeRecipeData` first writes the held recipe through that serializer's JSON writer, the
+     *   one its retained `codec()` encodes with, and otherwise only adds the result's conditions
+     *   (Forge's `conditions` array, which NeoForge's conditional codec writes as its condition key and
+     *   omits when empty).
+     */
+    private fun retainedSerializeRecipe(
+        classText: String,
+        recipeField: String,
+        conditionsField: String?,
+        projectSources: List<String>
+    ): RetainedSerialization? {
+        val parser = JavaParser(ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE))
+        val declaration = parser.parseBodyDeclaration<com.github.javaparser.ast.body.ClassOrInterfaceDeclaration>(classText)
+            .result.orElse(null) ?: return null
+        if (declaration.methods.any { it.nameAsString == "serializeRecipe" }) return null
+
+        fun unwrap(expression: com.github.javaparser.ast.expr.Expression): com.github.javaparser.ast.expr.Expression {
+            var current = expression
+            while (true) {
+                current = when (current) {
+                    is com.github.javaparser.ast.expr.EnclosedExpr -> current.inner
+                    is com.github.javaparser.ast.expr.CastExpr -> current.expression
+                    else -> return current
+                }
+            }
+        }
+        fun fieldName(expression: com.github.javaparser.ast.expr.Expression): String? = when (val value = unwrap(expression)) {
+            is com.github.javaparser.ast.expr.NameExpr -> value.nameAsString
+            is com.github.javaparser.ast.expr.FieldAccessExpr ->
+                value.nameAsString.takeIf { value.scope is com.github.javaparser.ast.expr.ThisExpr }
+            else -> null
+        }
+
+        // getType() returns a serializer field assigned from the held recipe in every constructor
+        val getType = declaration.methods.singleOrNull { it.nameAsString == "getType" && it.parameters.isEmpty() }
+            ?: return null
+        val returned = (getType.body.orElse(null)?.statements?.singleOrNull()
+            as? com.github.javaparser.ast.stmt.ReturnStmt)?.expression?.orElse(null) ?: return null
+        val serializerField = fieldName(returned) ?: return null
+        val assignments = declaration.findAll(com.github.javaparser.ast.expr.AssignExpr::class.java)
+            .filter { fieldName(it.target) == serializerField }
+        if (assignments.isEmpty()) return null
+        for (assignment in assignments) {
+            val constructor = assignment.findAncestor(com.github.javaparser.ast.body.ConstructorDeclaration::class.java)
+                .orElse(null) ?: return null
+            val read = unwrap(assignment.value) as? com.github.javaparser.ast.expr.MethodCallExpr ?: return null
+            if (read.nameAsString != "getSerializer" || read.arguments.isNotEmpty()) return null
+            val holderExpression = read.scope.map(::unwrap).orElse(null) ?: return null
+            val holder = fieldName(holderExpression) ?: return null
+            val parameter = (holderExpression as? com.github.javaparser.ast.expr.NameExpr)
+                ?.let { constructor.parameters.singleOrNull { it.nameAsString == holder } }
+            if (parameter != null) {
+                // the constructor parameter is the very value the recipe field stores
+                val stored = constructor.findAll(com.github.javaparser.ast.expr.AssignExpr::class.java).any {
+                    (it.target as? com.github.javaparser.ast.expr.FieldAccessExpr)?.let { target ->
+                        target.scope is com.github.javaparser.ast.expr.ThisExpr && target.nameAsString == recipeField
+                    } == true && (unwrap(it.value) as? com.github.javaparser.ast.expr.NameExpr)?.nameAsString == holder
+                } || (holder != recipeField && constructor.findAll(com.github.javaparser.ast.expr.AssignExpr::class.java).any {
+                    fieldName(it.target) == recipeField &&
+                        (unwrap(it.value) as? com.github.javaparser.ast.expr.NameExpr)?.nameAsString == holder
+                })
+                if (!stored) return null
+            } else if (holder != recipeField) {
+                return null
+            }
+        }
+        val serializerType = declaration.fields.flatMap { it.variables }
+            .singleOrNull { it.nameAsString == serializerField }?.type
+            as? com.github.javaparser.ast.type.ClassOrInterfaceType ?: return null
+
+        // serializeRecipeData(json): the serializer writes the held recipe, then only the conditions
+        val serialize = declaration.methods.singleOrNull {
+            it.nameAsString == "serializeRecipeData" && it.parameters.size == 1
+        } ?: return null
+        val json = serialize.parameters.single().nameAsString
+        val statements = serialize.body.orElse(null)?.statements?.map { compactJava(it.toString()) } ?: return null
+        val write = Regex("""^(?:this\.)?${Regex.escape(serializerField)}\.($ID)\(${Regex.escape(json)},(?:this\.)?${Regex.escape(recipeField)}\);$""")
+            .matchEntire(statements.firstOrNull() ?: return null)?.groupValues?.get(1) ?: return null
+        val rest = statements.drop(1)
+        if (conditionsField == null) {
+            if (rest.isNotEmpty()) return null
+        } else {
+            val guarded = rest.firstOrNull() == "if(${conditionsField}.isEmpty())return;"
+            val tail = if (guarded) rest.drop(1) else rest
+            if (tail.size != 3) return null
+            val array = Regex("""^(?:com\.google\.gson\.)?JsonArray($ID)=new(?:com\.google\.gson\.)?JsonArray\(\);$""")
+                .matchEntire(tail[0])?.groupValues?.get(1) ?: return null
+            val forEach = Regex(
+                """^${Regex.escape(conditionsField)}\.forEach\(\(?($ID)\)?->${Regex.escape(array)}\.add\((.*)\)\);$"""
+            ).matchEntire(tail[1]) ?: return null
+            if (!isExactConditionSerialization(forEach.groupValues[2], forEach.groupValues[1]) ||
+                tail[2] != "${json}.add(\"conditions\",${array});"
+            ) {
+                return null
+            }
+        }
+
+        // the serializer's retained codec encodes through that same JSON writer
+        if (!encodesThroughWriter(serializerType.nameAsString, write, projectSources)) return null
+        return RetainedSerialization(recipeField, conditionsField)
+    }
+
+    /** Whether the project serializer [serializerName]'s codec writes JSON through its method [writer]. */
+    private fun encodesThroughWriter(serializerName: String, writer: String, projectSources: List<String>): Boolean {
+        val header = Regex("""\bclass\s+${Regex.escape(serializerName)}\s*(?:<[^{]*?>)?[^{;]*\bimplements\s+[^{;]*?\bRecipeSerializer\s*<\s*([^{;]+?)\s*>[^{;]*\{""")
+        val owners = projectSources.mapNotNull { source ->
+            val masked = JavaSourceText.maskCommentsAndLiterals(source)
+            val match = header.find(masked) ?: return@mapNotNull null
+            val close = JavaSourceText.matchingBrace(masked, match.range.last)
+            if (close < 0) null else masked.substring(match.range.last, close) to match.groupValues[1].trim()
+        }
+        val (body, recipeType) = owners.singleOrNull() ?: return false
+        val codecWriter = Regex("""\bLegacyRecipeCodecs\s*\.\s*codec\s*\(\s*this\s*::\s*fromJson\s*,\s*this\s*::\s*($ID)\s*\)""")
+            .find(body)?.groupValues?.get(1)
+            ?: Regex("""\b(?:public|protected)\s+(?:final\s+)?void\s+($ID)\s*\(\s*(?:final\s+)?(?:com\.google\.gson\.)?JsonObject\s+$ID\s*,\s*(?:final\s+)?${Regex.escape(recipeType)}\s+$ID\s*\)""")
+                .find(body)?.groupValues?.get(1)
+                ?.takeUnless { Regex("""\bcodec\s*\(\s*\)\s*\{""").containsMatchIn(body) }
+            ?: return false
+        if (writer == codecWriter) return true
+        // a writer that only forwards both of its parameters to the codec's writer
+        val forwarding = Regex(
+            """\bvoid\s+${Regex.escape(writer)}\s*\(\s*(?:final\s+)?(?:com\.google\.gson\.)?JsonObject\s+($ID)\s*,\s*(?:final\s+)?${Regex.escape(recipeType)}\s+($ID)\s*\)\s*\{([^{}]*)\}"""
+        ).find(body) ?: return false
+        return compactJava(forwarding.groupValues[3]) in setOf(
+            "${codecWriter}(${forwarding.groupValues[1]},${forwarding.groupValues[2]});",
+            "this.${codecWriter}(${forwarding.groupValues[1]},${forwarding.groupValues[2]});"
+        )
+    }
+
+    private fun serializeRecipeMethod(indent: String, retained: RetainedSerialization): String {
+        val conditions = retained.conditionsField ?: "java.util.List.of()"
+        return "\n${indent}public com.google.gson.JsonObject serializeRecipe() {\n" +
+            "$indent${indent}return net.minecraft.world.item.crafting.Recipe.CONDITIONAL_CODEC.encodeStart(\n" +
+            "$indent$indent${indent}com.mojang.serialization.JsonOps.INSTANCE,\n" +
+            "$indent$indent${indent}java.util.Optional.of(new net.neoforged.neoforge.common.conditions.WithConditions<>($conditions, ${retained.recipeField}))\n" +
+            "$indent$indent).getOrThrow().getAsJsonObject();\n$indent}\n"
+    }
+
+    /** Simple names of the types project code calls `serializeRecipe()` on. */
+    private fun serializeRecipeReceivers(sources: Collection<String>): Set<String> {
+        val parser = JavaParser(ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE))
+        val receivers = HashSet<String>()
+        for (source in sources) {
+            if (!source.contains("serializeRecipe")) continue
+            val unit = parser.parse(source).result.orElse(null) ?: continue
+            for (call in unit.findAll(com.github.javaparser.ast.expr.MethodCallExpr::class.java)) {
+                if (call.nameAsString != "serializeRecipe" || call.arguments.isNotEmpty()) continue
+                val enclosing = call.findAncestor(com.github.javaparser.ast.body.TypeDeclaration::class.java).orElse(null)
+                val receiver = when (val scope = call.scope.orElse(null)) {
+                    null, is com.github.javaparser.ast.expr.ThisExpr -> enclosing?.nameAsString
+                    is com.github.javaparser.ast.expr.ObjectCreationExpr -> scope.type.nameAsString
+                    is com.github.javaparser.ast.expr.NameExpr -> declaredTypeName(scope)
+                    else -> null
+                }
+                receiver?.let(receivers::add)
+            }
+        }
+        return receivers
+    }
+
+    /** The simple type name a local, parameter, or enclosing-class field named like [name] is declared with. */
+    private fun declaredTypeName(name: com.github.javaparser.ast.expr.NameExpr): String? {
+        var scope: com.github.javaparser.ast.Node? = name.parentNode.orElse(null)
+        while (scope != null) {
+            val declared = when (scope) {
+                is com.github.javaparser.ast.body.CallableDeclaration<*> ->
+                    scope.parameters.firstOrNull { it.nameAsString == name.nameAsString }?.type
+                is com.github.javaparser.ast.expr.LambdaExpr ->
+                    scope.parameters.firstOrNull { it.nameAsString == name.nameAsString }?.type
+                        ?.takeUnless { it.isUnknownType }
+                is com.github.javaparser.ast.stmt.BlockStmt -> scope.statements
+                    .flatMap { it.findAll(com.github.javaparser.ast.body.VariableDeclarator::class.java) }
+                    .firstOrNull { it.nameAsString == name.nameAsString }?.type
+                is com.github.javaparser.ast.body.TypeDeclaration<*> -> scope.fields.flatMap { it.variables }
+                    .firstOrNull { it.nameAsString == name.nameAsString }?.type
+                else -> null
+            }
+            if (declared != null) {
+                return (declared as? com.github.javaparser.ast.type.ClassOrInterfaceType)?.nameAsString
+            }
+            scope = scope.parentNode.orElse(null)
         }
         return null
     }

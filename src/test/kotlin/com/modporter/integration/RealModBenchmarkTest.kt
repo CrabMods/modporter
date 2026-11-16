@@ -1171,6 +1171,59 @@ class RealModBenchmarkTest {
     }
 
     @Test
+    fun `runtime log audit records slow deferred work of an external mod as a host load-time notice`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        writeSourceInheritedServerLagEvidence(projectDir)
+        val logFile = tempDir.resolve("external-deferred-work.log")
+        logFile.writeText(
+            listOf(
+                "\t\tExample 1.0.0 (example)",
+                "\t\tJourneymap 1.21.1-6.0.0-beta.54 (journeymap)",
+                "[06:14:12] [Render thread/WARN] [ne.ne.fm.DeferredWorkQueue/LOADING]: Mod 'journeymap' took 4.712 s to run a deferred task."
+            ).joinToString("\n") + "\n"
+        )
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(audit.findings.isEmpty(), "An external mod's load time is not the converted mod's logic: $audit")
+        assertTrue(
+            audit.allowedIssues.any {
+                it.contains("host load-time notice") && it.contains("'journeymap'") &&
+                    it.contains("4.712 s") && it.contains("loaded runtime mod")
+            },
+            "The notice must stay visible in the allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps slow deferred work notices that are not evidenced as external`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        writeSourceInheritedServerLagEvidence(projectDir)
+        val modList = listOf("\t\tExample 1.0.0 (example)", "\t\tJourneymap 1.21.1-6.0.0-beta.54 (journeymap)")
+        val kept = listOf(
+            // the converted mod itself: governed by the source-fingerprint rule, absent here
+            "[06:14:12] [Render thread/WARN] [ne.ne.fm.DeferredWorkQueue/LOADING]: Mod 'example' took 1.082 s to run a deferred task.",
+            // a mod that is neither in the runtime mod list nor an active build dependency
+            "[06:14:12] [Render thread/WARN] [ne.ne.fm.DeferredWorkQueue/LOADING]: Mod 'ghost' took 2.500 s to run a deferred task.",
+            // the same words from a logger that is not NeoForge's deferred work queue
+            "[06:14:12] [Render thread/WARN] [example/]: Mod 'journeymap' took 4.712 s to run a deferred task.",
+            // more than the notice on the line
+            "[06:14:12] [Render thread/WARN] [ne.ne.fm.DeferredWorkQueue/LOADING]: Mod 'journeymap' took 4.712 s to run a deferred task. Registry frozen early"
+        )
+        kept.forEachIndexed { index, line ->
+            val logFile = tempDir.resolve("deferred-work-kept-$index.log")
+            logFile.writeText((modList + line).joinToString("\n") + "\n")
+
+            val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+            assertTrue(
+                audit.findings.any { it.contains("to run a deferred task") },
+                "Only an evidenced external mod's exact NeoForge notice is a host load-time notice: $line -> $audit"
+            )
+        }
+    }
+
+    @Test
     fun `runtime log audit allowlists source inherited gametest server lag with source log evidence`(@TempDir tempDir: Path) {
         val projectDir = tempDir.resolve("work/example")
         val sourceDir = tempDir.resolve("sources/example")
@@ -1195,24 +1248,50 @@ class RealModBenchmarkTest {
     }
 
     @Test
-    fun `runtime log audit keeps gametest server lag without source log evidence`(@TempDir tempDir: Path) {
+    fun `runtime log audit records the vanilla server overload notice as a host scheduling notice`(@TempDir tempDir: Path) {
         val projectDir = tempDir.resolve("work/example")
         writeSourceInheritedServerLagEvidence(projectDir)
         val logFile = tempDir.resolve("gametest-server-lag-no-source.log")
         logFile.writeText("""
-            [06:14:12] [Server thread/INFO] [example/]: Allocated dimension 0 for session 00000000-0000-0000-0000-000000000000
-            [06:14:12] [Server thread/INFO] [example/]: Recovering temporary mirror dimension 0 from saved cleanup marker
-            [06:14:12] [Server thread/INFO] [example/]: Re-queued cleanup for recovered temporary mirror dimension 0
+            [06:14:12] [Server thread/INFO] [minecraft/GameTestRunner]: Running test batch 'defaultBatch:0' (50 tests)...
             [06:14:12] [Server thread/WARN] [minecraft/MinecraftServer]: Can't keep up! Is the server overloaded? Running 4627ms or 92 ticks behind
             [06:14:13] [Server thread/INFO] [net.minecraft.gametest.framework.GameTestServer/]: All 36 required tests passed :)
         """.trimIndent() + "\n")
 
         val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
 
+        assertTrue(audit.findings.isEmpty(), "Server tick lag measures the host, not the mod's logic: $audit")
         assertTrue(
-            audit.findings.any { it.contains("Can't keep up") },
-            "GameTest lag warnings require input source log-template evidence"
+            audit.allowedIssues.any {
+                it.contains("host scheduling notice") && it.contains("4627 ms") && it.contains("92 ticks")
+            },
+            "The notice must stay visible in the allowed issues, got: ${audit.allowedIssues}"
         )
+    }
+
+    @Test
+    fun `runtime log audit keeps overload wording that is not the vanilla server notice`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        writeSourceInheritedServerLagEvidence(projectDir)
+        val lookalikes = listOf(
+            // a mod's own logger using the same words
+            "[06:14:12] [Server thread/WARN] [example/]: Can't keep up! Is the server overloaded? Running 4627ms or 92 ticks behind",
+            // the vanilla logger on another thread
+            "[06:14:12] [Worker-Main-3/WARN] [minecraft/MinecraftServer]: Can't keep up! Is the server overloaded? Running 4627ms or 92 ticks behind",
+            // the vanilla logger with more than the notice on the line
+            "[06:14:12] [Server thread/WARN] [minecraft/MinecraftServer]: Can't keep up! Is the server overloaded? Running 4627ms or 92 ticks behind; example queue overflow"
+        )
+        lookalikes.forEachIndexed { index, line ->
+            val logFile = tempDir.resolve("overload-lookalike-$index.log")
+            logFile.writeText(line + "\n")
+
+            val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+            assertTrue(
+                audit.findings.any { it.contains("Can't keep up") },
+                "Only the exact vanilla server overload notice is a host scheduling notice: $line -> $audit"
+            )
+        }
     }
 
     @Test
@@ -2303,7 +2382,7 @@ class RealModBenchmarkTest {
         support.invoke(com.modporter.core.transforms.structural.LegacyRecipeIds,
             output.resolve("src/main/java"), "com.modporter.generated.create.compat", "create", false)
         val source = Path.of(checkNotNull(System.getenv("MODPORTER_BENCHMARK_SOURCE_CREATE")))
-        val station = Change(output.resolve("src/main/java/com/simibubi/create/foundation/map/StationMapDecorationRenderer.java"),
+        val station = Change(output.resolve("src/main/java/com/simibubi/create/ModPorterMapDecorationRenderers.java"),
             1, "Replay the admitted native station-map requirement", "admitted station-map family",
             "validate the same native station-map family", Confidence.HIGH, StrictSpawnValidationContract.STATION_RULE_ID)
         val admission = StrictReviewValidationRegistry.admit(root, source, output, output,
@@ -4953,8 +5032,14 @@ class RealModBenchmarkTest {
         sourceInheritedSlowDeferredWorkEvidence(lines[index], evidenceCache)?.let {
             return "source-inherited slow deferred work warning ($it)"
         }
+        externalModSlowDeferredWorkNotice(lines, index, evidenceCache)?.let {
+            return "host load-time notice, not a mod logic finding ($it)"
+        }
         sourceInheritedGameTestServerLagEvidence(lines, index, evidenceCache)?.let {
             return "source-inherited GameTest server lag warning ($it)"
+        }
+        hostSchedulingServerLagNotice(lines[index])?.let {
+            return "host scheduling notice, not a mod logic finding ($it)"
         }
         journeyMapSepiaColorModulatorEvidence(lines, index, evidenceCache)?.let {
             return "pinned JourneyMap sepia shader metadata warning ($it)"
@@ -5721,6 +5806,49 @@ class RealModBenchmarkTest {
         return "GameTest passed and input/converted sources share ${matched.size} runtime log template(s) around the lag: " +
             matched.take(4).joinToString(", ")
     }
+
+    /**
+     * NeoForge's deferred-work duration notice reports how long a mod's queued task took on the wall
+     * clock. For a mod other than the converted target it says nothing about the converted mod's
+     * logic, so the audit records it as an allowed issue when that mod is evidenced as an external
+     * dependency. The target mod's own notice stays under the source-fingerprint rule above.
+     */
+    private fun externalModSlowDeferredWorkNotice(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val match = neoForgeDeferredWorkDurationNotice.matchEntire(lines[index].trimEnd()) ?: return null
+        val modId = match.groupValues[1]
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (modId == targetMod) return null
+        val evidence = externalDependencyNamespaceEvidence(modId, lines, evidenceCache) ?: return null
+        return "NeoForge deferred work duration notice for external mod '$modId' " +
+            "(${match.groupValues[2]}; $evidence)"
+    }
+
+    private val neoForgeDeferredWorkDurationNotice = Regex(
+        """^\[[^\]]+] \[[^\]]+/WARN] \[ne\.ne\.fm\.DeferredWorkQueue/LOADING]: """ +
+            """Mod '([a-z0-9_.-]+)' took ([0-9.]+ \S+) to run a deferred task\.$"""
+    )
+
+    /**
+     * Vanilla's server overload notice reports how far the tick loop fell behind wall-clock time.
+     * That measures how the host scheduled the server, not what the converted mod's logic did, so
+     * the audit records it as an allowed issue rather than a finding. Only the exact vanilla line
+     * from MinecraftServer on the server thread qualifies; the same wording from another logger,
+     * level or thread remains a finding.
+     */
+    private fun hostSchedulingServerLagNotice(line: String): String? {
+        val match = vanillaServerOverloadNotice.matchEntire(line.trimEnd()) ?: return null
+        return "vanilla server overload notice: tick loop ${match.groupValues[1]} ms / " +
+            "${match.groupValues[2]} ticks behind wall-clock time"
+    }
+
+    private val vanillaServerOverloadNotice = Regex(
+        """^\[[^\]]+] \[Server thread/WARN] \[minecraft/MinecraftServer]: """ +
+            """Can't keep up! Is the server overloaded\? Running (\d+)ms or (\d+) ticks behind$"""
+    )
 
     private fun runtimeLogTemplates(projectDir: Path): Set<String> {
         if (!projectDir.exists()) return emptySet()

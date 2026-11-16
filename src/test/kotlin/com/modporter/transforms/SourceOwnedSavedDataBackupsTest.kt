@@ -87,7 +87,7 @@ class SourceOwnedSavedDataBackupsTest {
                 source
             )
             assertTrue(
-                source.contains("SavedDataUtil.saveWithDatOld(this, file, registries)"),
+                source.contains("BackupWriter.saveWithDatOld(this, file, registries)"),
                 source
             )
             assertTrue(source.contains("nbt.putString(\"preserved\", \"yes\")"), source)
@@ -121,7 +121,7 @@ class SourceOwnedSavedDataBackupsTest {
         assertTrue(result.changes.isEmpty())
         assertTrue(
             result.gates.any {
-                it.contains("dirty-save and replacement flow") ||
+                it.contains("file replacement flow") ||
                     it.contains("provider or Path calls")
             },
             result.gates.joinToString("\n")
@@ -139,12 +139,12 @@ class SourceOwnedSavedDataBackupsTest {
             package com.example;
 
             import java.io.File;
-            import com.simibubi.create.foundation.utility.SavedDataUtil;
+            import example.storage.BackupWriter;
             import net.minecraft.world.level.saveddata.SavedData;
 
             public class ExternalSave {
                 public static void save(SavedData data, File file) {
-                    SavedDataUtil.saveWithDatOld(data, file);
+                    BackupWriter.saveWithDatOld(data, file);
                 }
             }
             """
@@ -158,7 +158,7 @@ class SourceOwnedSavedDataBackupsTest {
 
         assertTrue(result.changes.isEmpty())
         assertTrue(
-            result.gates.any { it.contains("outside the two owned overrides") },
+            result.gates.any { it.contains("outside its owned SavedData file save overrides") },
             result.gates.joinToString("\n")
         )
         assertEquals(before, fixture.ownedPaths.associateWith { it.readText() })
@@ -273,6 +273,147 @@ class SourceOwnedSavedDataBackupsTest {
         assertEquals(before, fixture.ownedPaths.associateWith { it.readText() })
     }
 
+    @Test
+    fun `a backup family with other names and the same shape gets the same rewrite`() {
+        val project = directory.resolve("renamed")
+        val utility = writeJava(
+            project,
+            "example/io/Snapshots.java",
+            """
+            package example.io;
+
+            import java.io.File;
+            import java.io.IOException;
+            import net.minecraft.Util;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.nbt.NbtIo;
+            import net.minecraft.world.level.saveddata.SavedData;
+
+            public final class Snapshots {
+                static <D extends SavedData> void persist(D data, File target) {
+                    CompoundTag root = new CompoundTag();
+                    root.put("data", data.save(new CompoundTag()));
+                    try {
+                        File staging = new File(target.getPath() + ".tmp");
+                        NbtIo.writeCompressed(root, staging);
+                        File previous = new File(target.getPath() + ".bak");
+                        Util.safeReplaceFile(target, staging, previous);
+                    } catch (IOException ignored) {
+                    }
+                }
+            }
+            """
+        )
+        val data = writeJava(
+            project,
+            "example/io/Ledger.java",
+            """
+            package example.io;
+
+            import java.io.File;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.server.MinecraftServer;
+            import net.minecraft.world.level.saveddata.SavedData;
+
+            public class Ledger extends SavedData {
+                public CompoundTag save(CompoundTag tag, HolderLookup.Provider lookup) {
+                    return tag;
+                }
+
+                private static Ledger read(CompoundTag tag, HolderLookup.Provider lookup) {
+                    return new Ledger();
+                }
+
+                public void save(File target) {
+                    Snapshots.persist(this, target);
+                }
+
+                public static Ledger get(MinecraftServer server, HolderLookup.Provider lookup) {
+                    return server.overworld().getDataStorage().computeIfAbsent(
+                        new SavedData.Factory<>(Ledger::new, Ledger::read), "ledger");
+                }
+            }
+            """
+        )
+        writeJava(
+            project,
+            "example/io/LedgerUser.java",
+            """
+            package example.io;
+            import net.minecraft.server.MinecraftServer;
+            public class LedgerUser {
+                Ledger ledger(MinecraftServer server) {
+                    return Ledger.get(server);
+                }
+            }
+            """
+        )
+
+        val result = SourceOwnedSavedDataBackups.migrate(project, dryRun = false)
+
+        assertTrue(result.gates.isEmpty(), result.gates.joinToString("\n"))
+        assertEquals(2, result.changes.size)
+        val migratedUtility = utility.readText()
+        assertTrue(
+            migratedUtility.contains(
+                "static <D extends SavedData> void persist(D data, File target, HolderLookup.Provider registries)"
+            ),
+            migratedUtility
+        )
+        assertTrue(migratedUtility.contains("data.save(new CompoundTag(), registries)"), migratedUtility)
+        assertTrue(migratedUtility.contains("NbtIo.writeCompressed(root, staging.toPath())"), migratedUtility)
+        assertTrue(
+            migratedUtility.contains(
+                "Util.safeReplaceFile(target.toPath(), staging.toPath(), previous.toPath())"
+            ),
+            migratedUtility
+        )
+        val migratedData = data.readText()
+        assertTrue(
+            Regex("""@Override\s+public\s+void\s+save\s*\(\s*File\s+target\s*,\s*HolderLookup\.Provider\s+registries\s*\)""")
+                .containsMatchIn(migratedData),
+            migratedData
+        )
+        assertTrue(migratedData.contains("Snapshots.persist(this, target, registries)"), migratedData)
+        assertTrue(
+            Regex("""public\s+static\s+Ledger\s+get\s*\(\s*MinecraftServer\s+server\s*\)""")
+                .containsMatchIn(migratedData),
+            migratedData
+        )
+        assertTrue(
+            Regex("""computeIfAbsent\(\s*factory\(\)\s*,\s*"ledger"\s*\)""").containsMatchIn(migratedData),
+            migratedData
+        )
+        assertTrue(migratedData.contains("Ledger::new, Ledger::read"), migratedData)
+
+        val second = SourceOwnedSavedDataBackups.migrate(project, dryRun = false)
+        assertTrue(second.gates.isEmpty(), second.gates.joinToString("\n"))
+        assertTrue(second.changes.isEmpty())
+    }
+
+    @Test
+    fun `a caller that supplies the widened provider keeps the family unchanged`() {
+        val fixture = writeFixture(directory.resolve("provider-caller"))
+        val manager = fixture.managerPaths.first()
+        manager.writeText(
+            manager.readText()
+                .replace("import net.minecraft.server.MinecraftServer;", "import net.minecraft.server.MinecraftServer;\nimport net.minecraft.core.HolderLookup;")
+                .replace("(MinecraftServer server)", "(MinecraftServer server, HolderLookup.Provider registries)")
+                .replace(".load(server)", ".load(server, registries)")
+        )
+        val before = fixture.ownedPaths.associateWith { it.readText() }
+
+        val result = SourceOwnedSavedDataBackups.migrate(fixture.project, dryRun = false)
+
+        assertTrue(result.changes.isEmpty())
+        assertTrue(
+            result.gates.any { it.contains("does not pass only its original") },
+            result.gates.joinToString("\n")
+        )
+        assertEquals(before, fixture.ownedPaths.associateWith { it.readText() })
+    }
+
     private fun transactionArtifacts(project: Path): List<Path> =
         Files.walk(project).use { paths ->
             paths.filter {
@@ -358,21 +499,20 @@ class SourceOwnedSavedDataBackupsTest {
     ): Fixture {
         val utility = writeJava(
             project,
-            "com/simibubi/create/foundation/utility/SavedDataUtil.java",
+            "example/storage/BackupWriter.java",
             """
-            package com.simibubi.create.foundation.utility;
+            package example.storage;
 
             import java.io.File;
             import java.io.IOException;
             import java.nio.file.Paths;
-            import com.simibubi.create.Create;
-            import net.minecraft.Util;
+                        import net.minecraft.Util;
             import net.minecraft.nbt.CompoundTag;
             import net.minecraft.nbt.NbtIo;
             import net.minecraft.nbt.NbtUtils;
             import net.minecraft.world.level.saveddata.SavedData;
 
-            public class SavedDataUtil {
+            public class BackupWriter {
                 public static <T extends SavedData> void saveWithDatOld(
                         T savedData, File file) {
                     if (savedData.isDirty()) {
@@ -388,7 +528,7 @@ class SourceOwnedSavedDataBackupsTest {
                                 file.getParent(), savedDataName + ".dat_old").toFile();
                             Util.safeReplaceFile(file, temp, oldFile);
                         } catch (IOException exception) {
-                            Create.LOGGER.error("Could not save data {}", savedData, exception);
+                            System.err.println(exception);
                         }
                         savedData.setDirty(false);
                     }
@@ -398,38 +538,38 @@ class SourceOwnedSavedDataBackupsTest {
         )
         val railway = writeData(
             project,
-            packageName = "com.simibubi.create.content.trains",
-            className = "RailwaySavedData",
-            dataName = "create_tracks",
+            packageName = "example.routes",
+            className = "RouteSavedData",
+            dataName = "example_routes",
             postCommon = postCommon
         )
         val logistics = writeData(
             project,
-            packageName = "com.simibubi.create.content.logistics.packagerLink",
-            className = "LogisticsNetworkSavedData",
-            dataName = "create_logistics",
+            packageName = "example.links",
+            className = "LinkSavedData",
+            dataName = "example_links",
             postCommon = postCommon
         )
         val railwayManager = writeManager(
             project,
-            packageName = "com.simibubi.create.content.trains",
-            managerName = "GlobalRailwayManager",
-            dataName = "RailwaySavedData",
-            methodName = "loadRailwayData"
+            packageName = "example.routes",
+            managerName = "RouteManager",
+            dataName = "RouteSavedData",
+            methodName = "loadRoutes"
         )
         val logisticsManager = writeManager(
             project,
-            packageName = "com.simibubi.create.content.logistics.packagerLink",
-            managerName = "GlobalLogisticsManager",
-            dataName = "LogisticsNetworkSavedData",
-            methodName = "loadLogisticsData"
+            packageName = "example.links",
+            managerName = "LinkManager",
+            dataName = "LinkSavedData",
+            methodName = "loadLinks"
         )
         return Fixture(
             project,
             utility,
             linkedMapOf(
-                "RailwaySavedData" to railway,
-                "LogisticsNetworkSavedData" to logistics
+                "RouteSavedData" to railway,
+                "LinkSavedData" to logistics
             ),
             listOf(railwayManager, logisticsManager)
         )
@@ -462,7 +602,7 @@ class SourceOwnedSavedDataBackupsTest {
         package $packageName;
 
         import java.io.File;
-        import com.simibubi.create.foundation.utility.SavedDataUtil;
+        import example.storage.BackupWriter;
         import net.minecraft.core.HolderLookup;
         import net.minecraft.nbt.CompoundTag;
         import net.minecraft.server.MinecraftServer;
@@ -484,7 +624,7 @@ class SourceOwnedSavedDataBackupsTest {
 
 $fileOverride
             public void save(@NotNull File file) {
-                SavedDataUtil.saveWithDatOld(this, file);
+                BackupWriter.saveWithDatOld(this, file);
             }
 
             private $className() {}

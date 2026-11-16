@@ -189,8 +189,6 @@ class CreateStationMapRuntimeValidationTest {
                 "net/minecraft/client/gui/MapRenderer.class",
             "net.neoforged.neoforge.client.gui.map.MapDecorationRendererManager" to
                 "net/neoforged/neoforge/client/gui/map/MapDecorationRendererManager.class",
-            "com.simibubi.create.AllMapDecorationTypes" to
-                "com/simibubi/create/AllMapDecorationTypes.class",
             "com.simibubi.create.content.trains.station.StationMarker" to
                 "com/simibubi/create/content/trains/station/StationMarker.class",
             "com.simibubi.create.content.trains.station.StationMapData" to

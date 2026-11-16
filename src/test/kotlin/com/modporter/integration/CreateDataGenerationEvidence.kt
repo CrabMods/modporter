@@ -1,7 +1,7 @@
 package com.modporter.integration
 
 import com.modporter.core.pipeline.PipelineResult
-import com.modporter.core.transforms.structural.CreateCopperDataMapMigration
+import com.modporter.core.transforms.build.CopperDataMapMigration
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
@@ -38,7 +38,7 @@ object CreateDataGenerationEvidence {
         result.passResults
             .asSequence()
             .flatMap { it.changes.asSequence() }
-            .any { it.ruleId == CreateCopperDataMapMigration.RULE_ID }
+            .any { it.ruleId == CopperDataMapMigration.PROVIDER_RULE_ID }
 
     fun seal(
         runId: String,
@@ -332,7 +332,7 @@ object CreateDataGenerationEvidence {
         appendLine("  \"schema\": ${quote(SCHEMA)},")
         appendLine("  \"runId\": ${quote(runId)},")
         appendLine("  \"caseId\": ${quote(caseId)},")
-        appendLine("  \"ruleId\": ${quote(CreateCopperDataMapMigration.RULE_ID)},")
+        appendLine("  \"ruleId\": ${quote(CopperDataMapMigration.PROVIDER_RULE_ID)},")
         appendLine("  \"buildRoot\": ${quote(buildRoot.toString())},")
         appendLine("  \"modDir\": ${quote(modDir.toString())},")
         appendLine("  \"runtimeLease\": ${renderRuntimeLease(runtimeLease)},")

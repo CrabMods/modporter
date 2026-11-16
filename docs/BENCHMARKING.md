@@ -217,5 +217,13 @@ If the client reaches startup readiness but the integrated-server/world-load mar
 the missing world-load markers as a failure.
 
 With `MODPORTER_BENCHMARK_LOG_CLEAN=true`, runtime gates also fail on non-allowlisted `WARN` lines.
+The strict gates judge the converted mod's logic, not the host's speed: vanilla's server overload
+notice (`Can't keep up! Is the server overloaded? Running Nms or N ticks behind`, logged by
+`MinecraftServer` on the server thread) is recorded in the audit's allowed issues as a host scheduling
+notice and does not fail a gate. The same wording from any other logger, level or thread is still a
+finding. NeoForge's `Mod 'x' took N s to run a deferred task` notice is treated the same way when
+`x` is not the converted mod and is evidenced as an external dependency (a loaded runtime mod or an
+active build dependency); the converted mod's own notice still needs matching input and converted
+`enqueueWork` fingerprints.
 `strictRealModBenchmark` enables all of those gates. A mod should only be called successfully ported
 when that strict runtime benchmark passes.

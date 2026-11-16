@@ -2,7 +2,7 @@
 002-entity-visibility-reflection-migration-ignores-comments-strings-and-text.ktfrag
 003-season-helper-reflection-migration-ignores-text-block-reflection-documen.ktfrag
 004-model-resource-location-id-migration-ignores-comments-strings-and-text-b.ktfrag
-005-migrates-same-project-static-field-reflection-to-explicit-source-accesso.ktfrag
-006-does-not-exclude-legacy-datagen-sources-from-strict-migration.ktfrag
-007-mmlib-recipe-provider-without-any-mod-id-source-reports-hard-migration-e.ktfrag
-008-portal-provider-callback-pipelines-migrate-to-direct-portal-api-through-.ktfrag
+005-updates-gradle-wrapper-below-mod-dev-minimum.ktfrag
+006-keeps-curse-maven-compile-only-integrations-in-source-set-without-exclud.ktfrag
+007-custom-stat-migration-rejects-mixed-namespaces-instead-of-choosing-first.ktfrag
+008-reflected-copper-transition-maps-migrate-to-registered-neoforge-data-map.ktfrag

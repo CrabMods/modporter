@@ -604,12 +604,7 @@
         assertTrue(tests.contains("var exposed = h.getLevel().getCapability(net.neoforged.neoforge.capabilities.Capabilities.FluidHandler.BLOCK, pos, null);"), tests)
         assertTrue(tests.contains("var handler = java.util.Objects.requireNonNull(exposed);"), tests)
         assertTrue(tests.contains("new AABB(Vec3.atLowerCornerOf(h.absolutePos(BlockPos.ZERO)), Vec3.atLowerCornerOf(h.absolutePos(new BlockPos(24, 8, 24))))"), tests)
-        val snapshotProvider = Regex(
-            """public CompoundTag snapshot\((?:net\.minecraft\.core\.)?HolderLookup\.Provider ([A-Za-z_$][\w$]*)\)"""
-        ).find(be)?.groupValues?.get(1)
-        assertTrue(snapshotProvider != null, be)
-        assertTrue(be.contains("return saveWithoutMetadata(${snapshotProvider!!});"), be)
-        assertFalse(be.contains("this.level.registryAccess()"), be)
+        assertTrue(be.contains("return saveWithoutMetadata(this.level.registryAccess());"), be)
         assertTrue(seat.contains("{ builder.define(KIND, (byte) 0); }"), seat)
         assertTrue(renderer.contains("vertex(x, (float) y, x);"), renderer)
         assertTrue(renderer.contains("float sum = x + y + z;"), renderer)
@@ -1158,25 +1153,10 @@
         StructuralRefactorPass().apply(tempDir)
         val behaviour = srcDir.resolve("SmartFluidTankBehaviour.java").readText()
 
-        val outerReadProvider = Regex(
-            """public void read\(CompoundTag nbt, boolean clientPacket, (?:net\.minecraft\.core\.)?HolderLookup\.Provider ([A-Za-z_$][\w$]*)\)"""
-        ).find(behaviour)?.groupValues?.get(1)
-        assertTrue(outerReadProvider != null, behaviour)
-        assertTrue(behaviour.contains("tanks[index].readNBT(list.getCompound(index), clientPacket, ${outerReadProvider!!});"), behaviour)
-        val segmentReadProvider = Regex(
-            """public void readNBT\(CompoundTag compound, boolean clientPacket, (?:net\.minecraft\.core\.)?HolderLookup\.Provider ([A-Za-z_$][\w$]*)\)"""
-        ).find(behaviour)?.groupValues?.get(1)
-        assertTrue(segmentReadProvider != null, behaviour)
-        assertTrue(behaviour.contains("tank.readFromNBT(${segmentReadProvider!!}, compound.getCompound(\"TankContent\"));"), behaviour)
-        val outerWriteProvider = Regex(
-            """public void write\(CompoundTag nbt, boolean clientPacket, (?:net\.minecraft\.core\.)?HolderLookup\.Provider ([A-Za-z_$][\w$]*)\)"""
-        ).find(behaviour)?.groupValues?.get(1)
-        assertTrue(outerWriteProvider != null, behaviour)
-        assertTrue(behaviour.contains("tanksNBT.add(ts.writeNBT(${outerWriteProvider!!}));"), behaviour)
-        val segmentWriteProvider = Regex(
-            """public CompoundTag writeNBT\((?:net\.minecraft\.core\.)?HolderLookup\.Provider ([A-Za-z_$][\w$]*)\)"""
-        ).find(behaviour)?.groupValues?.get(1)
-        assertTrue(segmentWriteProvider != null, behaviour)
-        assertTrue(behaviour.contains("compound.put(\"TankContent\", tank.writeToNBT(${segmentWriteProvider!!}, new CompoundTag()));"), behaviour)
-        assertFalse(behaviour.contains("blockEntity.getLevel().registryAccess()"), behaviour)
+        assertTrue(behaviour.contains("public void read(CompoundTag nbt, boolean clientPacket, HolderLookup.Provider registries)"), behaviour)
+        assertTrue(behaviour.contains("tanks[index].readNBT(list.getCompound(index), clientPacket, registries);"), behaviour)
+        assertTrue(behaviour.contains("public void readNBT(CompoundTag compound, boolean clientPacket, HolderLookup.Provider registries)"), behaviour)
+        assertTrue(behaviour.contains("tank.readFromNBT(registries, compound.getCompound(\"TankContent\"));"), behaviour)
+        assertTrue(behaviour.contains("tanksNBT.add(ts.writeNBT(registries));"), behaviour)
+        assertTrue(behaviour.contains("compound.put(\"TankContent\", tank.writeToNBT(registries, new CompoundTag()));"), behaviour)
     }

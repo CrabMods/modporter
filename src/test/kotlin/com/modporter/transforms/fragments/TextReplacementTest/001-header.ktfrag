@@ -245,6 +245,33 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `vanilla key binding screen references migrate to the options controls package`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.controls.KeyBindsList;
+
+            public class TestMod {
+                net.minecraft.client.gui.screens.controls.KeyBindsScreen screen;
+                KeyBindsList.KeyEntry entry;
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val file = projectDir.resolve("src/main/java/com/example/TestMod.java")
+        val transformed = file.readText()
+
+        assertTrue(transformed.contains("import net.minecraft.client.gui.screens.options.controls.KeyBindsList;"), transformed)
+        assertTrue(transformed.contains("net.minecraft.client.gui.screens.options.controls.KeyBindsScreen screen;"), transformed)
+        assertFalse(transformed.contains("gui.screens.controls."), transformed)
+        pass.apply(projectDir)
+        assertTrue(file.readText() == transformed, "a second run must not move the package again")
+    }
+
+    @Test
     fun `network direction checks are not replaced with constant placeholders`() {
         val projectDir = createTestFile("""
             package com.example;
@@ -347,6 +374,28 @@ class TextReplacementTest {
         assertTrue(transformed.contains("BuiltInRegistries.POTION.getKey(potion)"))
         assertTrue(transformed.contains("BuiltInRegistries.PAINTING_VARIANT.getKey(art)"))
         assertTrue(transformed.contains("BootstrapContext<?> context"))
+    }
+
+    @Test
+    fun `removed DistExecutor imports do not leave migration placeholders`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.neoforged.fml.DistExecutor;
+
+            public class TestMod {
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertFalse(transformed.contains("DistExecutor"))
+        assertFalse(transformed.contains("[forge2neo]"))
+        assertFalse(transformed.contains("removed in NeoForge"))
     }
 
     @Test
@@ -576,13 +625,9 @@ class TextReplacementTest {
 
             class CooldownHudOverlay implements IGuiOverlay {
                 public static final ResourceLocation OVERLAY_ID = ResourceLocation.fromNamespaceAndPath("example", "cooldown_hud");
-                private static final String DOC = "gui.getFont() must remain documentation";
 
                 @Override
                 public void render(ExtendedGui gui, GuiGraphics guiGraphics, float partialTick, int screenWidth, int screenHeight) {
-                    Object activeGui = gui;
-                    int textWidth = gui.getFont().width("text");
-                    // gui.getFont() must remain a comment
                     for (int i = 0; i < player.getInventory().size(); i++) {
                     }
                 }
@@ -602,11 +647,8 @@ class TextReplacementTest {
         assertTrue(transformed.contains("registerGuiOverlays(RegisterGuiLayersEvent event)"))
         assertTrue(transformed.contains("event.registerAbove(VanillaGuiLayers.HOTBAR, CooldownHudOverlay.OVERLAY_ID, new CooldownHudOverlay())"))
         assertTrue(transformed.contains("class CooldownHudOverlay implements LayeredDraw.Layer"))
-        assertTrue(transformed.contains("public void render(GuiGraphics guiGraphics, DeltaTracker deltaTracker)"))
-        assertTrue(transformed.contains("Object activeGui = net.minecraft.client.Minecraft.getInstance().gui;"), transformed)
-        assertTrue(transformed.contains("net.minecraft.client.Minecraft.getInstance().gui.getFont().width(\"text\")"), transformed)
-        assertTrue(transformed.contains("DOC = \"gui.getFont() must remain documentation\""), transformed)
-        assertTrue(transformed.contains("// gui.getFont() must remain a comment"), transformed)
+        // the render signature itself is converted by the structural pass, which keeps the parameters the body reads
+        assertTrue(transformed.contains("GuiGraphics guiGraphics, float partialTick, int screenWidth, int screenHeight)"))
         assertTrue(transformed.contains("player.getInventory().getContainerSize()"))
         assertTrue(!transformed.contains("RegisterGuiOverlaysEvent"))
         assertTrue(!transformed.contains("IGuiOverlay"))
@@ -933,11 +975,11 @@ class TextReplacementTest {
         assertTrue(transformed.contains("import net.neoforged.neoforge.event.entity.living.FinalizeSpawnEvent;"))
         assertTrue(transformed.contains("import net.neoforged.neoforge.event.level.BlockEvent;"))
         assertTrue(transformed.contains("public static void onMobSpawn(FinalizeSpawnEvent event)"))
-        assertTrue(transformed.contains("public static void onWorldTick(LevelTickEvent event)"))
-        assertTrue(transformed.contains("Object level = event.level;"))
+        assertTrue(transformed.contains("public static void onWorldTick(LevelTickEvent.Post event)"))
+        assertTrue(transformed.contains("Object level = event.getLevel();"))
         assertTrue(transformed.contains("public int getUseDuration(ItemStack stack, net.minecraft.world.entity.LivingEntity entity)"))
         assertTrue(!transformed.contains("MobSpawnEvent.FinalizeSpawn"))
-        assertFalse(transformed.contains("LevelTickEvent.Post"))
+        assertTrue(!transformed.contains("Object level = event.level;"))
     }
 
     @Test

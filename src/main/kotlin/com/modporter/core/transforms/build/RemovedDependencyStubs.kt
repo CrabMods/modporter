@@ -35,8 +35,7 @@ import kotlin.io.path.writeText
  * A dependency with no NeoForge 1.21.1 artifact leaves its bridging classes behind: the sources
  * that import its packages. The rest of the mod reaches them behind a mod-loaded check, so they
  * keep their public surface; every member that touched the dependency loses its body (returning
- * the type's default) and a member whose signature names a removed type is dropped. Create 6 did
- * exactly this in its own sources for its Dynamic Trees bridge.
+ * the type's default) and a member whose signature names a removed type is dropped.
  */
 internal object RemovedDependencyStubs {
     const val RULE_ID = "build-removed-dependency-stub"

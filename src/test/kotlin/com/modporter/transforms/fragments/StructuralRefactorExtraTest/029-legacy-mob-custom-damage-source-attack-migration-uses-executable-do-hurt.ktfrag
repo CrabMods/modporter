@@ -825,7 +825,7 @@
         assertTrue(teleporter.contains("public DimensionTransition getPortalInfo(Entity entity, ServerLevel dest)"))
         assertTrue(teleporter.contains("new DimensionTransition(level, pos, Vec3.ZERO, entity.getYRot(), entity.getXRot(), DimensionTransition.PLACE_PORTAL_TICKET)"))
         assertTrue(caller.contains("entity.canChangeDimensions(entity.level(), serverWorld)"), caller)
-        assertTrue(caller.contains("entity.changeDimension(makeReturnPortal ? new DemoTeleporter(forcedEntry).getPortalInfo(entity, serverWorld) : new NoReturnTeleporter().getPortalInfo(entity, serverWorld))"), caller)
+        assertTrue(caller.contains("entity.changeDimension(makeReturnPortal ? new DemoTeleporter(forcedEntry).getPortalInfo(entity, serverWorld) : new NoReturnTeleporter().getPortalInfo(entity, serverWorld))"))
         assertTrue(caller.contains("serverPlayer.changeDimension(new DemoTeleporter(false).getPortalInfo(serverPlayer, serverWorld))"), caller)
         assertTrue(!caller.contains("entity.canChangeDimensions())"))
         assertTrue(!caller.contains("changeDimension(serverWorld,"))

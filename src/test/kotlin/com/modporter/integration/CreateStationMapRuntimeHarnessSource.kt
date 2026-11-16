@@ -28,7 +28,6 @@ internal object CreateStationMapRuntimeHarnessSource {
             import com.mojang.blaze3d.platform.NativeImage;
             import com.mojang.blaze3d.systems.RenderSystem;
             import com.mojang.blaze3d.vertex.PoseStack;
-            import com.simibubi.create.AllMapDecorationTypes;
             import com.simibubi.create.content.trains.station.StationMapData;
             import com.simibubi.create.content.trains.station.StationMarker;
             import io.netty.buffer.ByteBuf;
@@ -146,9 +145,8 @@ internal object CreateStationMapRuntimeHarnessSource {
                     "MINECRAFT_MOD_TEST_SESSION_ID";
                 private static final String EXPECTED_MINECRAFT_VERSION = "1.21.1";
                 private static final String EXPECTED_NEOFORGE_VERSION = "21.1.230";
-                private static final String EXPECTED_RENDERER =
-                    "com.simibubi.create.foundation.map.StationMapDecorationRenderer";
-                private static final String STATION_TYPE_KEY = "create:station";
+                /** The converted mod's namespace: its station decoration type is registered under it. */
+                private static final String STATION_TYPE_NAMESPACE = "$modId";
                 private static final int GLOBAL_TIMEOUT_TICKS = 2400;
                 private static final int STAGE_TIMEOUT_TICKS = 400;
                 private static final int CLEANUP_FENCE_TICKS = 3;
@@ -325,24 +323,31 @@ internal object CreateStationMapRuntimeHarnessSource {
                                 @SuppressWarnings("unchecked")
                                 Map<MapDecorationType, IMapDecorationRenderer> renderers =
                                     (Map<MapDecorationType, IMapDecorationRenderer>) field.get(event);
-                                stationType =
-                                    AllMapDecorationTypes.STATION_MAP_DECORATION.value();
-                                ResourceLocation key =
-                                    BuiltInRegistries.MAP_DECORATION_TYPE.getKey(stationType);
-                                if (key == null || !STATION_TYPE_KEY.equals(key.toString())) {
+                                // The station decoration type is the mod's one map decoration
+                                // type with a renderer; the scenario checks that the decoration a
+                                // station marker adds carries exactly this type.
+                                List<ResourceLocation> modTypes = new ArrayList<>();
+                                for (MapDecorationType candidate : renderers.keySet()) {
+                                    ResourceLocation key =
+                                        BuiltInRegistries.MAP_DECORATION_TYPE.getKey(candidate);
+                                    if (key != null
+                                        && STATION_TYPE_NAMESPACE.equals(key.getNamespace())) {
+                                        modTypes.add(key);
+                                        stationType = candidate;
+                                    }
+                                }
+                                if (modTypes.size() != 1) {
+                                    stationType = null;
                                     throw new IllegalStateException(
-                                        "unexpected station decoration type key: " + key
+                                        modTypes.isEmpty()
+                                            ? "production station renderer was not registered"
+                                            : "more than one mod map decoration renderer: " + modTypes
                                     );
                                 }
                                 IMapDecorationRenderer existing = renderers.get(stationType);
-                                if (existing == null) {
+                                if (existing.getClass().getModule() != StationMarker.class.getModule()) {
                                     throw new IllegalStateException(
-                                        "production station renderer was not registered"
-                                    );
-                                }
-                                if (!EXPECTED_RENDERER.equals(existing.getClass().getName())) {
-                                    throw new IllegalStateException(
-                                        "unexpected production station renderer: "
+                                        "station renderer is not part of the converted mod: "
                                             + existing.getClass().getName()
                                     );
                                 }
@@ -1860,8 +1865,9 @@ internal object CreateStationMapRuntimeHarnessSource {
                         );
                     }
                     JsonObject result = decorationJson(stations.get(0));
-                    if (!STATION_TYPE_KEY.equals(
-                            result.get("typeKey").getAsString())
+                    if (!String.valueOf(
+                            BuiltInRegistries.MAP_DECORATION_TYPE.getKey(stationType))
+                            .equals(result.get("typeKey").getAsString())
                         || result.get("rotation").getAsInt() != 0
                         || !expectedName.equals(
                             result.get("name").getAsString())) {
@@ -2304,10 +2310,6 @@ internal object CreateStationMapRuntimeHarnessSource {
                         MapDecorationRendererManager.class
                     );
                     classes.put(
-                        AllMapDecorationTypes.class.getName(),
-                        AllMapDecorationTypes.class
-                    );
-                    classes.put(
                         StationMarker.class.getName(),
                         StationMarker.class
                     );
@@ -2315,10 +2317,12 @@ internal object CreateStationMapRuntimeHarnessSource {
                         StationMapData.class.getName(),
                         StationMapData.class
                     );
-                    classes.put(
-                        EXPECTED_RENDERER,
-                        Class.forName(EXPECTED_RENDERER)
-                    );
+                    if (productionRenderer != null) {
+                        classes.put(
+                            productionRenderer.getClass().getName(),
+                            productionRenderer.getClass()
+                        );
+                    }
                     classes.put(
                         ModPorterStrictStationMapHarness.class.getName(),
                         ModPorterStrictStationMapHarness.class

@@ -887,9 +887,7 @@ class MappingCompletenessTest {
             "getMethod" to Regex("""\.getMethod\s*\("""),
             "setAccessible" to Regex("""\bsetAccessible\s*\(""")
         )
-        val admittedLegacyPreimages = mapOf(
-            "src/main/kotlin/com/modporter/core/transforms/structural/CreateCommonMetalTagNamespaceMigration.kt" to ("OBSOLETE_TODO" to Regex("private\\s+const\\s+val\\s+OBSOLETE_TODO\\s*=\\s*\"TODO: change forge to c in 1\\.21\"")),
-            "src/main/kotlin/com/modporter/core/transforms/structural/CreateCopperDataMapMigration.kt" to ("LEGACY_INJECT_BODY" to Regex("private\\s+const\\s+val\\s+LEGACY_INJECT_BODY\\s*=\\s*\"\"\".*?\"\"\"", RegexOption.DOT_MATCHES_ALL))
+        val admittedLegacyPreimages = mapOf<String, Pair<String, Regex>>(
         )
         val offenders = Files.walk(projectRoot.resolve("src/main/kotlin")).use { stream ->
             stream

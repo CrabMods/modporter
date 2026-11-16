@@ -217,10 +217,7 @@ internal fun StructuralRefactorPass.migrateLegacyMapDecorationCompositionSource(
     } else {
         result = migrateMapDecorationSubclassComposition(result)
     }
-    result = migrateCustomRenderedMapDecorationInterface(result)
     result = migrateMapDecorationTypedCreations(result)
-    result = migrateCreateMapDecorationPacketAssociation(result)
-    result = migrateCreateMapRendererMixin(result)
     return result
 }
 
@@ -265,10 +262,10 @@ private fun StructuralRefactorPass.migrateMapDecorationSubclassComposition(
         }
 
         val className = match.groupValues[2]
-        val interfaces = match.groupValues[3]
-        val customRendered = Regex("""\bCustomRenderedMapDecoration\b""")
-            .containsMatchIn(interfaces)
         val body = result.substring(openBrace + 1, closeBrace)
+        val bodyExecutable = executable.substring(openBrace + 1, closeBrace)
+        val customRendered = LEGACY_CUSTOM_RENDER.findAll(bodyExecutable)
+            .any { mapDecorationBraceDepth(bodyExecutable, it.range.first) == 0 }
         val rewritten = rewriteLegacyMapDecorationSubclassBody(
             className,
             body,
@@ -388,6 +385,7 @@ private fun StructuralRefactorPass.rewriteLegacyMapDecorationSubclassBody(
         .filter { mapDecorationBraceDepth(executable, it.range.first) == 0 }
         .toList()
     if (constructors.isEmpty()) return null
+    if (customRendered && !rebuildableFromMapDecoration(className, body)) return null
 
     val edits = mutableListOf<Pair<IntRange, String>>()
     var needsMapDecorationTypes = false
@@ -464,18 +462,16 @@ private fun StructuralRefactorPass.rewriteLegacyMapDecorationSubclassBody(
     rewritten = replaceExecutableRegex(rewritten, Regex("""\bsuper\s*\.\s*hashCode\s*\(\s*\)""")) {
         "this.modporter\$legacyHashCode()"
     }
-    if (!customRendered) {
-        rewritten = replaceExecutableRegex(
-            rewritten,
-            Regex(
-                """(?m)^([ \t]*)@Override\s*\r?\n""" +
-                    // other annotations (`@OnlyIn(Dist.CLIENT)`) may sit between
-                    """((?:[ \t]*@[A-Za-z_$][\w$.]*(?:\([^)]*\))?\s*\r?\n)*""" +
-                    """[ \t]*(?:(?:public|protected|private|final|synchronized)\s+)*""" +
-                    """boolean\s+render\s*\(\s*int\s+[A-Za-z_$][\w$]*\s*\))"""
-            )
-        ) { match -> "${match.groupValues[1]}${match.groupValues[2].trimStart(' ', '\t')}" }
-    }
+    rewritten = replaceExecutableRegex(
+        rewritten,
+        Regex(
+            """(?m)^([ \t]*)@Override\s*\r?\n""" +
+                // other annotations (`@OnlyIn(Dist.CLIENT)`) may sit between
+                """((?:[ \t]*@[A-Za-z_$][\w$.]*(?:\([^)]*\))?\s*\r?\n)*""" +
+                """[ \t]*(?:(?:public|protected|private|final|synchronized)\s+)*""" +
+                """boolean\s+(?:render\s*\(\s*int\s+[A-Za-z_$][\w$]*\s*\)|renderOnFrame\s*\(\s*\)))"""
+        )
+    ) { match -> "${match.groupValues[1]}${match.groupValues[2].trimStart(' ', '\t')}" }
     val newline = if (body.contains("\r\n")) "\r\n" else "\n"
     val memberIndent = body.mapDecorationMemberIndent()
     val fields = listOf(
@@ -576,84 +572,35 @@ private fun StructuralRefactorPass.rewriteLegacyMapDecorationSubclassBody(
             }
         """.trimIndent()
     }
-    val decoration = "new MapDecoration(type(), x(), y(), rot(), name())"
-    val returned = if (customRendered) {
-        "CustomRenderedMapDecoration.associate($decoration, this)"
-    } else {
-        decoration
-    }
     methods += """
         public MapDecoration asMapDecoration() {
-            return $returned;
+            return new MapDecoration(type(), x(), y(), rot(), name());
         }
     """.trimIndent()
+    if (customRendered) {
+        // 1.21.1 hands a renderer the MapDecoration record; the class's own render code runs on the
+        // instance that record describes (it holds no state beyond the record's five values)
+        methods += """
+            private $className(MapDecoration modporter${'$'}decoration) {
+                this.modporter${'$'}type = modporter${'$'}decoration.type();
+                this.modporter${'$'}x = modporter${'$'}decoration.x();
+                this.modporter${'$'}y = modporter${'$'}decoration.y();
+                this.modporter${'$'}rot = modporter${'$'}decoration.rot();
+                this.modporter${'$'}name = modporter${'$'}decoration.name();
+            }
+        """.trimIndent()
+        methods += """
+            public static $className $FROM_DECORATION(MapDecoration decoration) {
+                return new $className(decoration);
+            }
+        """.trimIndent()
+    }
 
     val methodBlock = methods.joinToString("$newline$newline") { method ->
         method.lineSequence().joinToString(newline) { "$memberIndent$it" }
     }
     rewritten = rewritten.trimEnd() + newline + newline + methodBlock + newline
     return LegacyMapDecorationSubclassBody(rewritten, needsMapDecorationTypes)
-}
-
-private fun StructuralRefactorPass.migrateCustomRenderedMapDecorationInterface(
-    source: String
-): String {
-    val executable = maskJavaCommentsAndLiterals(source)
-    if (!executable.contains("interface CustomRenderedMapDecoration") ||
-        executable.contains("Map<MapDecoration, CustomRenderedMapDecoration> ASSOCIATED")
-    ) {
-        return source
-    }
-    val declaration = Regex(
-        """\binterface\s+CustomRenderedMapDecoration(?:\s+extends\s+[^{]+)?\s*\{"""
-    ).find(executable) ?: return source
-    val openBrace = executable.indexOf('{', declaration.range.first)
-    val closeBrace = if (openBrace >= 0) findMatchingBrace(executable, openBrace) else -1
-    if (closeBrace <= openBrace) return source
-    val bodyExecutable = executable.substring(openBrace + 1, closeBrace)
-    val render = Regex("""\bvoid\s+render\s*\(""").find(bodyExecutable) ?: return source
-    val renderOpen = bodyExecutable.indexOf('(', render.range.first)
-    val renderClose = if (renderOpen >= 0) findMatchingParen(bodyExecutable, renderOpen) else -1
-    if (renderClose < 0 ||
-        splitTopLevelJavaArgs(
-            source.substring(openBrace + 1 + renderOpen + 1, openBrace + 1 + renderClose)
-        ).size != 6
-    ) {
-        return source
-    }
-
-    val newline = if (source.contains("\r\n")) "\r\n" else "\n"
-    val indent = source.substring(openBrace + 1, closeBrace).mapDecorationMemberIndent()
-    val additions = """
-        Map<MapDecoration, CustomRenderedMapDecoration> ASSOCIATED =
-            Collections.synchronizedMap(new WeakHashMap<>());
-
-        boolean renderOnFrame();
-
-        boolean render(int index);
-
-        static MapDecoration associate(
-                MapDecoration decoration,
-                CustomRenderedMapDecoration renderer) {
-            ASSOCIATED.put(decoration, renderer);
-            return decoration;
-        }
-
-        static CustomRenderedMapDecoration find(MapDecoration decoration) {
-            return ASSOCIATED.get(decoration);
-        }
-    """.trimIndent().lineSequence().joinToString(newline) { "$indent$it" }
-    var result = source.substring(0, closeBrace) +
-        newline + newline + additions + newline +
-        source.substring(closeBrace)
-    result = addExecutableImportIfMissing(result, "java.util.Collections")
-    result = addExecutableImportIfMissing(result, "java.util.Map")
-    result = addExecutableImportIfMissing(result, "java.util.WeakHashMap")
-    result = addExecutableImportIfMissing(
-        result,
-        "net.minecraft.world.level.saveddata.maps.MapDecoration"
-    )
-    return result
 }
 
 private fun StructuralRefactorPass.migrateMapDecorationTypedCreations(
@@ -700,79 +647,6 @@ private fun StructuralRefactorPass.migrateMapDecorationTypedCreations(
     return result
 }
 
-private fun StructuralRefactorPass.migrateCreateMapDecorationPacketAssociation(
-    source: String
-): String {
-    val executable = maskJavaCommentsAndLiterals(source)
-    val typing = SourceValueTypes(this, source)
-    if (!executable.contains("List<MapDecoration>") ||
-        !typing.isTypeName("MapDecoration", MAP_DECORATION)
-    ) {
-        return source
-    }
-    val rendererType = projectValueFacts.types
-        .filter { it.substringAfterLast('.') == "CustomRenderedMapDecoration" }
-        .singleOrNull()
-        ?: return source
-    val wrapperTypes = mutableSetOf<String>()
-    val edits = Regex(
-        """\b([A-Za-z_$][\w$]*)\s+instanceof\s+""" +
-            """((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*)\b"""
-    ).findAll(executable).mapNotNull { match ->
-        val value = match.groupValues[1]
-        if (typing.typeOf(value, match.range.first) != MAP_DECORATION) {
-            return@mapNotNull null
-        }
-        val sourceType = match.groupValues[2]
-        val canonicalType = typing.typeOf("new $sourceType()", match.range.first)
-            ?: return@mapNotNull null
-        if (!hasProjectParent(canonicalType, MAP_DECORATION)) return@mapNotNull null
-        wrapperTypes += sourceType
-        match.range to "CustomRenderedMapDecoration.find($value) != null"
-    }.toList()
-    if (edits.isEmpty()) return source
-
-    var result = applyStringEdits(source, edits)
-    wrapperTypes.forEach { wrapperType ->
-        result = appendAsMapDecorationToFactoryCall(result, "$wrapperType.from")
-    }
-    return addExecutableImportIfMissing(
-        result,
-        rendererType
-    )
-}
-
-private fun StructuralRefactorPass.appendAsMapDecorationToFactoryCall(
-    source: String,
-    factory: String
-): String {
-    var result = source
-    var cursor = 0
-    val token = "$factory("
-    while (true) {
-        val executable = maskJavaCommentsAndLiterals(result)
-        val start = executable.indexOf(token, cursor)
-        if (start < 0) break
-        val openParen = start + token.length - 1
-        val closeParen = findMatchingParen(executable, openParen)
-        if (closeParen < 0) {
-            cursor = start + token.length
-            continue
-        }
-        if (executable.substring(closeParen + 1).trimStart()
-                .startsWith(".asMapDecoration()")
-        ) {
-            cursor = closeParen + 1
-            continue
-        }
-        result = result.substring(0, closeParen + 1) +
-            ".asMapDecoration()" +
-            result.substring(closeParen + 1)
-        cursor = closeParen + ".asMapDecoration()".length + 1
-    }
-    return result
-}
-
 private fun StructuralRefactorPass.hasProjectParent(
     type: String,
     expectedParent: String
@@ -784,185 +658,6 @@ private fun StructuralRefactorPass.hasProjectParent(
         if (current == expectedParent) return true
     }
     return false
-}
-
-private fun StructuralRefactorPass.migrateCreateMapRendererMixin(source: String): String {
-    val executable = maskJavaCommentsAndLiterals(source)
-    if (!executable.contains("@Mixin") || executable.contains("@WrapOperation")) return source
-    val parser = JavaParser(
-        ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
-    )
-    val unit = parser.parse(source).result.orElse(null) ?: return source
-    val lineStarts = buildList {
-        add(0)
-        source.forEachIndexed { index, character ->
-            if (character == '\n') add(index + 1)
-        }
-    }
-    fun annotationStrings(node: Node, annotationName: String): Set<String> =
-        node.findAll(com.github.javaparser.ast.expr.AnnotationExpr::class.java)
-            .filter { it.nameAsString == annotationName }
-            .flatMap { annotation ->
-                annotation.findAll(StringLiteralExpr::class.java).map { it.value }
-            }
-            .toSet()
-    fun lineRange(node: Node): IntRange? = node.range.map {
-        val start = lineStarts[it.begin.line - 1]
-        var endExclusive =
-            lineStarts[it.end.line - 1] + it.end.column
-        if (source.getOrNull(endExclusive) == '\r') endExclusive++
-        if (source.getOrNull(endExclusive) == '\n') endExclusive++
-        start until endExclusive
-    }.orElse(null)
-    val mixinClass = unit.findAll(ClassOrInterfaceDeclaration::class.java)
-        .filter { declaration ->
-            declaration.annotations.any { annotation ->
-                annotation.nameAsString == "Mixin" &&
-                    annotation.findAll(StringLiteralExpr::class.java)
-                        .any { it.value == CREATE_MAP_RENDERER_MIXIN_TARGET }
-            }
-        }
-        .singleOrNull()
-        ?: return source
-    if (mixinClass.findAll(com.github.javaparser.ast.expr.AnnotationExpr::class.java)
-            .any { it.nameAsString == "WrapOperation" }
-    ) {
-        return source
-    }
-    fun legacyMethod(target: String): MethodDeclaration? =
-        mixinClass.methods.filter { method ->
-            val groupStrings = annotationStrings(method, "Group")
-            val injectStrings = annotationStrings(method, "Inject")
-            val methodRange = lineRange(method) ?: return@filter false
-            val methodExecutable = maskJavaCommentsAndLiterals(
-                source.substring(methodRange.first, methodRange.last + 1)
-            )
-            CREATE_MAP_RENDERER_GROUP in groupStrings &&
-                CREATE_MAP_RENDERER_DRAW_METHOD in injectStrings &&
-                target in injectStrings &&
-                methodExecutable.contains("instanceof CustomRenderedMapDecoration") &&
-                methodExecutable.contains(".render(")
-        }.singleOrNull()
-
-    val vanillaMethod = legacyMethod(CREATE_LEGACY_RENDER_TARGET) ?: return source
-    val optifineMethod = legacyMethod(CREATE_OPTIFINE_RENDER_TARGET) ?: return source
-    val vanilla = lineRange(vanillaMethod) ?: return source
-    val optifine = lineRange(optifineMethod) ?: return source
-    if (vanilla.first <= optifine.last && optifine.first <= vanilla.last) return source
-
-    var result = applyStringEdits(
-        source,
-        listOf(vanilla to "", optifine to "")
-    )
-    val reparsed = parser.parse(result).result.orElse(null) ?: return source
-    val resultLineStarts = buildList {
-        add(0)
-        result.forEachIndexed { index, character ->
-            if (character == '\n') add(index + 1)
-        }
-    }
-    val migratedMixinClass = reparsed.findAll(ClassOrInterfaceDeclaration::class.java)
-        .filter { declaration ->
-            declaration.annotations.any { annotation ->
-                annotation.nameAsString == "Mixin" &&
-                    annotation.findAll(StringLiteralExpr::class.java)
-                        .any { it.value == CREATE_MAP_RENDERER_MIXIN_TARGET }
-            }
-        }
-        .singleOrNull()
-        ?: return source
-    val classClose = migratedMixinClass.range.map {
-        resultLineStarts[it.end.line - 1] + it.end.column - 1
-    }.orElse(-1)
-    if (classClose < 0 || result.getOrNull(classClose) != '}') return source
-    val newline = if (source.contains("\r\n")) "\r\n" else "\n"
-    val methods = """
-        @WrapOperation(
-            method = "draw(Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;ZI)V",
-            at = @At(
-                value = "INVOKE",
-                target = "Lnet/minecraft/world/level/saveddata/maps/MapDecoration;renderOnFrame()Z"
-            )
-        )
-        private boolean create${'$'}renderOnFrame(
-                MapDecoration decoration,
-                Operation<Boolean> original) {
-            CustomRenderedMapDecoration renderer =
-                CustomRenderedMapDecoration.find(decoration);
-            return renderer != null
-                ? renderer.renderOnFrame()
-                : original.call(decoration);
-        }
-
-        @WrapOperation(
-            method = "draw(Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;ZI)V",
-            at = @At(
-                value = "INVOKE",
-                target = "Lnet/neoforged/neoforge/client/gui/map/MapDecorationRendererManager;render(Lnet/minecraft/world/level/saveddata/maps/MapDecoration;Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;Lnet/minecraft/world/level/saveddata/maps/MapItemSavedData;Lnet/minecraft/client/resources/MapDecorationTextureManager;ZII)Z"
-            )
-        )
-        private boolean create${'$'}renderCustomDecoration(
-                MapDecoration decoration,
-                PoseStack poseStack,
-                MultiBufferSource bufferSource,
-                MapItemSavedData mapData,
-                MapDecorationTextureManager decorationTextures,
-                boolean active,
-                int packedLight,
-                int index,
-                Operation<Boolean> original) {
-            CustomRenderedMapDecoration renderer =
-                CustomRenderedMapDecoration.find(decoration);
-            if (renderer != null) {
-                renderer.render(
-                    poseStack,
-                    bufferSource,
-                    active,
-                    packedLight,
-                    mapData,
-                    index);
-                return renderer.render(index);
-            }
-            return original.call(
-                decoration,
-                poseStack,
-                bufferSource,
-                mapData,
-                decorationTextures,
-                active,
-                packedLight,
-                index);
-        }
-    """.trimIndent().lineSequence().joinToString(newline) { "\t$it" }
-    result = result.substring(0, classClose) +
-        newline + newline + methods + newline +
-        result.substring(classClose)
-    result = removeUnusedSimpleImports(
-        result,
-        listOf(
-            "java.util.Iterator",
-            "org.joml.Matrix4f",
-            "org.objectweb.asm.Opcodes",
-            "org.spongepowered.asm.mixin.injection.Group",
-            "org.spongepowered.asm.mixin.injection.Inject",
-            "org.spongepowered.asm.mixin.injection.callback.CallbackInfo",
-            "org.spongepowered.asm.mixin.injection.callback.LocalCapture",
-            "com.mojang.blaze3d.vertex.VertexConsumer"
-        )
-    )
-    result = addExecutableImportIfMissing(
-        result,
-        "com.llamalad7.mixinextras.injector.wrapoperation.Operation"
-    )
-    result = addExecutableImportIfMissing(
-        result,
-        "com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation"
-    )
-    result = addExecutableImportIfMissing(
-        result,
-        "net.minecraft.client.resources.MapDecorationTextureManager"
-    )
-    return result
 }
 
 private fun hasTopLevelMapDecorationMethod(executableBody: String, name: String): Boolean =
@@ -1008,15 +703,31 @@ private const val MINECRAFT_COMPONENT =
     "net.minecraft.network.chat.Component"
 private const val JAVA_OPTIONAL =
     "java.util.Optional"
-private const val CREATE_MAP_RENDERER_MIXIN_TARGET =
-    "net.minecraft.client.gui.MapRenderer\$MapInstance"
-private const val CREATE_MAP_RENDERER_GROUP =
-    "custom_decoration_rendering"
-private const val CREATE_MAP_RENDERER_DRAW_METHOD =
-    "draw(Lcom/mojang/blaze3d/vertex/PoseStack;" +
-        "Lnet/minecraft/client/renderer/MultiBufferSource;ZI)V"
-private const val CREATE_LEGACY_RENDER_TARGET =
-    "Lnet/minecraft/world/level/saveddata/maps/MapDecoration;render(I)Z"
-private const val CREATE_OPTIFINE_RENDER_TARGET =
-    "net/optifine/reflect/Reflector.ForgeMapDecoration_render:" +
-        "Lnet/optifine/reflect/ReflectorMethod;"
+
+/** The factory a custom-rendered decoration class gains: the instance a 1.21.1 MapDecoration record describes. */
+internal const val FROM_DECORATION = "modporter\$fromDecoration"
+
+/**
+ * 1.20.1 custom map decoration rendering: `void render(PoseStack, MultiBufferSource, boolean active,
+ * int packedLight, MapItemSavedData, int index)`, the call a MapRenderer mixin made for each decoration.
+ */
+internal val LEGACY_CUSTOM_RENDER = Regex(
+    """\bvoid\s+render\s*\(\s*(?:final\s+)?(?:com\.mojang\.blaze3d\.vertex\.)?PoseStack\s+[A-Za-z_$][\w$]*\s*,""" +
+        """\s*(?:final\s+)?(?:net\.minecraft\.client\.renderer\.)?MultiBufferSource\s+[A-Za-z_$][\w$]*\s*,""" +
+        """\s*(?:final\s+)?boolean\s+[A-Za-z_$][\w$]*\s*,\s*(?:final\s+)?int\s+[A-Za-z_$][\w$]*\s*,""" +
+        """\s*(?:final\s+)?(?:net\.minecraft\.world\.level\.saveddata\.maps\.)?MapItemSavedData\s+[A-Za-z_$][\w$]*\s*,""" +
+        """\s*(?:final\s+)?int\s+[A-Za-z_$][\w$]*\s*\)"""
+)
+
+/**
+ * Whether an instance of [className] is fully described by the five MapDecoration values: it declares
+ * no instance fields of its own, and no one-argument constructor the record constructor would overload.
+ */
+private fun rebuildableFromMapDecoration(className: String, body: String): Boolean {
+    val parsed = JavaParser(ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE))
+        .parse("class $className {\n$body\n}")
+    val type = parsed.result.orElse(null)?.types?.singleOrNull() ?: return false
+    if (!parsed.isSuccessful) return false
+    if (type.fields.any { !it.isStatic }) return false
+    return type.constructors.none { it.parameters.size == 1 }
+}

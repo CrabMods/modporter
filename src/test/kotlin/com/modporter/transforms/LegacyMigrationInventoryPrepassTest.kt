@@ -200,16 +200,15 @@ class LegacyMigrationInventoryPrepassTest {
     }
 
     @Test
-    fun `filtered manager override alone activates model-data inventory`() {
+    fun `getter wrapper manager override alone activates model-data inventory`() {
         java(
-            "com/simibubi/create/content/decoration/copycat/" +
-                "FilteredBlockAndTintGetter.java",
+            "example/decor/MaskedBlockAndTintGetter.java",
             """
-            package com.simibubi.create.content.decoration.copycat;
+            package example.decor;
             import org.jetbrains.annotations.Nullable;
             import net.minecraft.world.level.BlockAndTintGetter;
             import net.minecraftforge.client.model.data.ModelDataManager;
-            public final class FilteredBlockAndTintGetter
+            public final class MaskedBlockAndTintGetter
                     implements BlockAndTintGetter {
                 private final BlockAndTintGetter wrapped = null;
                 @Override
@@ -227,16 +226,16 @@ class LegacyMigrationInventoryPrepassTest {
     }
 
     @Test
-    fun `copycat manager query alone activates model-data inventory`() {
+    fun `getter manager query alone activates model-data inventory`() {
         java(
-            "com/simibubi/create/content/decoration/copycat/CopycatBlock.java",
+            "example/decor/MimicBlock.java",
             """
-            package com.simibubi.create.content.decoration.copycat;
+            package example.decor;
             import net.minecraft.core.BlockPos;
             import net.minecraft.core.Direction;
             import net.minecraft.world.level.BlockAndTintGetter;
             import net.minecraft.world.level.block.state.BlockState;
-            public abstract class CopycatBlock {
+            public abstract class MimicBlock {
                 @Override
                 public BlockState getAppearance(
                     BlockState state,
@@ -299,6 +298,31 @@ class LegacyMigrationInventoryPrepassTest {
     }
 
     @Test
+    fun `Level manager queries are target API and do not start inventory`() {
+        java(
+            "example/LevelQueries.java",
+            """
+            package example;
+            import net.minecraft.client.multiplayer.ClientLevel;
+            import net.minecraft.world.level.Level;
+            final class LevelQueries {
+                Object server(Level level) {
+                    return level.getModelDataManager();
+                }
+                Object client(ClientLevel level) {
+                    return level.getModelDataManager();
+                }
+            }
+            """.trimIndent()
+        )
+
+        val state = ParsedLegacyMigrationSurfaceDetector.detect(directory, directory)
+
+        assertTrue(state.legacyCandidates.isEmpty())
+        assertFalse(state.requiresInventory)
+    }
+
+    @Test
     fun `generated model-data helper is a completed-family rerun marker`() {
         java(
             "com/modporter/generated/example/compat/LegacyModelDataManagers.java",
@@ -323,12 +347,13 @@ class LegacyMigrationInventoryPrepassTest {
     }
 
     @Test
-    fun `malformed exact copycat manager source fails closed`() {
+    fun `malformed block getter manager source fails closed`() {
         val source = java(
-            "com/simibubi/create/content/decoration/copycat/CopycatBlock.java",
+            "example/decor/MimicBlock.java",
             """
-            package com.simibubi.create.content.decoration.copycat;
-            public class CopycatBlock {
+            package example.decor;
+            import net.minecraft.world.level.BlockAndTintGetter;
+            public class MimicBlock {
                 Object getModelDataManager( {
                 }
             }

@@ -83,20 +83,22 @@ ${bodyIndent}guiGraphics.setColor(1.0F, 1.0F, 1.0F, 1.0F)"""
     }
     result = addExecutableImportIfMissing(result, "net.minecraft.client.DeltaTracker")
     result = addExecutableImportIfMissing(result, "com.mojang.blaze3d.systems.RenderSystem")
-    return removeObsoleteCreateCardboardOverlayGuiBase(result)
+    return removeObsoleteClientExtensionGuiBase(result)
 }
 
 /**
- * The legacy Create item callback is invoked by NeoForge's early client-extension scan. Once the
- * overlay renderer above no longer needs Gui state, retaining a Gui superclass constructs a second
- * ChatComponent before Minecraft.commandHistory exists. Remove that base only for the exact,
- * project-inventoried Create overlay shape.
+ * NeoForge collects `IClientItemExtensions` instances in its early client-extension scan, before
+ * `Minecraft.commandHistory` exists, and a `Gui` superclass constructs a second ChatComponent
+ * there. Once the overlay renderer above no longer reads Gui state, a client item extension whose
+ * only reason to extend `Gui` was that state drops the base: a public, non-abstract top-level
+ * class that the project declares, that no project class extends, whose sole constructor only
+ * calls `super(Minecraft.getInstance())`, with no instance fields, and whose single instance
+ * method is the migrated `renderHelmetOverlay` that touches neither inherited members nor `this`.
  */
-private fun StructuralRefactorPass.removeObsoleteCreateCardboardOverlayGuiBase(
+private fun StructuralRefactorPass.removeObsoleteClientExtensionGuiBase(
     source: String
 ): String {
-    if (!source.contains(CARDBOARD_OVERLAY_SIMPLE) ||
-        !source.contains("IClientItemExtensions") ||
+    if (!source.contains("IClientItemExtensions") ||
         !source.contains("extends Gui")
     ) {
         return source
@@ -108,12 +110,9 @@ private fun StructuralRefactorPass.removeObsoleteCreateCardboardOverlayGuiBase(
     val parsed = parser.parse(source)
     if (!parsed.isSuccessful) return source
     val unit = parsed.result.orElse(null) ?: return source
-    if (unit.packageDeclaration.map { it.nameAsString }.orElse("") != CARDBOARD_OVERLAY_PACKAGE) {
-        return source
-    }
     val owner = unit.types.singleOrNull() as? ClassOrInterfaceDeclaration ?: return source
-    if (owner.nameAsString != CARDBOARD_OVERLAY_SIMPLE ||
-        owner.isInterface ||
+    val canonical = owner.fullyQualifiedName.orElse(null) ?: return source
+    if (owner.isInterface ||
         owner.isAbstract ||
         !owner.isPublic ||
         owner.typeParameters.isNotEmpty() ||
@@ -130,8 +129,8 @@ private fun StructuralRefactorPass.removeObsoleteCreateCardboardOverlayGuiBase(
     ) {
         return source
     }
-    if (CARDBOARD_OVERLAY_CANONICAL !in projectValueFacts.types ||
-        projectValueFacts.hasDescendantOf(CARDBOARD_OVERLAY_CANONICAL)
+    if (canonical !in projectValueFacts.types ||
+        projectValueFacts.hasDescendantOf(canonical)
     ) {
         return source
     }
@@ -233,11 +232,6 @@ private fun ClassOrInterfaceDeclaration.hasUnresolvedInstanceValueName(): Boolea
     }
 }
 
-private const val CARDBOARD_OVERLAY_PACKAGE =
-    "com.simibubi.create.content.equipment.armor"
-private const val CARDBOARD_OVERLAY_SIMPLE = "CardboardArmorStealthOverlay"
-private const val CARDBOARD_OVERLAY_CANONICAL =
-    "$CARDBOARD_OVERLAY_PACKAGE.$CARDBOARD_OVERLAY_SIMPLE"
 private const val GUI = "net.minecraft.client.gui.Gui"
 private const val GUI_GRAPHICS = "net.minecraft.client.gui.GuiGraphics"
 private const val MINECRAFT = "net.minecraft.client.Minecraft"

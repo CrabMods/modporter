@@ -350,7 +350,6 @@ class RegistryAndPacketSurfacesTest {
                 }
 
                 public void print(String json) {
-                    java.util.Objects.requireNonNull(sender);
                     sender.sendSystemMessage(Component.Serializer.fromJson(json));
                 }
             }
@@ -359,7 +358,7 @@ class RegistryAndPacketSurfacesTest {
         StructuralRefactorPass().apply(tempDir)
         val sender = read("CommandSender")
 
-        assertTrue(sender.contains("Component.Serializer.fromJson(json, sender.registryAccess())"), sender)
+        assertTrue(sender.contains("Component.Serializer.fromJson(modporter\$legacyComponentJson(json, false), sender.registryAccess())"), sender)
     }
 
     @Test

@@ -15,14 +15,14 @@ class FluidIngredientAmountsTest {
     @TempDir lateinit var directory: Path
 
     @Test
-    fun `external recipe lists and explicit native sized values use the native accessor`() {
+    fun `declared sized lists and explicit native sized values use the native accessor`() {
         val source = """
             package example;
-            import com.simibubi.create.content.kinetics.mixer.MixingRecipe;
+            import java.util.List;
             import net.neoforged.neoforge.fluids.crafting.SizedFluidIngredient;
             class User {
-                int amount(MixingRecipe mixing, SizedFluidIngredient sized) {
-                    var fluids = mixing.getFluidIngredients();
+                List<SizedFluidIngredient> fluids;
+                int amount(SizedFluidIngredient sized) {
                     return fluids.get(0).getRequiredAmount() + sized.getRequiredAmount();
                 }
             }
@@ -34,11 +34,78 @@ class FluidIngredientAmountsTest {
     }
 
     @Test
-    fun `source owned recipe and fluid ingredient classes retain their own getter`() {
-        val model = directory.resolve("src/main/java/com/simibubi/create/content/processing/recipe/ProcessingRecipe.java")
+    fun `var local initialized from a source declared sized list uses the native accessor`() {
+        val model = directory.resolve("src/main/java/example/lib/Mixing.java")
         model.parent.createDirectories()
         model.writeText("""
-            package com.simibubi.create.content.processing.recipe;
+            package example.lib;
+            import java.util.List;
+            import net.neoforged.neoforge.fluids.crafting.SizedFluidIngredient;
+            public class Mixing {
+                public List<SizedFluidIngredient> getFluidIngredients() { return null; }
+            }
+        """.trimIndent())
+        val source = """
+            package example;
+            import example.lib.Mixing;
+            class User {
+                int amount(Mixing mixing) {
+                    var fluids = mixing.getFluidIngredients();
+                    return fluids.get(0).getRequiredAmount();
+                }
+            }
+        """.trimIndent()
+        val file = directory.resolve("src/main/java/example/User.java")
+        file.parent.createDirectories()
+        file.writeText(source)
+        val pass = StructuralRefactorPass()
+        pass.projectValueFacts = ProjectValueFacts.collect(pass, listOf(model, file))
+        val result = pass.migrateProvenFluidIngredientAmounts(source)
+        assertTrue(result.contains("fluids.get(0).amount()"), result)
+    }
+
+    @Test
+    fun `a dependency getter with javap evidence of sized fluid lists uses the native accessor`() {
+        val source = """
+            package example;
+            import com.simibubi.create.content.kinetics.mixer.MixingRecipe;
+            class User {
+                int amount(MixingRecipe mixing) {
+                    var fluids = mixing.getFluidIngredients();
+                    return fluids.get(0).getRequiredAmount() + mixing.getFluidIngredients().get(1).getRequiredAmount();
+                }
+            }
+        """.trimIndent()
+        val pass = StructuralRefactorPass()
+        val result = pass.migrateProvenFluidIngredientAmounts(source)
+        assertTrue(
+            result.contains("fluids.get(0).amount() + mixing.getFluidIngredients().get(1).amount()"),
+            result
+        )
+        assertEquals(result, pass.migrateProvenFluidIngredientAmounts(result))
+    }
+
+    @Test
+    fun `library recipe getter without declared type evidence keeps its getter`() {
+        val source = """
+            package example;
+            import other.library.recipe.MixingRecipe;
+            class User {
+                int amount(MixingRecipe mixing) {
+                    var fluids = mixing.getFluidIngredients();
+                    return fluids.get(0).getRequiredAmount();
+                }
+            }
+        """.trimIndent()
+        assertEquals(source, StructuralRefactorPass().migrateProvenFluidIngredientAmounts(source))
+    }
+
+    @Test
+    fun `source owned recipe and fluid ingredient classes retain their own getter`() {
+        val model = directory.resolve("src/main/java/example/recipe/ProcessingRecipe.java")
+        model.parent.createDirectories()
+        model.writeText("""
+            package example.recipe;
             import java.util.List;
             public class ProcessingRecipe {
                 public List<example.FluidIngredient> getFluidIngredients() { return null; }
@@ -46,9 +113,42 @@ class FluidIngredientAmountsTest {
         """.trimIndent())
         val source = """
             package example;
-            import com.simibubi.create.content.processing.recipe.ProcessingRecipe;
+            import example.recipe.ProcessingRecipe;
             class User {
                 int amount(ProcessingRecipe recipe) {
+                    var fluids = recipe.getFluidIngredients();
+                    return fluids.get(0).getRequiredAmount();
+                }
+            }
+        """.trimIndent()
+        val file = directory.resolve("src/main/java/example/User.java")
+        file.parent.createDirectories()
+        file.writeText(source)
+        val ingredient = file.resolveSibling("FluidIngredient.java")
+        ingredient.writeText("package example; public class FluidIngredient { public int getRequiredAmount() { return 1; } }")
+        val pass = StructuralRefactorPass()
+        pass.projectValueFacts = ProjectValueFacts.collect(pass, listOf(model, file, ingredient))
+        assertEquals(source, pass.migrateProvenFluidIngredientAmounts(source))
+    }
+
+    @Test
+    fun `a project that declares the dependency type itself keeps its own getter`() {
+        val model = directory.resolve(
+            "src/main/java/com/simibubi/create/content/kinetics/mixer/MixingRecipe.java"
+        )
+        model.parent.createDirectories()
+        model.writeText("""
+            package com.simibubi.create.content.kinetics.mixer;
+            import java.util.List;
+            public class MixingRecipe {
+                public List<example.FluidIngredient> getFluidIngredients() { return null; }
+            }
+        """.trimIndent())
+        val source = """
+            package example;
+            import com.simibubi.create.content.kinetics.mixer.MixingRecipe;
+            class User {
+                int amount(MixingRecipe recipe) {
                     var fluids = recipe.getFluidIngredients();
                     return fluids.get(0).getRequiredAmount();
                 }
@@ -69,11 +169,10 @@ class FluidIngredientAmountsTest {
         val source = """
             package example;
             import java.util.List;
-            import com.simibubi.create.content.kinetics.mixer.MixingRecipe;
             import net.neoforged.neoforge.fluids.crafting.SizedFluidIngredient;
             class User {
                 List<SizedFluidIngredient> fluids;
-                void amount(MixingRecipe mixing, List<Other> others) {
+                void amount(List<Other> others) {
                     others.forEach(fluids -> fluids.get(0).getRequiredAmount());
                 }
             }

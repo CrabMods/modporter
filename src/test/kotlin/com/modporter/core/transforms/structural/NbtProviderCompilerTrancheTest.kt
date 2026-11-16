@@ -69,7 +69,7 @@ class NbtProviderCompilerTrancheTest {
         pass.projectValueFacts = ProjectValueFacts.collect(pass, files)
         val methods = with(pass) { collectItemStackNbtMethodsNeedingHolderLookup(files, inheritance) }
         assertTrue(methods.any { it.owner == "OpenEndedPipe" && it.methodName == "serializeNBT" }, methods.toString())
-        assertTrue(methods.any { it.owner == "BoundTankOwner" }, methods.toString())
+        assertFalse(methods.any { it.owner == "BoundTankOwner" }, methods.toString())
         for (file in files) {
             file.writeText(with(pass) {
                 migrateFluidTankNbtProviderCalls(
@@ -80,9 +80,6 @@ class NbtProviderCompilerTrancheTest {
         assertTrue(pipe.readText().contains("writeToNBT(registries, tag)"), pipe.readText())
         assertFalse(pipe.readText().contains("world.registryAccess()"), pipe.readText())
         assertTrue(caller.readText().contains("serializeNBT(registries)"), caller.readText())
-        assertTrue(bound.readText().contains("serializeNBT(HolderLookup.Provider registries)"), bound.readText())
-        assertTrue(bound.readText().contains("writeToNBT(registries, tag)"), bound.readText())
-        assertFalse(bound.readText().contains("world.registryAccess()"), bound.readText())
         val stubs = listOf(
             write("compiler-stubs/net/minecraft/core/HolderLookup.java", """
                 package net.minecraft.core;
@@ -306,7 +303,7 @@ class NbtProviderCompilerTrancheTest {
     }
 
     @Test
-    fun `nested source proven fluid tank subtype uses the caller level provider`() {
+    fun `nested source proven fluid tank subtype threads the static factory provider`() {
         val pipe = write(
             "src/main/java/example/OpenEndedPipe.java",
             """
@@ -415,19 +412,18 @@ class NbtProviderCompilerTrancheTest {
             migratedPipe.contains("pipe.fluidHandler.readFromNBT(registries, compound)"),
             migratedPipe
         )
-        assertFalse(
+        assertTrue(
             migratedCaller.contains("import net.minecraft.core.HolderLookup;"),
             migratedCaller
         )
         assertTrue(
-            migratedCaller.contains("OpenEndedPipe read(Level level, CompoundTag tag)"),
+            migratedCaller.contains(
+                "OpenEndedPipe read(Level level, CompoundTag tag, HolderLookup.Provider registries)"
+            ),
             migratedCaller
         )
-        assertTrue(
-            migratedCaller.contains("OpenEndedPipe.fromNBT(tag, 1, level.registryAccess())"),
-            migratedCaller
-        )
-        assertFalse(migratedCaller.contains("HolderLookup.Provider registries"), migratedCaller)
+        assertTrue(migratedCaller.contains("OpenEndedPipe.fromNBT(tag, 1, registries)"), migratedCaller)
+        assertFalse(migratedCaller.contains("level.registryAccess()"), migratedCaller)
     }
 
     @Test

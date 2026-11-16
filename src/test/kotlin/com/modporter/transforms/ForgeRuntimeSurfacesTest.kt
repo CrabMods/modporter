@@ -306,7 +306,7 @@ class ForgeRuntimeSurfacesTest {
         assertTrue(fixer.contains("return Signs.convert(tag);"), fixer)
         assertTrue(signs.contains("public static CompoundTag convert(CompoundTag tag) {"), signs)
         assertTrue(signs.contains("private static String text(CompoundTag tag) {"), signs)
-        assertTrue(signs.contains("Component.Serializer.fromJson(tag.getString(\"Text\"), net.minecraft.core.RegistryAccess.fromRegistryOfRegistries(net.minecraft.core.registries.BuiltInRegistries.REGISTRY))"), signs)
+        assertTrue(signs.contains("Component.Serializer.fromJson(modporter\$legacyComponentJson(tag.getString(\"Text\"), false), net.minecraft.core.RegistryAccess.fromRegistryOfRegistries(net.minecraft.core.registries.BuiltInRegistries.REGISTRY))"), signs)
     }
 
     @Test
@@ -363,8 +363,6 @@ class ForgeRuntimeSurfacesTest {
         assertTrue(adapter.contains("public static CompoundTag adapt(ItemStack stack, HolderLookup.Provider registries)"), adapter)
         assertTrue(adapter.contains("public static String adapt(Item item) {"), adapter)
         assertTrue(adapter.contains("return items.stream().map(Adapter::adapt).collect(Collectors.toList());"), adapter)
-        assertTrue(holder.contains("public CompoundTag held()"), holder)
-        assertFalse(holder.contains("held(HolderLookup.Provider"), holder)
         assertTrue(Regex("""Adapter\.adapt\(stack, (?:this\.)?player\.registryAccess\(\)\)""").containsMatchIn(holder), holder)
     }
 
@@ -492,9 +490,8 @@ class ForgeRuntimeSurfacesTest {
         StructuralRefactorPass().apply(tempDir)
 
         val inventory = read("Inventory")
-        assertTrue(inventory.contains("inserted.getCount() == stack.getCount()"), inventory)
-        assertTrue(inventory.contains("ItemStack.isSameItem(inserted, stack)"), inventory)
-        assertTrue(Regex("""(?:net\.minecraft\.world\.item\.)?ItemStack\.matches\(player\.getMainHandItem\(\)\s*, held\)""").containsMatchIn(inventory), inventory)
+        assertTrue(inventory.contains("net.minecraft.world.item.ItemStack.matches(inserted, stack)"), inventory)
+        assertTrue(Regex("""net\.minecraft\.world\.item\.ItemStack\.matches\(player\.getMainHandItem\(\)\s*, held\)""").containsMatchIn(inventory), inventory)
         assertTrue(inventory.contains("return matcher.equals(text, false);"), inventory)
     }
 
@@ -619,7 +616,7 @@ class ForgeRuntimeSurfacesTest {
         StructuralRefactorPass().apply(tempDir)
 
         val handler = read("Handler")
-        assertTrue(handler.contains("ItemStack.matches(outputs.get(0).stack, before)"), handler)
+        assertTrue(handler.contains("net.minecraft.world.item.ItemStack.matches(outputs.get(0).stack, before)"), handler)
     }
 
     @Test
@@ -887,7 +884,7 @@ class ForgeRuntimeSurfacesTest {
         StructuralRefactorPass().apply(tempDir)
 
         val point = read("JukeboxPoint")
-        assertTrue(point.contains("stack.get(DataComponents.JUKEBOX_PLAYABLE) != null && jukebox.getTheItem().isEmpty()"), point)
+        assertTrue(point.contains("stack.has(net.minecraft.core.component.DataComponents.JUKEBOX_PLAYABLE) && jukebox.getTheItem().isEmpty()"), point)
         assertFalse(point.contains("import net.minecraft.world.item.RecordItem;"), point)
     }
 

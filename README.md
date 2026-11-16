@@ -33,9 +33,13 @@ while preserving the original authors and existing credits.
 
 ## Recorded Strict Benchmark
 
-The November 9, 2026 engineering baseline passed all **11/11** required
+The November 16, 2026 release run passed all **11/11** required
 source-project strict targets, with no failed or skipped targets, no low
 confidence transformations, and no unresolved review signals.
+
+This frozen run includes **60/60 original Create GameTests** and 274 required
+GameTests across the 11 targets. Its tool checksum and verification counts are
+recorded in the [0.4.0 benchmark record](docs/strict-0.4.0.json).
 
 | Target | Verified input |
 | --- | --- |
@@ -46,7 +50,7 @@ confidence transformations, and no unresolved review signals.
 | Sakura Mod | `0999312/Sakura_mod@0201301e5aa3` |
 | Twilight Forest | `TeamTwilight/twilightforest@1bc3a4c21213` |
 | The Aether | `The-Aether-Team/The-Aether@2f0be3a51bae` |
-| Beyond the Veil | `valeriotor/Beyond-The-Veil@ba4940c10e52` |
+| Beyond the Veil | `valeriotor/Beyond-The-Veil@f86887c1001e` |
 | StarMeowCraft | `rawchickenNEG/StarMeowCraft@77c9f63b73a7` |
 | Create | Original source snapshot, SHA-256 prefix `d6a7482014bf` |
 | WorldEdit | Prepared Forge-only input, derived from `b04ab0e26728` |
@@ -60,7 +64,7 @@ confidence transformations, and no unresolved review signals.
 | GameTest | The test suite present in each verified source project |
 | Client | Client boot and saved-world loading |
 | Item interface | Creative inventory opens; all displayed stacks in the relevant tabs are browsed |
-| Runtime logs | Strict warning/error audit; accepted upstream or dependency findings require source evidence |
+| Runtime logs | Strict warning/error audit; accepted upstream or dependency findings require source evidence. Host-speed notices (vanilla server overload, NeoForge deferred-task duration of a dependency mod) are recorded, not counted as findings |
 
 The checks cover project loading and item-interface presentation. Detailed
 behavior of individual items, blocks, machines, and integrations remains an

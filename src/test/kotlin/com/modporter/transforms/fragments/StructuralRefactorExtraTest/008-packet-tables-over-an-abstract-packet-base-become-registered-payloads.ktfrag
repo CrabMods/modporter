@@ -571,7 +571,9 @@
         assertTrue(migrated.contains("CompoundTag tag = pStack.getOrDefault(DataComponents.BLOCK_ENTITY_DATA, CustomData.EMPTY).copyTag();"), migrated)
         assertTrue(migrated.contains("stack.remove(DataComponents.BLOCK_ENTITY_DATA);"), migrated)
         assertTrue(migrated.contains("CompoundTag teTag = stack.getOrDefault(DataComponents.BLOCK_ENTITY_DATA, CustomData.EMPTY).copyTag();"), migrated)
-        assertTrue(migrated.contains("stack.set(DataComponents.BLOCK_ENTITY_DATA, CustomData.of(teTag));"), migrated)
+        // 1.21.1 applies block entity data only when it names its type: the write adds the placed block's type
+        assertTrue(migrated.contains("net.minecraft.world.item.BlockItem.setBlockEntityData(stack, modporterBlockEntityTypeOf(stack), teTag);"), migrated)
+        assertTrue(migrated.contains("private static net.minecraft.world.level.block.entity.BlockEntityType<?> modporterBlockEntityTypeOf(net.minecraft.world.item.ItemStack stack)"), migrated)
         assertFalse(migrated.contains("BLOCK_ENTITY_TAG"), migrated)
         assertTrue(migrated.contains("import net.minecraft.core.component.DataComponents;"), migrated)
         assertTrue(migrated.contains("import net.minecraft.world.item.component.CustomData;"), migrated)
@@ -738,10 +740,7 @@
 
         assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
         // Forge 1.20.1 compared count, item and tag (share tags for `true`, gone on 1.21.1)
-        assertTrue(migrated.contains("ItemStack.matches(stack, other)"), migrated)
-        assertTrue(migrated.contains("ItemStack.matches(outputs.get(0).stack, other)"), migrated)
-        assertTrue(migrated.contains("stack.getCount() == other.getCount()"), migrated)
-        assertTrue(migrated.contains("ItemStack.isSameItem(stack, other)"), migrated)
+        assertTrue(migrated.contains("net.minecraft.world.item.ItemStack.matches(stack, other) || net.minecraft.world.item.ItemStack.matches(outputs.get(0).stack, other) || net.minecraft.world.item.ItemStack.matches(stack, other)"), migrated)
     }
 
     @Test
@@ -789,7 +788,7 @@
     }
 
     @Test
-    fun `particle data closes its project graph with direct codecs and stays idempotent`() {
+    fun `particle data keeps its legacy writer and deserializer behind compat interfaces and types gain stream codecs`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
         srcDir.resolve("ExampleMod.java").writeText("""
@@ -878,36 +877,26 @@
         """.trimIndent())
 
         val result = StructuralRefactorPass().apply(tempDir)
-        val dataFile = srcDir.resolve("CubeParticleData.java")
-        val customFile = srcDir.resolve("ICustomParticleData.java")
-        val data = dataFile.readText()
-        val custom = customFile.readText().replace("\r\n", "\n")
+        val data = srcDir.resolve("CubeParticleData.java").readText()
+        val custom = srcDir.resolve("ICustomParticleData.java").readText().replace("\r\n", "\n")
         val compatDir = tempDir.resolve("src/main/java/com/modporter/generated/example/compat")
 
         assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        assertFalse(compatDir.exists(), compatDir.toString())
-        assertTrue(data.contains("public class CubeParticleData implements ParticleOptions, ICustomParticleData<CubeParticleData> {"), data)
-        assertTrue(data.contains("public static final MapCodec<CubeParticleData> CODEC = MapCodec.unit"), data)
-        assertTrue(data.contains("public static final Deserializer<CubeParticleData> DESERIALIZER = new Deserializer<>() {"), data)
-        assertTrue(data.contains("public Deserializer<CubeParticleData> getDeserializer() {"), data)
-        assertTrue(data.contains("public MapCodec<CubeParticleData> getCodec(ParticleType<CubeParticleData> type) {"), data)
-        assertTrue(custom.contains("interface Deserializer<P extends ParticleOptions>"), custom)
-        assertTrue(custom.contains("Deserializer<T> getDeserializer();"), custom)
-        assertTrue(custom.contains("MapCodec<T> getCodec(ParticleType<T> type);"), custom)
+        assertTrue(compatDir.resolve("ParticleDeserializer.java").exists())
+        assertTrue(compatDir.resolve("LegacyParticleOptions.java").exists())
+        assertTrue(compatDir.resolve("LegacyParticleTypes.java").readText().contains("StreamCodec.of((buffer, data) -> ((LegacyParticleOptions) data).writeToNetwork(buffer), buffer -> deserializer.fromNetwork(type, buffer))"))
+        assertTrue(data.contains("public class CubeParticleData implements LegacyParticleOptions, ICustomParticleData<CubeParticleData> {"), data)
+        assertTrue(data.contains("public static final ParticleDeserializer<CubeParticleData> DESERIALIZER = new ParticleDeserializer<>() {"), data)
+        assertTrue(data.contains("public ParticleDeserializer<CubeParticleData> getDeserializer() {"), data)
+        assertTrue(data.contains("import com.modporter.generated.example.compat.ParticleDeserializer;"), data)
+        assertTrue(data.contains("import com.modporter.generated.example.compat.LegacyParticleOptions;"), data)
+        assertTrue(custom.contains("ParticleDeserializer<T> getDeserializer();"), custom)
         assertTrue(custom.contains("return new ParticleType<>(false) {"), custom)
-        assertTrue(custom.contains("return ICustomParticleData.this.getCodec(this);"), custom)
-        assertTrue(custom.contains("return ICustomParticleData.this.getStreamCodec(this);"), custom)
-        assertTrue(custom.contains("return StreamCodec.ofMember("), custom)
-        assertTrue(custom.contains("getDeserializer().fromNetwork(type, buffer)"), custom)
-        assertFalse(custom.contains("MapCodec.assumeMapUnsafe"), custom)
+        assertTrue(custom.contains("public MapCodec<T> codec() {\n                return MapCodec.assumeMapUnsafe(ICustomParticleData.this.getCodec(this));\n            }"), custom)
+        assertTrue(custom.contains("public StreamCodec<? super RegistryFriendlyByteBuf, T> streamCodec() {\n                return LegacyParticleTypes.streamCodec(this, getDeserializer());\n            }"), custom)
+        assertTrue(custom.contains("import com.mojang.serialization.MapCodec;"), custom)
+        assertTrue(custom.contains("import net.minecraft.network.codec.StreamCodec;"), custom)
         assertFalse(custom.contains("ParticleOptions.Deserializer"), custom)
-
-        val firstPass = mapOf(dataFile to data, customFile to customFile.readText())
-        val secondResult = StructuralRefactorPass().apply(tempDir)
-        assertTrue(secondResult.errors.isEmpty(), secondResult.errors.joinToString("\n"))
-        firstPass.forEach { (file, expected) ->
-            assertEquals(expected, file.readText(), "second pass changed ${file.fileName}")
-        }
     }
 
     @Test

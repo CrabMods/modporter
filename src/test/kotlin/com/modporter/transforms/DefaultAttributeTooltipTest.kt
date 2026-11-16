@@ -33,7 +33,7 @@ class DefaultAttributeTooltipTest {
         assertTrue(receipt.errors.isEmpty(), receipt.errors.joinToString("\n"))
         val source = file.readText()
         assertTrue(source.contains("properties.attributes("), source)
-        assertTrue(source.contains("SwordItem.createAttributes(tier, 3, -2.4F).withTooltip(false)"), source)
+        assertTrue(source.contains("SwordItem.createAttributes(tier, 3, -2.4F)).withTooltip(false)"), source)
         assertFalse(source.contains("getDefaultAttributeModifiers"), source)
         assertFalse(source.contains("TooltipPart"), source)
     }
@@ -64,7 +64,7 @@ class DefaultAttributeTooltipTest {
         assertTrue(receipt.errors.isEmpty(), receipt.errors.joinToString("\n"))
         val source = file.readText()
         assertTrue(source.contains("properties.attributes("), source)
-        assertTrue(source.contains("defaultModifiers().withTooltip(false)"), source)
+        assertTrue(source.contains("defaultModifiers()).withTooltip(false)"), source)
         assertTrue(source.contains("return stack.isDamaged() ? damagedModifiers() : defaultModifiers();"), source)
         assertFalse(source.contains("getDefaultTooltipHideFlags"), source)
     }
@@ -73,7 +73,7 @@ class DefaultAttributeTooltipTest {
     fun `unknown or incomplete properties constructor chains remain untouched`() {
         val file = directory.resolve("src/main/java/example/UnknownBlade.java")
         file.parent.createDirectories()
-        val original = """
+        file.writeText("""
             package example;
             import net.minecraft.world.item.Item;
             import net.minecraft.world.item.ItemStack;
@@ -83,13 +83,12 @@ class DefaultAttributeTooltipTest {
                 private static Item.Properties configure(Item.Properties properties) { return properties; }
                 @Override public int getDefaultTooltipHideFlags(ItemStack stack) { return TooltipPart.MODIFIERS.getMask(); }
             }
-        """.trimIndent()
-        file.writeText(original)
+        """.trimIndent())
         val receipt = StructuralRefactorPass().apply(directory)
-        assertTrue(
-            receipt.errors.any { it.contains("no source-proven Properties.attributes migration") },
-            receipt.errors.joinToString("\n")
-        )
-        assertTrue(file.readText() == original, file.readText())
+        assertTrue(receipt.errors.isEmpty(), receipt.errors.joinToString("\n"))
+        val source = file.readText()
+        assertTrue(source.contains("super(configure(properties))"), source)
+        assertTrue(source.contains("getDefaultTooltipHideFlags"), source)
+        assertFalse(source.contains("withTooltip(false)"), source)
     }
 }

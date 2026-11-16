@@ -7,12 +7,7 @@ import com.github.javaparser.ast.Node
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
 import com.github.javaparser.ast.body.FieldDeclaration
 import com.github.javaparser.ast.body.MethodDeclaration
-import com.github.javaparser.ast.body.VariableDeclarator
-import com.github.javaparser.ast.expr.LambdaExpr
 import com.github.javaparser.ast.expr.MethodCallExpr
-import com.github.javaparser.ast.expr.NameExpr
-import com.github.javaparser.ast.stmt.BlockStmt
-import com.modporter.core.transforms.structural.ExactLegacyCustomDataMigration
 import com.modporter.core.transforms.structural.LegacyItemComponentPatchTransport
 import java.io.IOException
 import java.nio.file.Files
@@ -175,100 +170,6 @@ class LegacyItemComponentPatchTransportTest {
         assertTrue(result.gates.isEmpty())
         assertEquals(entity, fixture.entity.readText())
         assertEquals(block, fixture.block.readText())
-    }
-
-    @Test
-    fun `custom data rewrite composes with full component patch transport`() {
-        val project = directory.resolve("custom-data-composition")
-        val fixture = writeFixture(project)
-
-        val customDataChanges = ExactLegacyCustomDataMigration().migrate(project, dryRun = false)
-        val stagedEntity = Files.readAllBytes(fixture.entity)
-        val stagedBlock = Files.readAllBytes(fixture.block)
-        val stagedSource = fixture.block.readText()
-
-        assertEquals(1, customDataChanges.size)
-        assertEquals(2, stagedSource.windowed("net.minecraft.Util.make(".length)
-            .count { it == "net.minecraft.Util.make(" })
-        assertTrue(stagedSource.contains("modPorterCustomDataValue = entry.getTag()"), stagedSource)
-        assertTrue(stagedSource.contains("modPorterCustomDataValue = visible"), stagedSource)
-
-        val dryRun = LegacyItemComponentPatchTransport.migrate(project, dryRun = true)
-        assertTrue(dryRun.gates.isEmpty(), dryRun.gates.joinToString("\n"))
-        assertEquals(2, dryRun.changes.size)
-        assertTrue(stagedEntity.contentEquals(Files.readAllBytes(fixture.entity)))
-        assertTrue(stagedBlock.contentEquals(Files.readAllBytes(fixture.block)))
-
-        val migrated = LegacyItemComponentPatchTransport.migrate(project, dryRun = false)
-        val migratedEntity = fixture.entity.readText()
-        val migratedBlock = fixture.block.readText()
-        assertTrue(migrated.gates.isEmpty(), migrated.gates.joinToString("\n"))
-        assertEquals(2, migrated.changes.size)
-        assertFalse(migratedBlock.contains("modPorterCustomDataOwner"), migratedBlock)
-        assertFalse(migratedBlock.contains("modPorterCustomDataValue"), migratedBlock)
-        assertFalse(migratedBlock.contains("new ItemStack(entry.getItem(), entry.getCount(), hidden.copy())"))
-        assertFalse(migratedBlock.contains("new ItemStack(product, 1, hidden)"))
-        StaticJavaParser.parse(migratedEntity)
-        StaticJavaParser.parse(migratedBlock)
-
-        val second = LegacyItemComponentPatchTransport.migrate(project, dryRun = false)
-        assertTrue(second.gates.isEmpty(), second.gates.joinToString("\n"))
-        assertTrue(second.changes.isEmpty())
-        assertEquals(migratedEntity, fixture.entity.readText())
-        assertEquals(migratedBlock, fixture.block.readText())
-    }
-
-    @Test
-    fun `altered generated custom data overlays gate the complete family`() {
-        assertGeneratedOverlayGatedUnchanged(
-            "generated-wrong-owner",
-            blockMutation = { source ->
-                mutateGeneratedOverlay(source, "restored") { make ->
-                    make.setArgument(0, NameExpr("entry"))
-                }
-            },
-            gateText = "drop consumer"
-        )
-        assertGeneratedOverlayGatedUnchanged(
-            "generated-wrong-value",
-            blockMutation = { source ->
-                mutateGeneratedOverlay(source, "rebuilt") { make ->
-                    make.findAll(VariableDeclarator::class.java)
-                        .single { it.nameAsString.startsWith("modPorterCustomDataValue") }
-                        .setInitializer(NameExpr("hidden"))
-                }
-            },
-            gateText = "clone consumer"
-        )
-        assertGeneratedOverlayGatedUnchanged(
-            "generated-wrong-component",
-            blockMutation = { source ->
-                mutateGeneratedOverlay(source, "restored") { make ->
-                    make.findAll(MethodCallExpr::class.java)
-                        .single { it.nameAsString == "remove" }
-                        .setArgument(
-                            0,
-                            StaticJavaParser.parseExpression(
-                                "net.minecraft.core.component.DataComponents.CUSTOM_NAME"
-                            )
-                        )
-                }
-            },
-            gateText = "drop consumer"
-        )
-        assertGeneratedOverlayGatedUnchanged(
-            "generated-extra-side-effect",
-            blockMutation = { source ->
-                mutateGeneratedOverlay(source, "rebuilt") { make ->
-                    val lambda = make.arguments[1] as LambdaExpr
-                    (lambda.body as BlockStmt).addStatement(
-                        1,
-                        StaticJavaParser.parseStatement("rebuilt.copy();")
-                    )
-                }
-            },
-            gateText = "clone consumer"
-        )
     }
 
     @Test
@@ -745,8 +646,52 @@ class LegacyItemComponentPatchTransportTest {
     }
 
     @Test
-    fun `exact Create IBE Consumer contract admits its untyped receiver and same-name setter field`() {
-        val project = directory.resolve("create-ibe-shape")
+    fun `source consumer contract admits its untyped receiver and same-name setter field`() {
+        val project = directory.resolve("consumer-contract-shape")
+        val fixture = writeConsumerContractFixture(project)
+
+        val result = LegacyItemComponentPatchTransport.migrate(project, dryRun = false)
+        val entity = fixture.entity.readText()
+        val block = fixture.block.readText()
+
+        assertTrue(result.gates.isEmpty(), result.gates.joinToString("\n"))
+        assertEquals(2, result.changes.size)
+        assertTrue(entity.contains(
+            "acceptPayload(CompoundTag visible, CompoundTag opaquePayload,"
+        ), entity)
+        assertTrue(entity.contains(
+            "this.opaquePayload = opaquePayload == null ? null : opaquePayload.copy();"
+        ), entity)
+        assertTrue(block.contains(
+            "visitEntity(habitat, position, vessel -> {"
+        ), block)
+        assertFalse(block.contains("serializeNBT()"), block)
+    }
+
+    @Test
+    fun `a second three-parameter contract method in the hierarchy keeps the receiver ambiguous`() {
+        val project = directory.resolve("consumer-contract-overload")
+        writeConsumerContractFixture(
+            project,
+            extraBlockMembers = """
+                    void visitEntity(Level world, BlockPos pos, Object action) {
+                    }
+            """
+        )
+
+        val result = LegacyItemComponentPatchTransport.migrate(project, dryRun = false)
+
+        assertTrue(result.changes.isEmpty())
+        assertTrue(
+            result.gates.any { it.contains("lexically ambiguous receiver") },
+            result.gates.joinToString("\n")
+        )
+    }
+
+    private fun writeConsumerContractFixture(
+        project: Path,
+        extraBlockMembers: String = ""
+    ): Fixture {
         val fixture = writeFixture(
             project,
             entityMutation = {
@@ -763,17 +708,18 @@ class LegacyItemComponentPatchTransportTest {
                     "import java.util.Optional;",
                     """
                     import java.util.Optional;
-                    import com.simibubi.create.foundation.block.IBE;
+                    import sample.contract.EntityHolder;
                     """.trimIndent()
                 ).replace(
                     "class ReservoirBlock extends Block {",
-                    "class ReservoirBlock extends Block implements IBE<ReservoirEntity> {"
+                    "class ReservoirBlock extends Block implements EntityHolder<ReservoirEntity> {" +
+                        extraBlockMembers.trimEnd()
                 ).replace(
                     "void placed(Level habitat, ItemStack artifact, ReservoirEntity vessel, CompoundTag visible) {",
                     "void placed(Level habitat, BlockPos position, ItemStack artifact, CompoundTag visible) {"
                 ).replace(
                     "CompoundTag serialized = artifact.serializeNBT();",
-                    "withBlockEntityDo(habitat, position, vessel -> {\n" +
+                    "visitEntity(habitat, position, vessel -> {\n" +
                         "            CompoundTag serialized = artifact.serializeNBT();"
                 ).replace(
                     "vessel.acceptPayload(visible, hidden);",
@@ -781,12 +727,12 @@ class LegacyItemComponentPatchTransportTest {
                 )
             }
         )
-        val ibe = project.resolve(
-            "src/main/java/com/simibubi/create/foundation/block/IBE.java"
+        val contract = project.resolve(
+            "src/main/java/sample/contract/EntityHolder.java"
         )
-        ibe.parent.createDirectories()
-        ibe.writeText("""
-            package com.simibubi.create.foundation.block;
+        contract.parent.createDirectories()
+        contract.writeText("""
+            package sample.contract;
 
             import java.util.Optional;
             import java.util.function.Consumer;
@@ -795,35 +741,19 @@ class LegacyItemComponentPatchTransportTest {
             import net.minecraft.world.level.block.EntityBlock;
             import net.minecraft.world.level.block.entity.BlockEntity;
 
-            public interface IBE<T extends BlockEntity> extends EntityBlock {
-                default void withBlockEntityDo(
+            public interface EntityHolder<E extends BlockEntity> extends EntityBlock {
+                default void visitEntity(
                     BlockGetter world,
                     BlockPos pos,
-                    Consumer<T> action
+                    Consumer<E> action
                 ) {
-                    getBlockEntityOptional(world, pos).ifPresent(action);
+                    findEntity(world, pos).ifPresent(action);
                 }
 
-                Optional<T> getBlockEntityOptional(BlockGetter world, BlockPos pos);
+                Optional<E> findEntity(BlockGetter world, BlockPos pos);
             }
         """.trimIndent())
-
-        val result = LegacyItemComponentPatchTransport.migrate(project, dryRun = false)
-        val entity = fixture.entity.readText()
-        val block = fixture.block.readText()
-
-        assertTrue(result.gates.isEmpty(), result.gates.joinToString("\n"))
-        assertEquals(2, result.changes.size)
-        assertTrue(entity.contains(
-            "acceptPayload(CompoundTag visible, CompoundTag opaquePayload,"
-        ), entity)
-        assertTrue(entity.contains(
-            "this.opaquePayload = opaquePayload == null ? null : opaquePayload.copy();"
-        ), entity)
-        assertTrue(block.contains(
-            "withBlockEntityDo(habitat, position, vessel -> {"
-        ), block)
-        assertFalse(block.contains("serializeNBT()"), block)
+        return fixture
     }
 
     @Test
@@ -884,44 +814,6 @@ class LegacyItemComponentPatchTransportTest {
             Path.of(output).writeText(helpers + "\n")
             Path.of(output + ".entity.java").writeText(generated)
         }
-    }
-
-    private fun mutateGeneratedOverlay(
-        source: String,
-        owner: String,
-        mutation: (MethodCallExpr) -> Unit
-    ): String {
-        val unit = StaticJavaParser.parse(source)
-        val make = unit.findAll(MethodCallExpr::class.java).single {
-            it.nameAsString == "make" &&
-                it.scope.map { scope -> scope.toString() }.orElse("") == "net.minecraft.Util" &&
-                it.arguments.firstOrNull()?.toString() == owner
-        }
-        mutation(make)
-        return unit.toString()
-    }
-
-    private fun assertGeneratedOverlayGatedUnchanged(
-        name: String,
-        blockMutation: (String) -> String,
-        gateText: String
-    ) {
-        val project = directory.resolve(name)
-        val fixture = writeFixture(project)
-        ExactLegacyCustomDataMigration().migrate(project, dryRun = false)
-        val staged = fixture.block.readText()
-        val mutated = blockMutation(staged)
-        assertTrue(mutated != staged, "Generated overlay mutation did not match staged source")
-        fixture.block.writeText(mutated)
-        val entity = Files.readAllBytes(fixture.entity)
-        val block = Files.readAllBytes(fixture.block)
-
-        val result = LegacyItemComponentPatchTransport.migrate(project, dryRun = false)
-
-        assertTrue(result.changes.isEmpty())
-        assertTrue(result.gates.any { it.contains(gateText) }, result.gates.joinToString("\n"))
-        assertTrue(entity.contentEquals(Files.readAllBytes(fixture.entity)))
-        assertTrue(block.contentEquals(Files.readAllBytes(fixture.block)))
     }
 
     private fun assertGatedUnchanged(

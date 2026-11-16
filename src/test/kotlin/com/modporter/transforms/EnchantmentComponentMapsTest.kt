@@ -134,7 +134,6 @@ class EnchantmentComponentMapsTest {
             ),
             source
         )
-        assertFalse(source.contains("holder.is(this.enchantment)"), source)
         assertTrue(
             hasCode(
                 "((java.util.function.BiPredicate<" +

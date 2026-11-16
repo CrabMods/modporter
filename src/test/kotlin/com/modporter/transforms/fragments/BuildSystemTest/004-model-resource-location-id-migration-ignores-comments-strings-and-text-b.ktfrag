@@ -1046,3 +1046,143 @@
         assertTrue(content.contains("sourceSet(sourceSets.bucketTest)"), content)
         assertTrue(content.contains("if (run.name != 'gameTestServer') run.loadedMods.set(neoForge.mods.matching { it.name != 'hotbath_bucket_tests' })"), content)
     }
+
+    @Test
+    fun `migrates same project static field reflection to explicit source accessor`() {
+        val projectDir = tempDir.resolve("same-project-field-reflection")
+        val ownerDir = projectDir.resolve("src/main/java/com/example/service")
+        val callerDir = projectDir.resolve("src/main/java/com/example/tests")
+        ownerDir.createDirectories()
+        callerDir.createDirectories()
+        ownerDir.resolve("OwnerService.java").writeText("""
+            package com.example.service;
+
+            import java.util.Map;
+            import java.util.concurrent.ConcurrentHashMap;
+
+            public class OwnerService {
+                private static final Map<Integer, Task> tasks = new ConcurrentHashMap<>();
+
+                public static class Task {
+                    public int size() {
+                        return 1;
+                    }
+                }
+            }
+        """.trimIndent())
+        callerDir.resolve("OwnerServiceTests.java").writeText("""
+            package com.example.tests;
+
+            import com.example.service.OwnerService;
+            import java.lang.reflect.Field;
+            import java.util.Map;
+
+            public class OwnerServiceTests {
+                @SuppressWarnings("unchecked")
+                private static OwnerService.Task task(int index) {
+                    try {
+                        Field field = OwnerService.class.getDeclaredField("tasks");
+                        field.setAccessible(true);
+                        Map<Integer, OwnerService.Task> tasks =
+                                (Map<Integer, OwnerService.Task>) field.get(null);
+                        OwnerService.Task task = tasks.get(index);
+                        if (task == null) {
+                            throw new IllegalStateException("missing task");
+                        }
+                        return task;
+                    } catch (ReflectiveOperationException e) {
+                        throw new IllegalStateException("cannot inspect task", e);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val owner = ownerDir.resolve("OwnerService.java").readText()
+        val caller = callerDir.resolve("OwnerServiceTests.java").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-same-project-static-field-accessor" })
+        assertTrue(result.changes.any { it.ruleId == "build-same-project-static-field-reflection" })
+        assertTrue(owner.contains("public static Map<Integer, Task> modporterAccessTasks()"), owner)
+        assertTrue(owner.contains("return tasks;"), owner)
+        assertTrue(caller.contains("Map<Integer, OwnerService.Task> tasks = OwnerService.modporterAccessTasks();"), caller)
+        assertFalse(caller.contains("java.lang.reflect"), caller)
+        assertFalse(caller.contains("getDeclaredField"), caller)
+        assertFalse(caller.contains("setAccessible"), caller)
+        assertFalse(caller.contains("ReflectiveOperationException"), caller)
+    }
+
+    @Test
+    fun `removes standalone mixin dependencies bundled by NeoForge`() {
+        val projectDir = tempDir.resolve("bundled-mixin-deps")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'java'
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+
+            dependencies {
+                implementation "com.example:kept:1.0.0"
+                annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
+                implementation "io.github.llamalad7:mixinextras-forge:0.3.5"
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val content = projectDir.resolve("build.gradle").readText()
+        assertTrue(result.changes.any { it.ruleId == "build-remove-bundled-mixin-dependency" })
+        assertTrue(content.contains("com.example:kept:1.0.0"), content)
+        assertFalse(content.contains("org.spongepowered:mixin"), content)
+        assertFalse(content.contains("io.github.llamalad7:mixinextras"), content)
+        assertFalse(content.contains("annotationProcessor 'org.spongepowered:mixin"), content)
+    }
+
+    @Test
+    fun `analyze mode does not modify files`() {
+        val projectDir = tempDir.resolve("p7")
+        projectDir.createDirectories()
+        val originalContent = """
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent()
+        projectDir.resolve("build.gradle").writeText(originalContent)
+
+        val result = pass.analyze(projectDir)
+        assertTrue(result.changeCount > 0)
+
+        // File should not be modified
+        assertEquals(originalContent, projectDir.resolve("build.gradle").readText())
+    }
+
+    @Test
+    fun `handles kotlin DSL build gradle kts`() {
+        val projectDir = tempDir.resolve("p8")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle.kts").writeText("""
+            plugins {
+                id("net.minecraftforge.gradle") version "[6.0,6.2)"
+            }
+            dependencies {
+                minecraft("net.minecraftforge:forge:1.20.1-47.2.0")
+            }
+        """.trimIndent())
+
+        pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle.kts").readText()
+        assertTrue(content.contains("net.neoforged.moddev"))
+        assertFalse(content.contains("net.minecraftforge"))
+    }
+
+    @Test
+    fun `handles project with no build files`() {
+        val projectDir = tempDir.resolve("p9")
+        projectDir.createDirectories()
+
+        val result = pass.apply(projectDir)
+        assertEquals(0, result.changeCount)
+        assertTrue(result.errors.isEmpty())
+    }

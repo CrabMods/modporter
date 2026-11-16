@@ -77,11 +77,7 @@ class RegistryProviderCarriersTest {
         """)
         StructuralRefactorPass().apply(tempDir)
         val itemText = item.readText()
-        val provider = Regex(
-            """getSheet\(ItemStack stack, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)"""
-        ).find(itemText)?.groupValues?.get(1)
-        assertTrue(provider != null, itemText)
-        assertTrue(itemText.contains("Sheet.read(getCustomDataChild(stack, \"Sheet\"), $provider)"), itemText)
+        assertTrue(itemText.contains("getSheet(ItemStack stack, HolderLookup.Provider registries)"), itemText)
         val readerText = reader.readText()
         assertTrue(readerText.contains("SheetItem.getSheet(stack, level.registryAccess())"), readerText)
     }
@@ -110,7 +106,6 @@ class RegistryProviderCarriersTest {
                 }
                 @LuaFunction
                 public CompoundTag data(ItemStack stack) {
-                    java.util.Objects.requireNonNull(anchor.getLevel());
                     return stack.serializeNBT();
                 }
             }

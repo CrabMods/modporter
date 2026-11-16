@@ -289,7 +289,8 @@ def verify_data_generation(row, run_id, reports_root, run_root):
             "Unexpected Create data-generation receipt schema")
     require(receipt["runId"] == run_id, "Create data-generation receipt run id differs")
     require(receipt["caseId"] == "create", "Create data-generation receipt case differs")
-    require(receipt["ruleId"] == "struct-create-copper-native-data-maps",
+    # the generic copper data-map provider rule (CopperDataMapMigration.PROVIDER_RULE_ID)
+    require(receipt["ruleId"] == "build-copper-datamap-provider",
             "Create data-generation receipt rule differs")
     require(Path(receipt["buildRoot"]).resolve() == output_dir,
             "Create data-generation build root differs")
@@ -378,14 +379,37 @@ NATIVE_CAPABILITY_EVIDENCE_FIELDS = (
 )
 
 
+def retained_capability_bridge_present(output_dir):
+    """The retained block-entity capability shape, exactly as the benchmark harness detects it."""
+    root = Path(output_dir)
+    if (root / "src/main/resources/modporter-legacy-capability-query.mixins.json").exists():
+        return True
+    java_root = root / "src/main/java"
+    if not java_root.is_dir():
+        return False
+    mixins = {"LegacyCapabilityServerLevelMixin.java", "LegacyCapabilityLevelExtensionMixin.java"}
+    for path in java_root.rglob("*.java"):
+        if path.name in mixins:
+            return True
+        if path.name == "LegacyBlockEntityCapabilityQueries.java":
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "LegacyBlockEntityCapabilityQueries.getRetained(" in text:
+            return True
+    return False
+
+
 def verify_native_capability(row, reports_root):
     validation = row["nativeCapabilityValidation"]
     state = validation["state"]
     require(validation["issues"] == [],
             f"Native capability validation has issues: {row['id']}")
     if state == "NOT_EVALUATED":
-        require(row["id"] != "create",
-                "Create native retained-capability validation was not evaluated")
+        require(not retained_capability_bridge_present(row["outputDir"]),
+                f"Retained capability bridge is present but was not natively validated: {row['id']}")
         require(validation["profileId"] is None and all(
                     validation[field] is None for field in NATIVE_CAPABILITY_EVIDENCE_FIELDS),
                 f"Unevaluated native capability gate exposes evidence: {row['id']}")

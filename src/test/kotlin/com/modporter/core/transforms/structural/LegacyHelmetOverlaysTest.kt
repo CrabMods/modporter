@@ -6,18 +6,18 @@ import kotlin.test.assertTrue
 
 class LegacyHelmetOverlaysTest {
     @Test
-    fun `create cardboard overlay drops obsolete Gui construction after exact render migration`() {
+    fun `client item extension overlay drops obsolete Gui construction after exact render migration`() {
         val pass = pass()
         val result = pass.migrateLegacyHelmetOverlayRendering(overlaySource())
 
         assertTrue(
             result.contains(
-                "public class CardboardArmorStealthOverlay implements IClientItemExtensions"
+                "public class StealthOverlay implements IClientItemExtensions"
             ),
             result
         )
         assertFalse(result.contains("extends Gui"), result)
-        assertFalse(result.contains("CardboardArmorStealthOverlay()"), result)
+        assertFalse(result.contains("StealthOverlay()"), result)
         assertFalse(result.contains("import net.minecraft.client.gui.Gui;"), result)
         assertTrue(
             result.contains(
@@ -48,15 +48,15 @@ class LegacyHelmetOverlaysTest {
     @Test
     fun `legacy helmet consumer registration and capture expression remain unchanged`() {
         val source = """
-            package com.simibubi.create.content.equipment.armor;
+            package example.armor;
 
             import java.util.function.Consumer;
             import net.neoforged.neoforge.client.extensions.common.IClientItemExtensions;
 
-            public class CardboardHelmetItem extends CardboardArmorItem {
+            public class StealthHelmetItem extends StealthArmorItem {
                 public void initializeClient(Consumer<IClientItemExtensions> consumer) {
                     super.initializeClient(consumer);
-                    consumer.accept(new CardboardArmorStealthOverlay());
+                    consumer.accept(new StealthOverlay());
                 }
             }
         """.trimIndent()
@@ -71,7 +71,7 @@ class LegacyHelmetOverlaysTest {
         val extraConstructor = replaceRequired(
             original,
             memberAnchor,
-            "    public CardboardArmorStealthOverlay(boolean alternate) {\n" +
+            "    public StealthOverlay(boolean alternate) {\n" +
                 "        super(Minecraft.getInstance(), Minecraft.getInstance().getItemRenderer());\n" +
                 "    }\n\n" +
                 memberAnchor
@@ -113,8 +113,8 @@ class LegacyHelmetOverlaysTest {
     fun `Gui base cleanup rejects a project inventoried subclass`() {
         val pass = StructuralRefactorPass()
         pass.projectValueFacts = ProjectValueFacts(
-            types = setOf(OVERLAY, "example.CustomCardboardOverlay"),
-            parents = mapOf("example.CustomCardboardOverlay" to OVERLAY)
+            types = setOf(OVERLAY, "example.CustomStealthOverlay"),
+            parents = mapOf("example.CustomStealthOverlay" to OVERLAY)
         )
 
         val result = pass.migrateLegacyHelmetOverlayRendering(overlaySource())
@@ -142,9 +142,9 @@ class LegacyHelmetOverlaysTest {
     }
 
     private fun overlaySource(): String = """
-        package com.simibubi.create.content.equipment.armor;
+        package example.armor;
 
-        import com.simibubi.create.Create;
+        import example.ExampleMod;
         import net.createmod.catnip.animation.LerpedFloat;
         import net.createmod.catnip.animation.LerpedFloat.Chaser;
         import net.minecraft.client.Minecraft;
@@ -156,13 +156,13 @@ class LegacyHelmetOverlaysTest {
         import net.minecraft.world.item.ItemStack;
         import net.neoforged.neoforge.client.extensions.common.IClientItemExtensions;
 
-        public class CardboardArmorStealthOverlay extends Gui implements IClientItemExtensions {
-            public CardboardArmorStealthOverlay() {
+        public class StealthOverlay extends Gui implements IClientItemExtensions {
+            public StealthOverlay() {
                 super(Minecraft.getInstance(), Minecraft.getInstance().getItemRenderer());
             }
 
             private static final ResourceLocation PACKAGE_BLUR_LOCATION =
-                Create.asResource("textures/misc/package_blur.png");
+                ExampleMod.asResource("textures/misc/package_blur.png");
             private static LerpedFloat opacity = LerpedFloat.linear()
                 .startWithValue(0)
                 .chase(0, 0.25f, Chaser.EXP);
@@ -173,7 +173,7 @@ class LegacyHelmetOverlaysTest {
                     return;
                 opacity.tickChaser();
                 opacity.updateChaseTarget(
-                    CardboardArmorHandler.testForStealth(player) ? 1 : 0
+                    StealthHandler.testForStealth(player) ? 1 : 0
                 );
             }
 
@@ -198,6 +198,6 @@ class LegacyHelmetOverlaysTest {
 
     private companion object {
         const val OVERLAY =
-            "com.simibubi.create.content.equipment.armor.CardboardArmorStealthOverlay"
+            "example.armor.StealthOverlay"
     }
 }

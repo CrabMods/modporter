@@ -1,6 +1,6 @@
 001-header.ktfrag
 002-legacy-pack-resource-compat-generation-rejects-same-file-multiple-mod-id.ktfrag
-003-empty-subscriber-cleanup-ignores-braces-inside-literals-and-comments.ktfrag
+003-common-bus-mod-event-listener-migration-matches-declared-handler-type-na.ktfrag
 004-packet-migration-maps-reception-side-guards-to-payload-direction.ktfrag
 005-fmljava-mod-loading-context-constructor-migration-ignores-comments-and-s.ktfrag
 006-migrates-curios-init-capabilities-providers-to-register-capabilities-eve.ktfrag
@@ -44,5 +44,3 @@
 044-legacy-block-entity-capability-queries-with-one-argument-nested-side-exp.ktfrag
 045-overlay-implementations-keep-the-gui-and-size-parameters-their-render-bo.ktfrag
 046-only-calls-of-the-threaded-overload-take-the-provider.ktfrag
-047-enum-delegated-simple-channel-registrations-migrate-as-a-closed-payload-.ktfrag
-048-empty-potion-guard-is-removed-only-from-exact-built-in-registry-iteratio.ktfrag

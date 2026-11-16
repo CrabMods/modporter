@@ -26,28 +26,12 @@ internal object ParticleOptionsCodecs {
     const val RULE_ID = "struct-particle-options-codecs"
     private const val ID = """[A-Za-z_$][\w$]*"""
 
-    fun migrate(
-        projectDir: Path,
-        compatPackageSupplier: () -> String,
-        dryRun: Boolean,
-        excludedFiles: Set<Path> = emptySet()
-    ): List<Change> {
+    fun migrate(projectDir: Path, compatPackageSupplier: () -> String, dryRun: Boolean): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.isDirectory()) return emptyList()
-        val excluded = excludedFiles.mapTo(hashSetOf()) { it.toAbsolutePath().normalize() }
-        val files = JavaSourceText.walkJavaSourceRoots(srcDir).use { paths ->
-            paths.filter {
-                it.extension == "java" && it.toAbsolutePath().normalize() !in excluded
-            }.toList()
-        }
+        val files = JavaSourceText.walkJavaSourceRoots(srcDir).use { paths -> paths.filter { it.extension == "java" }.toList() }
         val legacy = files.filter { file ->
             val source = runCatching { file.readText() }.getOrDefault("")
-            val executable = JavaSourceText.maskCommentsAndLiterals(source)
-            val alreadyClosedGraph =
-                executable.contains("interface ParticleDeserializer") &&
-                    executable.contains("getStreamCodec(") &&
-                    executable.contains("RegistryFriendlyByteBuf")
-            if (alreadyClosedGraph) return@filter false
             source.contains("ParticleOptions") && (
                 source.contains("Deserializer") || source.contains("writeToNetwork(") || source.contains("writeToString(") ||
                     Regex("""new\s+ParticleType\s*<[^>]*>\s*\([^;{]*,[^;{]*\)\s*\{""").containsMatchIn(source)

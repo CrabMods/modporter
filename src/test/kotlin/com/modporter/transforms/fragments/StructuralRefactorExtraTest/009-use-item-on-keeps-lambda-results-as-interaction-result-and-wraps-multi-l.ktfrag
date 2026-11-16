@@ -148,7 +148,7 @@
         val train = srcDir.resolve("Train.java").readText()
 
         assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        assertTrue(train.contains("name = Component.Serializer.fromJson(tag.getString(\"Name\"), registries);"), train)
+        assertTrue(train.contains("name = Component.Serializer.fromJson(modporter\$legacyComponentJson(tag.getString(\"Name\"), false), registries);"), train)
         assertTrue(train.contains("tag.putString(\"Name\", Component.Serializer.toJson(name, registries));"), train)
     }
 
@@ -182,7 +182,7 @@
     }
 
     @Test
-    fun `dist executor expressions use guards and the typed adapter according to call shape`() {
+    fun `dist executor expressions keep the forge api through a generated compat class`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
         srcDir.resolve("ExampleMod.java").writeText("""
@@ -216,16 +216,15 @@
 
         val result = StructuralRefactorPass().apply(tempDir)
         val packet = srcDir.resolve("RangePacket.java").readText()
-        val compat = tempDir.resolve("src/main/java/com/modporter/generated/example/compat/DistExecution.java")
+        val compat = tempDir.resolve("src/main/java/com/modporter/generated/example/compat/DistExecutor.java")
 
         assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
         assertTrue(compat.exists())
-        assertTrue(compat.readText().contains("public static void runWhenOn(Dist dist, Supplier<? extends Runnable> target)"))
-        assertTrue(compat.readText().contains("if (FMLLoader.getDist() == dist)"))
+        assertTrue(compat.readText().contains("public static void unsafeRunWhenOn(Dist dist, Supplier<Runnable> toRun)"))
+        assertTrue(compat.readText().contains("if (FMLEnvironment.dist == dist)"))
+        assertTrue(packet.contains("import com.modporter.generated.example.compat.DistExecutor;"), packet)
         assertFalse(packet.contains("import net.neoforged.fml.DistExecutor;"), packet)
-        assertTrue(packet.contains("if (FMLLoader.getDist() == Dist.CLIENT)"), packet)
-        assertTrue(packet.contains("com.modporter.generated.example.compat.DistExecution.runWhenOn(Dist.CLIENT, toRun)"), packet)
-        assertTrue(packet.contains("com.modporter.generated.example.compat.DistExecution.runWhenOn(Dist.CLIENT, () -> this::handleClient)"), packet)
+        assertTrue(packet.contains("DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> this::handleClient)"), packet)
     }
 
     @Test
@@ -355,11 +354,7 @@
         val behaviour = srcDir.resolve("TankBehaviour.java").readText()
 
         assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        assertTrue(
-            Regex("""public void read\(CompoundTag nbt, boolean clientPacket, (?:net\.minecraft\.core\.)?HolderLookup\.Provider registries\) \{""")
-                .containsMatchIn(behaviour),
-            behaviour
-        )
+        assertTrue(behaviour.contains("public void read(CompoundTag nbt, boolean clientPacket, HolderLookup.Provider registries) {"), behaviour)
         assertTrue(behaviour.contains("tank.readFromNBT(registries, nbt.getCompound(\"Tank\"));"), behaviour)
         assertTrue(smart.contains("tankBehaviour.read(tag, false, registries);"), smart)
         assertTrue(smart.contains("link.buffer.deserializeNBT(registries, tag.getCompound(\"Buffer\"));"), smart)
@@ -1098,10 +1093,10 @@
         assertTrue(data.contains("public void loadFromNBT(CompoundTag tag, HolderLookup.Provider registries)"), data)
         assertTrue(data.contains("heldStack.saveOptional(registries)"), data)
         assertTrue(data.contains("ItemStack.parseOptional(registries, tag.getCompound(\"held\"))"), data)
-        assertTrue(provider.contains("public CompoundTag serializeNBT(HolderLookup.Provider registries)"), provider)
-        assertTrue(provider.contains("getData().saveToNBT(tag, registries);"), provider)
-        assertTrue(provider.contains("public void deserializeNBT(HolderLookup.Provider registries, CompoundTag tag)"), provider)
-        assertTrue(provider.contains("getData().loadFromNBT(tag, registries);"), provider)
+        assertTrue(provider.contains("public CompoundTag serializeNBT(net.minecraft.core.HolderLookup.Provider provider)"), provider)
+        assertTrue(provider.contains("getData().saveToNBT(tag, provider);"), provider)
+        assertTrue(provider.contains("public void deserializeNBT(net.minecraft.core.HolderLookup.Provider provider, CompoundTag tag)"), provider)
+        assertTrue(provider.contains("getData().loadFromNBT(tag, provider);"), provider)
         assertTrue(wrapper.contains("public void fromStackNBT(CompoundTag tag, HolderLookup.Provider registries)"), wrapper)
         assertTrue(wrapper.contains("data.loadFromNBT(tag, registries);"), wrapper)
         assertFalse(data.contains("RegistryAccess.EMPTY"), data)

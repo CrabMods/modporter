@@ -563,8 +563,8 @@
 
         assertTrue(result.changes.any { it.ruleId == "struct-inbtserializable-holderlookup" })
         assertTrue(migrated.contains("""private static final String DOC = "public CompoundTag serializeNBT() public void deserializeNBT(CompoundTag tag)";"""), migrated)
-        assertTrue(migrated.contains("public CompoundTag serializeNBT(HolderLookup.Provider registries)"), migrated)
-        assertTrue(migrated.contains("public void deserializeNBT(HolderLookup.Provider registries, CompoundTag tag)"), migrated)
+        assertTrue(migrated.contains("public CompoundTag serializeNBT(net.minecraft.core.HolderLookup.Provider provider)"), migrated)
+        assertTrue(migrated.contains("public void deserializeNBT(net.minecraft.core.HolderLookup.Provider provider, CompoundTag tag)"), migrated)
         val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
         assertTrue(commentBlock.contains("public CompoundTag serializeNBT()"), migrated)
         assertTrue(commentBlock.contains("public void deserializeNBT(CompoundTag tag)"), migrated)
@@ -626,8 +626,8 @@
         val plainData = impl.substringAfter("class PlainData")
 
         assertTrue(result.changes.any { it.ruleId == "struct-inbtserializable-holderlookup" })
-        assertTrue(impl.contains("public CompoundTag serializeNBT(HolderLookup.Provider registries)"), impl)
-        assertTrue(impl.contains("public void deserializeNBT(HolderLookup.Provider registries, CompoundTag tag)"), impl)
+        assertTrue(impl.contains("public CompoundTag serializeNBT(net.minecraft.core.HolderLookup.Provider provider)"), impl)
+        assertTrue(impl.contains("public void deserializeNBT(net.minecraft.core.HolderLookup.Provider provider, CompoundTag tag)"), impl)
         assertTrue(plainData.contains("public CompoundTag serializeNBT()"), impl)
         assertTrue(plainData.contains("public void deserializeNBT(CompoundTag tag)"), impl)
         assertFalse(plainData.contains("HolderLookup.Provider"), impl)

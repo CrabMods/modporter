@@ -121,7 +121,7 @@ class LibraryRegistryTypeArgumentsTest {
     }
 
     @Test
-    fun `concrete block bounds select the registry while abstract bounds remain unchanged`() {
+    fun `holders of type variables take the registry from the bound in their own scope`() {
         java("Registrate", """
             package com.example;
 
@@ -143,6 +143,6 @@ class LibraryRegistryTypeArgumentsTest {
 
         val registrate = read("Registrate")
         assertTrue(registrate.contains("<T extends Block> DeferredHolder<Block, T> block("), registrate)
-        assertTrue(registrate.contains("Function<DeferredHolder<T, T>, ?> factory"), registrate)
+        assertTrue(registrate.contains("Function<DeferredHolder<R, T>, ?> factory"), registrate)
     }
 }

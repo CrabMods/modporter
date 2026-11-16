@@ -175,3 +175,4 @@ class FinalCapabilityCompatMigrationTest {
         assertTrue(result.gates.isEmpty(), result.gates.joinToString("\n"))
     }
 }
+

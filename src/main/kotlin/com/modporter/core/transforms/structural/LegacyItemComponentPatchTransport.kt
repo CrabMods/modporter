@@ -32,7 +32,6 @@ import com.github.javaparser.ast.expr.ThisExpr
 import com.github.javaparser.ast.expr.TypeExpr
 import com.github.javaparser.ast.expr.TypePatternExpr
 import com.github.javaparser.ast.expr.UnaryExpr
-import com.github.javaparser.ast.expr.VariableDeclarationExpr
 import com.github.javaparser.ast.stmt.BlockStmt
 import com.github.javaparser.ast.stmt.CatchClause
 import com.github.javaparser.ast.stmt.ExpressionStmt
@@ -98,8 +97,6 @@ internal object LegacyItemComponentPatchTransport {
     private const val PLAYER = "net.minecraft.world.entity.player.Player"
     private const val LOOT_BUILDER = "net.minecraft.world.level.storage.loot.LootParams.Builder"
     private const val BLOCK_ENTITY = "net.minecraft.world.level.block.entity.BlockEntity"
-    private const val ENTITY_BLOCK = "net.minecraft.world.level.block.EntityBlock"
-    private const val IBE = "com.simibubi.create.foundation.block.IBE"
     private const val CONSUMER = "java.util.function.Consumer"
 
     private class CapturedSource(
@@ -120,7 +117,7 @@ internal object LegacyItemComponentPatchTransport {
         val projectTypes: Set<String>,
         val projectFacts: ProjectValueFacts,
         val valueTypes: SourceValueTypes,
-        val exactIbeReceiverTypes: Map<String, String>
+        val consumerContractReceiverTypes: Map<String, Map<String, String>>
     ) {
         private val lineStarts = buildList {
             add(0)
@@ -309,7 +306,7 @@ internal object LegacyItemComponentPatchTransport {
             )
         }
         clonePass.projectValueFacts = facts
-        val exactIbeReceiverTypes = exactIbeConsumerReceiverTypes(
+        val consumerContractReceiverTypes = consumerContractReceiverTypes(
             snapshots.map { it.unit },
             facts
         )
@@ -321,7 +318,7 @@ internal object LegacyItemComponentPatchTransport {
                 facts.types,
                 facts,
                 SourceValueTypes(clonePass, it.source),
-                exactIbeReceiverTypes
+                consumerContractReceiverTypes
             )
         }
         val preflight = discover(indexedOriginals, facts)
@@ -368,7 +365,7 @@ internal object LegacyItemComponentPatchTransport {
                     facts.types,
                     facts,
                     SourceValueTypes(clonePass, staged),
-                    exactIbeReceiverTypes
+                    consumerContractReceiverTypes
                 )
             }
         }
@@ -801,91 +798,6 @@ internal object LegacyItemComponentPatchTransport {
         )
     }
 
-    private fun streamMapLambda(streamReturn: ReturnStmt, lootName: String): LambdaExpr? {
-        val terminal = streamReturn.expression.orElse(null) as? MethodCallExpr ?: return null
-        if (terminal.nameAsString != "toList" || terminal.arguments.isNotEmpty() ||
-            terminal.typeArguments.isPresent
-        ) return null
-        val mapCall = terminal.scope.orElse(null) as? MethodCallExpr ?: return null
-        if (mapCall.nameAsString != "map" || mapCall.arguments.size != 1 ||
-            mapCall.typeArguments.isPresent
-        ) return null
-        val streamCall = mapCall.scope.orElse(null) as? MethodCallExpr ?: return null
-        if (streamCall.nameAsString != "stream" || streamCall.arguments.isNotEmpty() ||
-            streamCall.typeArguments.isPresent
-        ) return null
-        if ((streamCall.scope.orElse(null) as? NameExpr)?.nameAsString != lootName) return null
-        return mapCall.arguments.single() as? LambdaExpr
-    }
-
-    private fun tagOverlayValue(
-        file: ParsedFile,
-        statement: Statement,
-        expectedOwner: String
-    ): Expression? {
-        val expression = (statement as? ExpressionStmt)?.expression ?: return null
-        val direct = expression as? MethodCallExpr ?: return null
-        if (direct.nameAsString == "setTag") {
-            if ((direct.scope.orElse(null) as? NameExpr)?.nameAsString != expectedOwner ||
-                direct.arguments.size != 1 || direct.typeArguments.isPresent
-            ) return null
-            return direct.arguments.single()
-        }
-        if (direct.nameAsString != "make" ||
-            direct.scope.map { it.toString() }.orElse("") != "net.minecraft.Util" ||
-            direct.arguments.size != 2 || direct.typeArguments.isPresent ||
-            (direct.arguments[0] as? NameExpr)?.nameAsString != expectedOwner
-        ) return null
-
-        val lambda = direct.arguments[1] as? LambdaExpr ?: return null
-        if (lambda.parameters.size != 1 ||
-            !lambda.parameters.single().type.isUnknownType ||
-            lambda.parameters.single().isVarArgs
-        ) return null
-        val generatedOwner = lambda.parameters.single().nameAsString
-        if (!generatedOwner.matches(Regex("""modPorterCustomDataOwner\d*"""))) return null
-        val body = lambda.body as? BlockStmt ?: return null
-        if (body.statements.size != 2) return null
-
-        val declarationStatement = body.statements[0] as? ExpressionStmt ?: return null
-        val declaration = declarationStatement.expression as? VariableDeclarationExpr ?: return null
-        if (declaration.variables.size != 1 || declaration.modifiers.isNotEmpty()) return null
-        val tagVariable = declaration.variables.single()
-        val generatedValue = tagVariable.nameAsString
-        if (!file.isType(tagVariable.typeAsString, COMPOUND_TAG, tagVariable) ||
-            !generatedValue.matches(Regex("""modPorterCustomDataValue\d*"""))
-        ) return null
-        val initializer = tagVariable.initializer.orElse(null) ?: return null
-
-        val guard = body.statements[1] as? IfStmt ?: return null
-        if (!guard.condition.isNullComparison(generatedValue)) return null
-        val nullBlock = guard.thenStmt as? BlockStmt ?: return null
-        val valueBlock = guard.elseStmt.orElse(null) as? BlockStmt ?: return null
-        val remove = (nullBlock.statements.singleOrNull() as? ExpressionStmt)
-            ?.expression as? MethodCallExpr ?: return null
-        if (remove.nameAsString != "remove" || remove.typeArguments.isPresent ||
-            (remove.scope.orElse(null) as? NameExpr)?.nameAsString != generatedOwner ||
-            remove.arguments.singleOrNull()?.toString() !=
-            "net.minecraft.core.component.DataComponents.CUSTOM_DATA"
-        ) return null
-
-        val set = (valueBlock.statements.singleOrNull() as? ExpressionStmt)
-            ?.expression as? MethodCallExpr ?: return null
-        if (set.nameAsString != "set" || set.typeArguments.isPresent ||
-            (set.scope.orElse(null) as? NameExpr)?.nameAsString != generatedOwner ||
-            set.arguments.size != 2 ||
-            set.arguments[0].toString() !=
-            "net.minecraft.core.component.DataComponents.CUSTOM_DATA"
-        ) return null
-        val customData = set.arguments[1] as? MethodCallExpr ?: return null
-        if (customData.nameAsString != "of" || customData.typeArguments.isPresent ||
-            customData.scope.map { it.toString() }.orElse("") !=
-            "net.minecraft.world.item.component.CustomData" ||
-            (customData.arguments.singleOrNull() as? NameExpr)?.nameAsString != generatedValue
-        ) return null
-        return initializer
-    }
-
     private fun dropConsumer(
         file: ParsedFile,
         getterCall: MethodCallExpr,
@@ -905,7 +817,7 @@ internal object LegacyItemComponentPatchTransport {
         val nullReturn = nullGuard.thenStmt.unwrapSingle() as? ReturnStmt ?: return null
         val lootName = (nullReturn.expression.orElse(null) as? NameExpr)?.nameAsString ?: return null
         val streamReturn = block.statements[firstIndex + 2] as? ReturnStmt ?: return null
-        val lambda = streamMapLambda(streamReturn, lootName) ?: return null
+        val lambda = streamReturn.findAll(LambdaExpr::class.java).singleOrNull() ?: return null
         if (lambda.parameters.size != 1) return null
         val overlayName = lambda.parameters.single().nameAsString
         val lambdaBlock = lambda.body as? BlockStmt ?: return null
@@ -930,15 +842,15 @@ internal object LegacyItemComponentPatchTransport {
             itemCall.scope.map { it.toString() }.orElse("") != overlayName ||
             countCall.scope.map { it.toString() }.orElse("") != overlayName
         ) return null
-        val overlayValue = tagOverlayValue(
-            file,
-            lambdaBlock.statements[2],
-            modifiedVariable.nameAsString
-        ) ?: return null
-        val getTag = overlayValue as? MethodCallExpr ?: return null
+        val overlayStatement = lambdaBlock.statements[2] as? ExpressionStmt ?: return null
+        val setTag = overlayStatement.expression as? MethodCallExpr ?: return null
+        if (setTag.nameAsString != "setTag" ||
+            setTag.scope.map { it.toString() }.orElse("") != modifiedVariable.nameAsString ||
+            setTag.arguments.size != 1
+        ) return null
+        val getTag = setTag.arguments.single() as? MethodCallExpr ?: return null
         if (getTag.nameAsString != "getTag" ||
-            getTag.arguments.isNotEmpty() ||
-            (getTag.scope.orElse(null) as? NameExpr)?.nameAsString != overlayName
+            getTag.scope.map { it.toString() }.orElse("") != overlayName
         ) return null
         val finalReturn = lambdaBlock.statements[3] as? ReturnStmt ?: return null
         if (finalReturn.expression.map { it.toString() }.orElse("") != modifiedVariable.nameAsString) {
@@ -1071,12 +983,12 @@ internal object LegacyItemComponentPatchTransport {
             putInt.arguments[0] !is StringLiteralExpr ||
             putInt.arguments[1].toString() != integerVariable.nameAsString
         ) return null
-        val overlayValue = tagOverlayValue(
-            file,
-            block.statements[firstIndex + 5],
-            resultVariable.nameAsString
-        ) ?: return null
-        if ((overlayValue as? NameExpr)?.nameAsString != vanillaVariable.nameAsString) return null
+        val setTagStatement = block.statements[firstIndex + 5] as? ExpressionStmt ?: return null
+        val setTag = setTagStatement.expression as? MethodCallExpr ?: return null
+        if (setTag.nameAsString != "setTag" ||
+            setTag.scope.map { it.toString() }.orElse("") != resultVariable.nameAsString ||
+            setTag.arguments.singleOrNull()?.toString() != vanillaVariable.nameAsString
+        ) return null
         val returned = block.statements[firstIndex + 6] as? ReturnStmt ?: return null
         if (returned.expression.map { it.toString() }.orElse("") != resultVariable.nameAsString) {
             return null
@@ -1651,112 +1563,143 @@ internal object LegacyItemComponentPatchTransport {
         return returned.isField(field)
     }
 
-    private fun exactIbeConsumerReceiverTypes(
+    /**
+     * Receiver types of untyped lambda parameters handed to source-owned consumer contracts, by
+     * implementing class and contract method name.
+     *
+     * A contract is a source interface `I<T extends BlockEntity>` with a default method
+     * `m(a, b, Consumer<T> action)` that is its only three-parameter method named `m`. In a
+     * class that directly implements `I<X>` once, with an exact project type `X`, and whose own
+     * and inherited declarations (project classes and interfaces; platform types through the
+     * 1.21.1 member table) declare no other three-parameter `m`, an unqualified
+     * `m(a, b, x -> ...)` binds `x` to `X` by Java's lambda typing. An unknown external
+     * supertype leaves the class unbound.
+     */
+    private fun consumerContractReceiverTypes(
         units: List<CompilationUnit>,
         facts: ProjectValueFacts
-    ): Map<String, String> {
+    ): Map<String, Map<String, String>> {
         val declarations = units.flatMap { unit ->
             unit.findAll(ClassOrInterfaceDeclaration::class.java).mapNotNull { declaration ->
                 qualifiedNamedOwner(declaration, unit)?.let { Triple(it, unit, declaration) }
             }
         }
-        val ibe = declarations.singleOrNull { it.first == IBE } ?: return emptyMap()
-        if (!ibe.third.isExactIbeConsumerContract(ibe.second, facts.types)) return emptyMap()
-
-        val bindings = linkedMapOf<String, MutableSet<String>>()
-        declarations.forEach { (ownerName, unit, declaration) ->
-            if (declaration.isInterface) return@forEach
-            if (declaration.methods.any {
-                    it.nameAsString == "withBlockEntityDo" && it.parameters.size == 3
-                } ||
-                projectParentDefinesMethod(ownerName, "withBlockEntityDo/3", facts)
-            ) return@forEach
-            val implemented = declaration.implementedTypes.filter {
-                unit.isType(it.nameWithScope, IBE, facts.types, declaration)
-            }
-            if (implemented.size != 1) return@forEach
-            val argument = implemented.single().typeArguments.orElse(null)
-                ?.singleOrNull() as? ClassOrInterfaceType ?: return@forEach
-            val receiverType = unit.resolveExactProjectTypeName(
-                argument.toString(),
-                facts.types,
-                declaration
-            ) ?: return@forEach
-            bindings.getOrPut(ownerName) { linkedSetOf() } += receiverType
-        }
-        return bindings.mapNotNull { (owner, receiverTypes) ->
-            receiverTypes.singleOrNull()?.let { owner to it }
+        val byName = declarations.groupBy { it.first }
+        val contracts = declarations.mapNotNull { (name, unit, declaration) ->
+            declaration.consumerContractMethods(unit, facts.types)
+                .takeIf { it.isNotEmpty() && byName.getValue(name).size == 1 }
+                ?.let { name to it }
         }.toMap()
+        if (contracts.isEmpty()) return emptyMap()
+
+        val bindings = linkedMapOf<String, MutableMap<String, MutableSet<String>>>()
+        declarations.forEach { (ownerName, unit, declaration) ->
+            if (declaration.isInterface || byName.getValue(ownerName).size != 1) return@forEach
+            contracts.forEach contract@{ (contract, methods) ->
+                val implemented = declaration.implementedTypes.filter {
+                    unit.isType(it.nameWithScope, contract, facts.types, declaration)
+                }
+                if (implemented.size != 1) return@contract
+                val argument = implemented.single().typeArguments.orElse(null)
+                    ?.singleOrNull() as? ClassOrInterfaceType ?: return@contract
+                val receiverType = unit.resolveExactProjectTypeName(
+                    argument.toString(),
+                    facts.types,
+                    declaration
+                ) ?: return@contract
+                methods.forEach { method ->
+                    if (!declaresOutsideContract(ownerName, contract, method, byName, facts)) {
+                        bindings.getOrPut(ownerName) { linkedMapOf() }
+                            .getOrPut(method) { linkedSetOf() } += receiverType
+                    }
+                }
+            }
+        }
+        return bindings.mapValues { (_, methods) ->
+            methods.mapNotNull { (method, receiverTypes) ->
+                receiverTypes.singleOrNull()?.let { method to it }
+            }.toMap()
+        }.filterValues { it.isNotEmpty() }
     }
 
-    private fun projectParentDefinesMethod(
+    /**
+     * Whether a type of [owner]'s hierarchy other than [contract] declares a three-parameter
+     * [method], or the hierarchy cannot be proven free of one.
+     */
+    private fun declaresOutsideContract(
         owner: String,
-        methodKey: String,
+        contract: String,
+        method: String,
+        declarations: Map<String, List<Triple<String, CompilationUnit, ClassOrInterfaceDeclaration>>>,
         facts: ProjectValueFacts
     ): Boolean {
-        var current = facts.parents[owner]
+        val pending = ArrayDeque(listOf(owner))
         val seen = mutableSetOf<String>()
-        while (current != null && seen.add(current)) {
-            if (facts.methods[current]?.get(methodKey).orEmpty().isNotEmpty()) return true
-            current = facts.parents[current]
+        while (pending.isNotEmpty()) {
+            val current = pending.removeFirst()
+            if (!seen.add(current)) continue
+            val declared = declarations[current]?.singleOrNull()
+            if (declared == null) {
+                if (current in facts.types) return true
+                if (!TargetMembers.hasClass(current)) return true
+                if (TargetMembers.declaresInHierarchy(current, method, 3)) return true
+                continue
+            }
+            val (_, unit, declaration) = declared
+            if (current != contract &&
+                declaration.methods.any { it.nameAsString == method && it.parameters.size == 3 }
+            ) return true
+            (declaration.extendedTypes + declaration.implementedTypes).forEach { supertype ->
+                val resolved = unit.resolveSupertypeName(supertype.nameWithScope, facts.types, declaration)
+                    ?: return true
+                pending += resolved
+            }
         }
         return false
     }
 
-    private fun ClassOrInterfaceDeclaration.isExactIbeConsumerContract(
+    private fun CompilationUnit.resolveSupertypeName(
+        sourceType: String,
+        projectTypes: Set<String>,
+        context: Node
+    ): String? {
+        resolveExactProjectTypeName(sourceType, projectTypes, context)?.let { return it }
+        val plain = sourceType.substringBefore('<').replace(" ", "")
+        val first = plain.substringBefore('.')
+        if (context.hasVisibleTypeParameter(first)) return null
+        if (first.firstOrNull()?.isLowerCase() == true) return plain
+        val explicit = imports.filter {
+            !it.isStatic && !it.isAsterisk && it.name.identifier == first
+        }.map { it.nameAsString }.distinct()
+        if (explicit.isNotEmpty()) return explicit.singleOrNull()?.plus(plain.removePrefix(first))
+        val onDemand = imports.filter { !it.isStatic && it.isAsterisk }
+            .map { "${it.nameAsString}.$first" }
+            .filter { TargetMembers.hasClass(it) }
+            .distinct()
+        return onDemand.singleOrNull()?.plus(plain.removePrefix(first))
+    }
+
+    /** Names of the default `m(a, b, Consumer<T>)` methods that are this interface's only `m/3`. */
+    private fun ClassOrInterfaceDeclaration.consumerContractMethods(
         unit: CompilationUnit,
         projectTypes: Set<String>
-    ): Boolean {
-        if (!isInterface) return false
-        if (extendedTypes.size != 1 ||
-            !unit.isType(
-                extendedTypes.single().nameWithScope,
-                ENTITY_BLOCK,
-                projectTypes,
-                this
-            )
-        ) return false
-        val typeParameter = typeParameters.singleOrNull() ?: return false
-        val bound = typeParameter.typeBound.singleOrNull() ?: return false
+    ): List<String> {
+        if (!isInterface) return emptyList()
+        val typeParameter = typeParameters.singleOrNull() ?: return emptyList()
+        val bound = typeParameter.typeBound.singleOrNull() ?: return emptyList()
         if (!unit.isType(bound.nameWithScope, BLOCK_ENTITY, projectTypes, typeParameter)) {
-            return false
+            return emptyList()
         }
-        val method = methods.singleOrNull {
-            it.nameAsString == "withBlockEntityDo" && it.parameters.size == 3
-        } ?: return false
-        if (!method.isDefault || !method.type.isVoidType) return false
-        if (!unit.isType(
-                method.parameters[0].typeAsString,
-                BLOCK_GETTER,
-                projectTypes,
-                method.parameters[0]
-            ) ||
-            !unit.isType(
-                method.parameters[1].typeAsString,
-                BLOCK_POS,
-                projectTypes,
-                method.parameters[1]
-            )
-        ) return false
-        val consumer = method.parameters[2].type as? ClassOrInterfaceType ?: return false
-        if (!unit.isType(consumer.nameWithScope, CONSUMER, projectTypes, consumer)) return false
-        val consumed = consumer.typeArguments.orElse(null)?.singleOrNull() ?: return false
-        if (consumed.toString() != typeParameter.nameAsString) return false
-
-        val statement = method.body.orElse(null)?.statements?.singleOrNull()
-            as? ExpressionStmt ?: return false
-        val ifPresent = statement.expression as? MethodCallExpr ?: return false
-        if (ifPresent.nameAsString != "ifPresent" || ifPresent.arguments.size != 1 ||
-            (ifPresent.arguments[0] as? NameExpr)?.nameAsString !=
-            method.parameters[2].nameAsString
-        ) return false
-        val optional = ifPresent.scope.orElse(null) as? MethodCallExpr ?: return false
-        return optional.nameAsString == "getBlockEntityOptional" &&
-            optional.arguments.size == 2 &&
-            (optional.arguments[0] as? NameExpr)?.nameAsString ==
-            method.parameters[0].nameAsString &&
-            (optional.arguments[1] as? NameExpr)?.nameAsString ==
-            method.parameters[1].nameAsString
+        return methods.filter { method ->
+            if (!method.isDefault || method.parameters.size != 3) return@filter false
+            val consumer = method.parameters[2].type as? ClassOrInterfaceType ?: return@filter false
+            unit.isType(consumer.nameWithScope, CONSUMER, projectTypes, consumer) &&
+                consumer.typeArguments.orElse(null)?.singleOrNull()?.toString() ==
+                typeParameter.nameAsString &&
+                methods.count {
+                    it.nameAsString == method.nameAsString && it.parameters.size == 3
+                } == 1
+        }.map { it.nameAsString }
     }
 
     private fun CompilationUnit.resolveExactProjectTypeName(
@@ -1799,22 +1742,21 @@ internal object LegacyItemComponentPatchTransport {
         return wildcardMatches.singleOrNull()?.plus(plain.removePrefix(first))
     }
 
-    private fun NameExpr.exactIbeConsumerType(file: ParsedFile): String? {
+    private fun NameExpr.consumerContractType(file: ParsedFile): String? {
         val lambda = findAncestor(LambdaExpr::class.java).orElse(null) ?: return null
         val parameter = lambda.parameters.singleOrNull() ?: return null
         if (parameter.nameAsString != nameAsString || !parameter.type.isUnknownType) {
             return null
         }
         val call = lambda.parentNode.orElse(null) as? MethodCallExpr ?: return null
-        if (call.nameAsString != "withBlockEntityDo" ||
-            call.arguments.size != 3 ||
+        if (call.arguments.size != 3 ||
             call.arguments[2] !== lambda
         ) return null
         val callScope = call.scope.orElse(null)
         if (callScope != null && callScope !is ThisExpr) return null
         val declaration = call.nearestOwner() ?: return null
         val ownerName = qualifiedNamedOwner(declaration, file.unit) ?: return null
-        return file.exactIbeReceiverTypes[ownerName]
+        return file.consumerContractReceiverTypes[ownerName]?.get(call.nameAsString)
     }
 
     private fun MethodCallExpr.receiverBinding(
@@ -1838,10 +1780,10 @@ internal object LegacyItemComponentPatchTransport {
         if (receiver is NameExpr &&
             file.valueTypes.untypedLambdaParameter(receiver.nameAsString, offset)
         ) {
-            val exactIbeType = receiver.exactIbeConsumerType(file)
+            val contractType = receiver.consumerContractType(file)
             return when {
-                exactIbeType == ownerName -> CanonicalBinding.CANONICAL
-                exactIbeType != null -> CanonicalBinding.UNRELATED
+                contractType == ownerName -> CanonicalBinding.CANONICAL
+                contractType != null -> CanonicalBinding.UNRELATED
                 else -> CanonicalBinding.AMBIGUOUS
             }
         }
@@ -1881,10 +1823,10 @@ internal object LegacyItemComponentPatchTransport {
         if (receiver is NameExpr &&
             file.valueTypes.untypedLambdaParameter(receiver.nameAsString, offset)
         ) {
-            val exactIbeType = receiver.exactIbeConsumerType(file)
+            val contractType = receiver.consumerContractType(file)
             return when {
-                exactIbeType == ownerName -> CanonicalBinding.CANONICAL
-                exactIbeType != null -> CanonicalBinding.UNRELATED
+                contractType == ownerName -> CanonicalBinding.CANONICAL
+                contractType != null -> CanonicalBinding.UNRELATED
                 else -> CanonicalBinding.AMBIGUOUS
             }
         }

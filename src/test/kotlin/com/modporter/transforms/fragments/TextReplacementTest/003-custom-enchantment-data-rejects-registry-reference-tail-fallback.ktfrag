@@ -444,9 +444,7 @@
         val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(tempDir)
 
         assertTrue(
-            result.errors.any {
-                it.contains("item class 'com.example.ChainBlockItem' has no source registry entry")
-            },
+            result.errors.any { it.contains("item class 'ChainBlockItem' has no source registry entry") },
             result.errors.joinToString("\n")
         )
         assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/destruction.json").exists())

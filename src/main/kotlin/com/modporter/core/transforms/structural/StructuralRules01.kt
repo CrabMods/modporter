@@ -1,6 +1,7 @@
 package com.modporter.core.transforms.structural
 
 import com.modporter.core.pipeline.*
+import com.modporter.core.transforms.util.JavaSourceText
 import com.github.javaparser.JavaParser
 import com.github.javaparser.ParserConfiguration
 import com.github.javaparser.ast.CompilationUnit
@@ -365,6 +366,11 @@ internal fun StructuralRefactorPass.cleanupSimpleChannelRemnants(projectDir: Pat
         .forEach { javaFile ->
             val text = javaFile.toFile().readText()
 
+            // Only process files where earlier passes removed SimpleChannel or where a
+            // generated ModNetwork exists for this source tree.
+            val hasGeneratedNetwork = srcDir.resolve(srcDir.relativize(javaFile).parent ?: Path.of(""))
+                .resolve("ModNetwork.java")
+                .exists()
             fun isLegacySimpleChannelCleanupComment(line: String): Boolean {
                 val trimmed = line.trimStart()
                 return trimmed.startsWith("//") &&
@@ -373,10 +379,7 @@ internal fun StructuralRefactorPass.cleanupSimpleChannelRemnants(projectDir: Pat
                         (trimmed.contains("HANDLER removed") && trimmed.contains("RegisterPayloadHandlersEvent")))
             }
 
-            // Marker comments are the exact handoff from a source-shaped packet migration.
-            // A sibling ModNetwork.java is not evidence that arbitrary fluent chains in this
-            // file belong to SimpleChannel.
-            if (text.lineSequence().none(::isLegacySimpleChannelCleanupComment)) return@forEach
+            if (!hasGeneratedNetwork && text.lineSequence().none(::isLegacySimpleChannelCleanupComment)) return@forEach
 
             var modified = text
 
@@ -400,6 +403,20 @@ internal fun StructuralRefactorPass.cleanupSimpleChannelRemnants(projectDir: Pat
             if (removedRegisterMessages) {
                 modified = cleanedLines.joinToString("\n")
             }
+
+            // Remove orphaned chain calls: lines starting with .method(...)
+            modified = modified.replace(
+                Regex("""^(\s+)(\.[a-zA-Z]+\([^)]*\)[^;\r\n]*;?)""", RegexOption.MULTILINE),
+                ""
+            )
+
+            // Remove INSTANCE.xxx calls (messageBuilder, send, etc) after ModNetwork takes over.
+            modified = modified.replace(
+                Regex("""^(\s+)(INSTANCE\.[^\r\n]+)""", RegexOption.MULTILINE),
+                ""
+            )
+
+            // INSTANCE-only method bodies are handled by the line-by-line removal above.
 
             if (modified != text) {
                 if (!dryRun) {
@@ -516,6 +533,9 @@ internal fun StructuralRefactorPass.migrateBlockUseMethod(projectDir: Path, dryR
     val changes = mutableListOf<Change>()
     val srcDir = projectDir.resolve("src/main/java")
     if (!srcDir.exists()) return changes
+    // Owner class -> whether its legacy use() became useItemOn (true) or useWithoutItem (false).
+    val migratedHooks = linkedMapOf<String, Boolean>()
+    val migratedTexts = linkedMapOf<Path, String>()
 
     walkJavaSourceRoots(srcDir)
         .filter { it.toString().endsWith(".java") }
@@ -677,6 +697,8 @@ internal fun StructuralRefactorPass.migrateBlockUseMethod(projectDir: Path, dryR
             // (useWithoutItem is not deprecated, so the suppression is no longer needed)
 
             if (modified != text) {
+                blockUseOwner(text, match.range.first)?.let { migratedHooks[it] = usesHeldItem }
+                migratedTexts[javaFile] = modified
                 if (!dryRun) {
                     javaFile.toFile().writeText(modified)
                 }
@@ -696,7 +718,94 @@ internal fun StructuralRefactorPass.migrateBlockUseMethod(projectDir: Path, dryR
             }
         }
 
+    if (migratedHooks.isNotEmpty()) {
+        walkJavaSourceRoots(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val text = migratedTexts[javaFile] ?: javaFile.toFile().readText()
+                val retargeted = retargetForwardedBlockUseCalls(text, migratedHooks)
+                if (retargeted != text) {
+                    if (!dryRun) javaFile.toFile().writeText(retargeted)
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Retarget calls to another block's legacy use() at its migrated 1.21 hook in ${javaFile.fileName}",
+                        before = "otherBlock.use(state, level, pos, player, hand, hit)",
+                        after = "otherBlock.useItemOn(stack, ...) or otherBlock.useWithoutItem(state, level, pos, player, hit)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "structural-block-use-forwarded-call"
+                    ))
+                }
+            }
+    }
+
     return changes
+}
+
+/** The class declaring the method that starts at [offset]: package plus the nearest preceding class name. */
+private fun StructuralRefactorPass.blockUseOwner(source: String, offset: Int): String? {
+    val code = maskJavaCommentsAndLiterals(source)
+    val pkg = Regex("""(?m)^\s*package\s+([\w.]+)\s*;""").find(code)?.groupValues?.get(1)
+    val owner = Regex("""\bclass\s+([A-Za-z_$][\w$]*)""").findAll(code.substring(0, offset)).lastOrNull()
+        ?.groupValues?.get(1) ?: return null
+    return if (pkg.isNullOrEmpty()) owner else "$pkg.$owner"
+}
+
+/**
+ * A call `other.use(state, level, pos, player, hand, hit)` on a project block whose own legacy
+ * use() override was migrated no longer resolves in 1.21. It is retargeted at the hook that
+ * override became: `useItemOn(stack, ...)` — with the enclosing useItemOn's stack, else the held
+ * item the legacy override read itself — or `useWithoutItem(state, level, pos, player, hit)`.
+ * The receiver's declared type must name the migrated class and share its package (the 1.21
+ * hooks are protected). An ItemInteractionResult meets an InteractionResult through result(),
+ * except when it is returned straight from a method that returns ItemInteractionResult.
+ */
+internal fun StructuralRefactorPass.retargetForwardedBlockUseCalls(source: String, migratedHooks: Map<String, Boolean>): String {
+    if (!source.contains(".use(")) return source
+    val code = maskJavaCommentsAndLiterals(source)
+    val pkg = Regex("""(?m)^\s*package\s+([\w.]+)\s*;""").find(code)?.groupValues?.get(1).orEmpty()
+    val imports = Regex("""(?m)^\s*import\s+([\w.]+)\s*;""").findAll(code)
+        .associate { it.groupValues[1].substringAfterLast('.') to it.groupValues[1] }
+    fun resolve(type: String): String? {
+        val candidates = if ('.' in type) listOf(type) else listOfNotNull(imports[type], if (pkg.isEmpty()) type else "$pkg.$type")
+        return candidates.firstOrNull { it in migratedHooks }
+    }
+    val methods = javaMethodRangesIncludingDefault(source)
+    val edits = mutableListOf<Pair<IntRange, String>>()
+    Regex("""(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.\s*use\s*\(""").findAll(code).forEach { call ->
+        val receiver = call.groupValues[1]
+        val open = call.range.last
+        val close = JavaSourceText.matchingParen(code, open)
+        if (close < 0) return@forEach
+        val args = JavaSourceText.splitTopLevelArgs(source.substring(open + 1, close)).map { it.trim() }
+        if (args.size != 6) return@forEach
+        val before = code.substring(0, call.range.first)
+        val declared = Regex(
+            """(?:instanceof\s+([\w.]+)\s+${Regex.escape(receiver)}\b|(?<![\w$.])([A-Z][\w.]*)\s+${Regex.escape(receiver)}\s*[=;,)])"""
+        ).findAll(before).lastOrNull() ?: return@forEach
+        val owner = resolve(declared.groupValues[1].ifEmpty { declared.groupValues[2] }) ?: return@forEach
+        if (owner.substringBeforeLast('.', "") != pkg) return@forEach
+        val method = methods.lastOrNull { call.range.first in it.range } ?: return@forEach
+        val replacement = if (migratedHooks.getValue(owner)) {
+            val stack = Regex("""\buseItemOn\s*\(\s*(?:final\s+)?(?:net\.minecraft\.world\.item\.)?ItemStack\s+([A-Za-z_$][\w$]*)""")
+                .find(method.header)?.groupValues?.get(1)
+                ?: "${args[3]}.getItemInHand(${args[4]})"
+            val returnsItemResult = Regex("""\bItemInteractionResult\s+[A-Za-z_$][\w$]*\s*\(""").containsMatchIn(method.header)
+            val returnedDirectly = Regex("""\breturn\s*$""").containsMatchIn(before) &&
+                code.substring(close + 1).trimStart().startsWith(";")
+            val hook = "$receiver.useItemOn($stack, ${args.joinToString(", ")})"
+            if (returnsItemResult && returnedDirectly) hook else "$hook.result()"
+        } else {
+            "$receiver.useWithoutItem(${args[0]}, ${args[1]}, ${args[2]}, ${args[3]}, ${args[5]})"
+        }
+        edits += call.range.first..close to replacement
+    }
+    if (edits.isEmpty()) return source
+    var result = source
+    edits.sortedByDescending { it.first.first }.forEach { (range, replacement) ->
+        result = result.replaceRange(range, replacement)
+    }
+    return result
 }
 
 /**
@@ -787,10 +896,8 @@ internal fun StructuralRefactorPass.detectNetworkingPatterns(
 internal fun StructuralRefactorPass.migrateDistExecutorDistGuards(
     source: String,
     file: Path,
-    changes: MutableList<Change>,
-    projectDistExecutorTypes: Set<String>
+    changes: MutableList<Change>
 ): String {
-    if (!hasNativeDistExecutorEvidence(source, projectDistExecutorTypes)) return source
     var result = source
     var migrated = false
 
@@ -1022,12 +1129,7 @@ ${indent}}
 
     if (!migrated) return result
 
-    val hasResidualDistExecutorCall = Regex(
-        """(?<![\w$.])DistExecutor\.[A-Za-z_$][\w$]*\s*\("""
-    ).containsMatchIn(maskJavaCommentsAndLiterals(result))
-    if (!hasResidualDistExecutorCall) {
-        result = removeDistExecutorImports(result)
-    }
+    result = removeDistExecutorImports(result)
     result = addImportIfMissing(result, "net.neoforged.api.distmarker.Dist")
     return addImportIfMissing(result, "net.neoforged.fml.loading.FMLLoader")
 }
@@ -1040,38 +1142,6 @@ internal fun StructuralRefactorPass.removeTrailingSupplierReturn(body: String): 
         lines.removeAt(index)
     }
     return lines.joinToString("\n")
-}
-
-
-internal fun StructuralRefactorPass.hasNativeDistExecutorEvidence(
-    source: String,
-    projectDistExecutorTypes: Set<String>
-): Boolean {
-    val executable = maskJavaCommentsAndLiterals(source)
-    val nativeImport = Regex(
-        """(?m)^\s*import\s+net\.(?:minecraftforge|neoforged)\.fml\.DistExecutor\s*;\s*$"""
-    ).containsMatchIn(executable)
-    val previousPassNativeImport = Regex(
-        """(?m)^\s*//\s*(?:\[[^]\r\n]+]\s*)?import\s+net\.(?:minecraftforge|neoforged)\.fml\.DistExecutor\s*;\s*$"""
-    ).containsMatchIn(source)
-    val nonNativeImport = Regex(
-        """(?m)^\s*import\s+(?!net\.(?:minecraftforge|neoforged)\.fml\.DistExecutor\s*;)[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.DistExecutor\s*;\s*$"""
-    ).containsMatchIn(executable)
-    val projectDeclaration = Regex("""\b(?:class|interface|enum|record)\s+DistExecutor\b""")
-        .containsMatchIn(executable)
-    val packageName = packageNameOf(source)
-    val samePackageProjectOwner = projectDistExecutorTypes.any { owner ->
-        owner.substringBeforeLast('.', "") == packageName
-    }
-    val wildcardImports = Regex("""(?m)^\s*import\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.\*\s*;\s*$""")
-        .findAll(executable)
-        .map { it.groupValues[1] }
-        .toSet()
-    val wildcardProjectOwner = projectDistExecutorTypes.any { owner ->
-        owner.substringBeforeLast('.', "") in wildcardImports
-    }
-    return !nonNativeImport && !projectDeclaration && !samePackageProjectOwner && !wildcardProjectOwner &&
-        (nativeImport || previousPassNativeImport)
 }
 
 internal fun StructuralRefactorPass.distExecutorMigrationChange(
@@ -1361,13 +1431,11 @@ internal fun StructuralRefactorPass.lineNumberAt(source: String, offset: Int): I
 internal fun StructuralRefactorPass.detectDistExecutorUsage(
     cu: CompilationUnit,
     file: Path,
-    changes: MutableList<Change>,
-    hasNativeSimpleOwner: Boolean
+    changes: MutableList<Change>
 ) {
-    val nativeImports = setOf("net.neoforged.fml.DistExecutor", "net.minecraftforge.fml.DistExecutor")
     cu.findAll(MethodCallExpr::class.java).forEach { call ->
         val scope = call.scope.map { it.toString() }.orElse("")
-        if ((scope == "DistExecutor" && hasNativeSimpleOwner) || scope in nativeImports) {
+        if (scope == "DistExecutor" || scope.endsWith(".DistExecutor")) {
             val line = call.begin.map { it.line }.orElse(0)
             changes.add(Change(
                 file = file, line = line,
@@ -4897,20 +4965,7 @@ internal val modBusEventTypeOwners = setOf(
     "net.neoforged.fml.event.lifecycle.InterModEnqueueEvent",
     "net.minecraftforge.fml.event.lifecycle.InterModEnqueueEvent",
     "net.neoforged.fml.event.lifecycle.InterModProcessEvent",
-    "net.minecraftforge.fml.event.lifecycle.InterModProcessEvent",
-    "net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent",
-    "net.neoforged.neoforge.event.RegisterGameTestsEvent",
-    "net.minecraftforge.event.RegisterGameTestsEvent",
-    "net.neoforged.neoforge.registries.DataPackRegistryEvent",
-    "net.minecraftforge.registries.DataPackRegistryEvent",
-    "net.neoforged.neoforge.client.event.RegisterClientReloadListenersEvent",
-    "net.minecraftforge.client.event.RegisterClientReloadListenersEvent",
-    "net.neoforged.neoforge.client.event.RegisterGuiLayersEvent",
-    "net.minecraftforge.client.event.RegisterGuiOverlaysEvent",
-    "net.neoforged.neoforge.client.event.RegisterItemDecorationsEvent",
-    "net.minecraftforge.client.event.RegisterItemDecorationsEvent",
-    "net.neoforged.fml.event.config.ModConfigEvent",
-    "net.minecraftforge.fml.event.config.ModConfigEvent"
+    "net.minecraftforge.fml.event.lifecycle.InterModProcessEvent"
 )
 
 internal val clientOnlyModBusEventTypeOwners = setOf(
@@ -4927,13 +4982,7 @@ internal val clientOnlyModBusEventTypeOwners = setOf(
     "net.neoforged.neoforge.client.event.RegisterShadersEvent",
     "net.minecraftforge.client.event.RegisterShadersEvent",
     "net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent",
-    "net.minecraftforge.client.event.RegisterKeyMappingsEvent",
-    "net.neoforged.neoforge.client.event.RegisterClientReloadListenersEvent",
-    "net.minecraftforge.client.event.RegisterClientReloadListenersEvent",
-    "net.neoforged.neoforge.client.event.RegisterGuiLayersEvent",
-    "net.minecraftforge.client.event.RegisterGuiOverlaysEvent",
-    "net.neoforged.neoforge.client.event.RegisterItemDecorationsEvent",
-    "net.minecraftforge.client.event.RegisterItemDecorationsEvent"
+    "net.minecraftforge.client.event.RegisterKeyMappingsEvent"
 )
 
 /**
@@ -5266,7 +5315,6 @@ internal fun StructuralRefactorPass.migrateStaticFmlModEventBusHelperInitializer
     val callEditsByFile = mutableMapOf<Path, MutableList<Pair<IntRange, String>>>()
     for (helper in helperMethods) {
         val callPattern = Regex("""\b${Regex.escape(helper.ownerClass)}\.${Regex.escape(helper.methodName)}\s*\(\s*\)""")
-        val sameOwnerCallPattern = Regex("""(?<![\w$.])${Regex.escape(helper.methodName)}\s*\(\s*\)""")
         var callCount = 0
         var unresolvedCallSite = false
         val helperCallEdits = mutableMapOf<Path, MutableList<Pair<IntRange, String>>>()
@@ -5281,19 +5329,6 @@ internal fun StructuralRefactorPass.migrateStaticFmlModEventBusHelperInitializer
                 } else {
                     helperCallEdits.getOrPut(javaFile) { mutableListOf() } +=
                         match.range to "${helper.ownerClass}.${helper.methodName}($eventBus)"
-                }
-            }
-            if (javaFile == helper.file) {
-                for (match in sameOwnerCallPattern.findAll(executableCode)) {
-                    if (match.range.first in helper.headerRange) continue
-                    callCount += 1
-                    val eventBus = eventBusParameterExpressionAt(original, match.range.first)
-                    if (eventBus == null) {
-                        unresolvedCallSite = true
-                    } else {
-                        helperCallEdits.getOrPut(javaFile) { mutableListOf() } +=
-                            match.range to "${helper.methodName}($eventBus)"
-                    }
                 }
             }
         }

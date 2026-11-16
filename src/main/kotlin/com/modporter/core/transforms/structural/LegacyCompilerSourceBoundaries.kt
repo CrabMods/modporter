@@ -24,6 +24,7 @@ import com.github.javaparser.ast.expr.UnaryExpr
 import com.github.javaparser.ast.stmt.ReturnStmt
 import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter
 import com.modporter.core.transforms.util.JavaSourceText
+import com.modporter.mapping.TargetMembers
 
 /**
  * Repairs source-proven 1.21 boundaries from legacy predicates, capabilities, tiers, holder
@@ -63,7 +64,8 @@ internal fun StructuralRefactorPass.migrateLegacyCompilerSourceBoundaries(
     val tagStreamChanged = migrateRegistryHolderItemLikeStreams(unit, parser)
     val gameTestChanged = migrateGameTestEnchantmentProviderRoots(
         unit,
-        parser
+        parser,
+        projectSourceDeclarations
     )
     if (!predicateChanged && !capabilityChanged && !tierChanged &&
         !tagStreamChanged && !gameTestChanged
@@ -475,19 +477,28 @@ private fun migrateRegistryHolderItemLikeStreams(
     return changed
 }
 
+/**
+ * 1.21.1 `EnchantmentInstance` takes a `Holder<Enchantment>` and enchantments live in the dynamic
+ * registry. Inside a method whose single game-test helper parameter is the platform
+ * `GameTestHelper` or a project class extending it, the legacy key is looked up through
+ * `helper.getLevel().registryAccess()` (`GameTestHelper#getLevel()` returns the test's
+ * `ServerLevel` in the 1.21.1 member table).
+ */
 private fun migrateGameTestEnchantmentProviderRoots(
     unit: CompilationUnit,
-    parser: JavaParser
+    parser: JavaParser,
+    declarations: ProjectSourceDeclarations
 ): Boolean {
     val required = listOf(
-        "CreateGameTestHelper" to CREATE_GAME_TEST_HELPER,
         "EnchantmentInstance" to ENCHANTMENT_INSTANCE,
         "Enchantments" to ENCHANTMENTS,
         "Registries" to REGISTRIES
     )
     if (required.any { (simple, qualified) ->
             !compilerBoundaryCanonicalSimpleType(unit, simple, qualified)
-        }
+        } ||
+        TargetMembers.methodDescriptors(GAME_TEST_HELPER, "getLevel")
+            .none { it == "()Lnet/minecraft/server/level/ServerLevel;" }
     ) {
         return false
     }
@@ -506,13 +517,10 @@ private fun migrateGameTestEnchantmentProviderRoots(
         }
         val method = creation.findAncestor(MethodDeclaration::class.java)
             .orElse(null) ?: continue
-        val helpers = method.parameters.filter {
-            compilerBoundaryCanonicalType(
-                unit,
-                it.type.asString(),
-                "CreateGameTestHelper",
-                CREATE_GAME_TEST_HELPER
-            )
+        val helpers = method.parameters.filter { parameter ->
+            val type = declarations.resolve(parameter.type, parameter)
+                as? ProjectSourceDeclarations.TypeRef.Named
+            type != null && extendsGameTestHelper(type.name, declarations)
         }
         val helper = helpers.singleOrNull() ?: continue
         val key = compilerBoundaryGameTestEnchantmentKey(
@@ -531,6 +539,21 @@ private fun migrateGameTestEnchantmentProviderRoots(
         changed = true
     }
     return changed
+}
+
+/** [type] is `GameTestHelper` or a project class whose superclass chain reaches it. */
+private fun extendsGameTestHelper(type: String, declarations: ProjectSourceDeclarations): Boolean {
+    var current = type
+    val seen = HashSet<String>()
+    while (seen.add(current)) {
+        if (current == GAME_TEST_HELPER) return true
+        val declaration = declarations.type(current) as? ClassOrInterfaceDeclaration ?: return false
+        if (declaration.isInterface) return false
+        val parent = declaration.extendedTypes.singleOrNull() ?: return false
+        current = (declarations.resolve(parent, declaration) as? ProjectSourceDeclarations.TypeRef.Named)
+            ?.name ?: return false
+    }
+    return false
 }
 
 private fun compilerBoundaryGameTestEnchantmentKey(
@@ -763,8 +786,7 @@ private const val BUILT_IN_REGISTRIES =
     "net.minecraft.core.registries.BuiltInRegistries"
 private const val CAPABILITIES =
     "net.neoforged.neoforge.capabilities.Capabilities"
-private const val CREATE_GAME_TEST_HELPER =
-    "com.simibubi.create.infrastructure.gametest.CreateGameTestHelper"
+private const val GAME_TEST_HELPER = "net.minecraft.gametest.framework.GameTestHelper"
 private const val ENCHANTMENT_INSTANCE =
     "net.minecraft.world.item.enchantment.EnchantmentInstance"
 private const val ENCHANTMENT_PREDICATE =

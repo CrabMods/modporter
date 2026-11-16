@@ -20,6 +20,13 @@ internal object LegacyFactoryReferences {
         var result = source
         if (result.contains("RegistryObject.create(")) result = registryObjectCreates(result)
         if (result.contains(".getDelegateOrThrow(")) result = delegateOrThrow(result)
+        // ContainerSingleItem#getFirstItem (its only 1.20.1 declaration) is ContainerSingleItem#getTheItem on 1.21.1,
+        // unless the project declares a getFirstItem of its own
+        if (result.contains(".getFirstItem()") && !Regex("""\bgetFirstItem\s*\(\s*\)\s*\{""").containsMatchIn(result) &&
+            TargetMembers.methodsNamed("getFirstItem").isEmpty()
+        ) {
+            result = Regex("""\.\s*getFirstItem\s*\(\s*\)""").replace(result) { ".getTheItem()" }
+        }
         // 1.20.1's RecordItem is gone: a music disc is an item with the jukebox-playable component
         if (result.contains("instanceof RecordItem")) {
             val discs = Regex("""([\w$.]+(?:\(\))?)\.getItem\(\)\s+instanceof\s+(?:net\.minecraft\.world\.item\.)?RecordItem\b(?!\s+\w)""")

@@ -217,7 +217,6 @@
 
                 @Override
                 public CompoundTag saveToNBT() {
-                    worker.getUUID();
                     CompoundTag tag = new CompoundTag();
                     tag.put("stack", stack.save(new CompoundTag()));
                     tag.put("tank", tank.writeToNBT(new CompoundTag()));
@@ -226,7 +225,6 @@
 
                 @Override
                 public void loadFromNBT(CompoundTag tag) {
-                    worker.getUUID();
                     stack = ItemStack.of(tag.getCompound("stack"));
                     tank.readFromNBT(tag.getCompound("tank"));
                 }

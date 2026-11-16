@@ -5,6 +5,21 @@
       "from": "net.createmod.catnip.net.ClientboundSimpleActionPacket",
       "to": "net.createmod.catnip.net.packets.ClientboundSimpleActionPacket",
       "notes": "Catnip: net/createmod/catnip/net/ClientboundSimpleActionPacket.class in Ponder-Forge-1.20.1-1.0.91 is net/createmod/catnip/net/packets/ClientboundSimpleActionPacket.class in ponder-neoforge-1.0.87+mc1.21.1; addAction(String, Supplier<Consumer<String>>) is unchanged."
+    },
+    {
+      "from": "journeymap.client.api.util.UIState",
+      "to": "journeymap.api.v2.client.util.UIState",
+      "notes": "JourneyMap: journeymap/client/api/util/UIState.class in journeymap-1.20.1-5.9.24 is journeymap/api/v2/client/util/UIState.class in journeymap-api-neoforge-2.0.0-1.21.1; the public fields (ui, active, dimension, zoom, mapType, mapCenter, chunkY, blockBounds, displayBounds, blockSize), the constructor and both newInactive factories are unchanged; v2 adds the ZOOM_IN_MAX, FULLSCREEN_ZOOM_MIN and MINIMAP_ZOOM_MIN constants."
+    },
+    {
+      "from": "journeymap.client.api.display.Context",
+      "to": "journeymap.api.v2.client.display.Context",
+      "notes": "JourneyMap: journeymap/client/api/display/Context.class (with Context$UI and Context$MapType) in journeymap-1.20.1-5.9.24 is journeymap/api/v2/client/display/Context.class in journeymap-api-neoforge-2.0.0-1.21.1; UI keeps Fullscreen, Minimap and Webmap and MapType keeps Day, Night, Underground, Topo and Biome. v2 dropped the Any constants (replaced by all()), so code using them does not compile and is not rewritten."
+    },
+    {
+      "from": "journeymap.client.api.model.IFullscreen",
+      "to": "journeymap.api.v2.client.fullscreen.IFullscreen",
+      "notes": "JourneyMap: journeymap/client/api/model/IFullscreen.class in journeymap-1.20.1-5.9.24 is journeymap/api/v2/client/fullscreen/IFullscreen.class in journeymap-api-neoforge-2.0.0-1.21.1; every v1 method (updateMapType, toggleMapType, zoomIn, zoomOut, centerOn, close, getUiState, getMinecraft, getScreen) is kept with the relocated parameter and return types; v2 adds getMouseDrag and getCenterBlockX/Z(boolean)."
     }
   ]
 }

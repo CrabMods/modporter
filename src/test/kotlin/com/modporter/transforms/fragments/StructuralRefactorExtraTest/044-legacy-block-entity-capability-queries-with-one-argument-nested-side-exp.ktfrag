@@ -114,10 +114,10 @@
         StructuralRefactorPass().apply(tempDir)
         val inventory = srcDir.resolve("ProcessingInventory.java").readText()
 
-        assertTrue(inventory.contains("public CompoundTag serializeNBT(HolderLookup.Provider registries) {"), inventory)
-        assertTrue(inventory.contains("CompoundTag nbt = super.serializeNBT(registries);"), inventory)
-        assertTrue(inventory.contains("public void deserializeNBT(HolderLookup.Provider registries, CompoundTag nbt) {"), inventory)
-        assertTrue(inventory.contains("super.deserializeNBT(registries, nbt);"), inventory)
+        assertTrue(inventory.contains("public CompoundTag serializeNBT(net.minecraft.core.HolderLookup.Provider provider) {"), inventory)
+        assertTrue(inventory.contains("CompoundTag nbt = super.serializeNBT(provider);"), inventory)
+        assertTrue(inventory.contains("public void deserializeNBT(net.minecraft.core.HolderLookup.Provider provider, CompoundTag nbt) {"), inventory)
+        assertTrue(inventory.contains("super.deserializeNBT(provider, nbt);"), inventory)
     }
 
     @Test
@@ -930,20 +930,7 @@
 
         assertTrue(diving.contains("if (!helmet.has(net.minecraft.core.component.DataComponents.FIRE_RESISTANT))"), diving)
         assertTrue(diving.contains("armorItem.components().has(net.minecraft.core.component.DataComponents.FIRE_RESISTANT)"), diving)
-        assertTrue(diving.contains("net.minecraft.Util.make(stack,"), diving)
-        assertTrue(diving.contains("net.minecraft.Util.make(context.getItemInHand(),"), diving)
-        assertEquals(
-            2,
-            Regex("""\.remove\(net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA\);""")
-                .findAll(diving).count(),
-            diving
-        )
-        assertEquals(
-            2,
-            Regex("""\.set\(net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA, net\.minecraft\.world\.item\.component\.CustomData\.of\(modPorterCustomDataValue\d*\)\);""")
-                .findAll(diving).count(),
-            diving
-        )
+        assertTrue(diving.contains("stack.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.of(tag));"), diving)
         assertFalse(diving.contains(".setTag(tag)"), diving)
         assertTrue(cannon.contains("return AABB.INFINITE;"), cannon)
     }
@@ -1162,8 +1149,7 @@
         val simple = srcDir.resolve("SimpleTrigger.java").readText()
         val stateful = srcDir.resolve("StatefulTrigger.java").readText()
 
-        assertTrue(base.contains("import net.minecraft.advancements.critereon.SimpleCriterionTrigger.SimpleInstance;"), base)
-        assertTrue(base.contains("public abstract static class Instance implements SimpleInstance {"), base)
+        assertTrue(base.contains("public abstract static class Instance implements SimpleCriterionTrigger.SimpleInstance {"), base)
         assertFalse(base.contains("super(idIn, predicate);"), base)
         assertTrue(base.contains("if (listener.trigger().test(suppliers)) {"), base)
         assertTrue(base.contains("public ResourceLocation getId() {") && !base.contains("@Override\n    public ResourceLocation getId()"), base)

@@ -1090,13 +1090,10 @@
             import net.neoforged.bus.api.SubscribeEvent;
             import net.neoforged.fml.common.EventBusSubscriber;
 
-            @EventBusSubscriber(bus = EventBusSubscriber.Bus.FORGE)
+            @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
             public class ActualSubscriber {
-                private static final String DOC = "@EventBusSubscriber(bus = EventBusSubscriber.Bus.FORGE)";
-                // @EventBusSubscriber(bus = EventBusSubscriber.Bus.FORGE)
-
-                @Other(bus = EventBusSubscriber.Bus.FORGE)
-                private Object unrelated;
+                private static final String DOC = "@EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)";
+                // @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
 
                 @SubscribeEvent
                 public static void setup(Object event) {
@@ -1109,9 +1106,8 @@
 
         assertTrue(result.changes.any { it.ruleId == "struct-cleanup-eventbus-subscriber" })
         assertTrue(migrated.contains("@EventBusSubscriber\npublic class ActualSubscriber"), migrated)
-        assertTrue(migrated.contains("private static final String DOC = \"@EventBusSubscriber(bus = EventBusSubscriber.Bus.FORGE)\";"), migrated)
-        assertTrue(migrated.contains("// @EventBusSubscriber(bus = EventBusSubscriber.Bus.FORGE)"), migrated)
-        assertTrue(migrated.contains("@Other(bus = EventBusSubscriber.Bus.FORGE)"), migrated)
+        assertTrue(migrated.contains("private static final String DOC = \"@EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)\";"), migrated)
+        assertTrue(migrated.contains("// @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)"), migrated)
     }
 
     @Test
@@ -1163,4 +1159,42 @@
         assertTrue(migrated.contains("""String doc = "event.setCanceled(true); event.getEntity();";"""), migrated)
         assertTrue(migrated.contains("// event.setCanceled(true);"), migrated)
         assertTrue(migrated.contains("other.getEntity();"), migrated)
+    }
+
+    @Test
+    fun `empty subscriber cleanup ignores braces inside literals and comments`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("ExampleMod.java")
+        file.writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            public class ExampleMod {
+                @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
+                public static class EmptySubscriber {
+                    private static final String DOC = "{";
+                    // { old migration marker text, not Java structure
+
+                    @SubscribeEvent
+                    public static void gatherData(GatherDataEvent event) {
+                    }
+                }
+
+                public void stillHere() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = file.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString())
+        assertTrue(result.changes.any { it.ruleId == "struct-remove-empty-subscriber-class" })
+        assertFalse(transformed.contains("EmptySubscriber"), transformed)
+        assertTrue(transformed.contains("public void stillHere()"), transformed)
+        assertTrue(transformed.trimEnd().endsWith("}"), transformed)
     }

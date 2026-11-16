@@ -18,7 +18,7 @@ class RegistrateEnchantmentMigrationTest {
     lateinit var tempDir: Path
 
     @Test
-    fun `registrate enchantments derive resource keys and replace marker interfaces with data tags`() {
+    fun `registrate enchantments derive resource keys data tags and retained marker interfaces`() {
         write("com/example/ExampleMod.java", """
             package com.example;
 
@@ -136,7 +136,7 @@ class RegistrateEnchantmentMigrationTest {
                 }
             }
         """)
-        val backtankItem = write("com/example/armor/BacktankItem.java", """
+        write("com/example/armor/BacktankItem.java", """
             package com.example.armor;
 
             import com.example.armor.CapacityEnchantment.ICapacityEnchantable;
@@ -163,10 +163,6 @@ class RegistrateEnchantmentMigrationTest {
         )
         assertTrue(
             result.changes.any { it.ruleId == "custom-enchantment-resourcekey-context" },
-            result.errors.joinToString("\n")
-        )
-        assertTrue(
-            result.changes.any { it.ruleId == "text-enchantment-marker-to-item-tag" },
             result.errors.joinToString("\n")
         )
         assertFalse(registrations.contains(".enchantment("), registrations)
@@ -197,9 +193,11 @@ class RegistrateEnchantmentMigrationTest {
         assertTrue(capacityTag.contains(""""example:netherite_backtank""""))
 
         assertFalse(potatoEnchantment.exists(), "unreferenced data-driven Enchantment subclass should be removed")
-        assertFalse(capacityEnchantment.exists(), "data tags replace the obsolete marker-interface container")
-        val migratedBacktank = backtankItem.readText()
-        assertFalse(migratedBacktank.contains("ICapacityEnchantable"), migratedBacktank)
+        val retainedCapacity = capacityEnchantment.readText()
+        assertTrue(retainedCapacity.contains("final class CapacityEnchantment"), retainedCapacity)
+        assertTrue(retainedCapacity.contains("interface ICapacityEnchantable"), retainedCapacity)
+        assertFalse(retainedCapacity.contains("extends Enchantment"), retainedCapacity)
+        assertFalse(retainedCapacity.contains("canApplyAtEnchantingTable"), retainedCapacity)
         assertFalse(
             result.errors.any { it.contains("Cannot derive custom enchantment data") },
             result.errors.joinToString("\n")

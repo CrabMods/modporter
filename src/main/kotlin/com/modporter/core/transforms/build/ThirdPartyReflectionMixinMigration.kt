@@ -94,11 +94,21 @@ internal class ThirdPartyReflectionMixinMigration {
         }
 
         val generatedEntries = mutableListOf<String>()
+        // An accessor whose target belongs to an optional dependency with a known mod id goes into
+        // its own Mixin config that NeoForge loads only when that mod is present; otherwise Mixin
+        // resolves the absent target at startup and logs it. Owners without that evidence keep the
+        // owning config, as before.
+        val optionalEntries = linkedMapOf<List<String>, MutableList<Pair<String, Boolean>>>()
         for (owner in owners.values) {
             val className = "ModPorter${owner.simpleName}Accessor"
             val file = srcDir.resolve(generatedPackage.replace('.', '/')).resolve("$className.java")
             val content = renderAccessor(generatedPackage, className, owner)
-            generatedEntries += "modporter.$className"
+            val requiredMods = OptionalDependencyModIds.forClass(owner.fqn)
+            if (requiredMods.isNotEmpty()) {
+                optionalEntries.getOrPut(requiredMods) { mutableListOf() } += className to (".client." in owner.fqn)
+            } else {
+                generatedEntries += "modporter.$className"
+            }
             changes += Change(
                 file = file,
                 line = 1,
@@ -114,7 +124,9 @@ internal class ThirdPartyReflectionMixinMigration {
             }
         }
 
-        val updatedConfig = addMixinEntries(config.root, generatedEntries, client = owners.keys.all { ".client." in it })
+        val unconditionalOwners = owners.values.filter { OptionalDependencyModIds.forClass(it.fqn).isEmpty() }
+        val updatedConfig = if (generatedEntries.isEmpty()) config.root else
+            addMixinEntries(config.root, generatedEntries, client = unconditionalOwners.all { ".client." in it.fqn })
         if (updatedConfig != config.root) {
             changes += Change(
                 file = config.file,
@@ -126,6 +138,79 @@ internal class ThirdPartyReflectionMixinMigration {
                 ruleId = "build-third-party-pseudo-accessor-config"
             )
             if (!dryRun) config.file.writeText(JSON.encodeToString(JsonObject.serializer(), updatedConfig) + "\n")
+        }
+        for ((requiredMods, entries) in optionalEntries) {
+            changes += writeOptionalMixinConfig(moduleDir, config, generatedPackage, requiredMods, entries, dryRun)
+        }
+        return changes
+    }
+
+    /**
+     * A Mixin config holding the accessors for one optional dependency, registered in
+     * neoforge.mods.toml with requiredMods so NeoForge skips it (at debug level) when the
+     * dependency is absent.
+     */
+    private fun writeOptionalMixinConfig(
+        moduleDir: Path,
+        owningConfig: MixinConfig,
+        generatedPackage: String,
+        requiredMods: List<String>,
+        entries: List<Pair<String, Boolean>>,
+        dryRun: Boolean
+    ): List<Change> {
+        val changes = mutableListOf<Change>()
+        val base = owningConfig.file.fileName.toString().removeSuffix(".json").removeSuffix(".mixins")
+        val configName = "$base.modporter-optional-${requiredMods.joinToString("-")}.mixins.json"
+        val configFile = owningConfig.file.resolveSibling(configName)
+        val fields = linkedMapOf<String, kotlinx.serialization.json.JsonElement>(
+            "required" to JsonPrimitive(true),
+            "minVersion" to (owningConfig.root["minVersion"] ?: JsonPrimitive("0.8")),
+            "package" to JsonPrimitive(generatedPackage),
+            "compatibilityLevel" to (owningConfig.root["compatibilityLevel"] ?: JsonPrimitive("JAVA_17"))
+        )
+        val common = entries.filterNot { it.second }.map { it.first }.sorted()
+        val client = entries.filter { it.second }.map { it.first }.sorted()
+        if (common.isNotEmpty()) fields["mixins"] = JsonArray(common.map(::JsonPrimitive))
+        if (client.isNotEmpty()) fields["client"] = JsonArray(client.map(::JsonPrimitive))
+        val content = JSON.encodeToString(JsonObject.serializer(), JsonObject(fields)) + "\n"
+        require(!configFile.exists() || configFile.readText() == content) {
+            "Generated optional Mixin config is already owned by different content: $configFile"
+        }
+        changes += Change(
+            file = configFile,
+            line = 1,
+            description = "Generate a Mixin config for accessors of an optional dependency",
+            before = entries.joinToString { it.first },
+            after = "$configName requiredMods=$requiredMods",
+            confidence = Confidence.HIGH,
+            ruleId = "build-third-party-optional-accessor-config"
+        )
+        if (!dryRun) configFile.writeText(content)
+
+        val modsToml = listOf(
+            moduleDir.resolve("src/main/resources/META-INF/neoforge.mods.toml"),
+            moduleDir.resolve("src/main/resources/META-INF/mods.toml")
+        ).firstOrNull { it.exists() }
+        require(modsToml != null) { "Optional-target accessors require NeoForge mod metadata to register $configName" }
+        val original = modsToml.readText()
+        if (!Regex("""(?m)^\s*config\s*=\s*["']${Regex.escape(configName)}["']""").containsMatchIn(original)) {
+            val separator = if (original.contains("\r\n")) "\r\n" else "\n"
+            val entry = listOf(
+                "[[mixins]]",
+                "config=\"$configName\"",
+                "requiredMods=[${requiredMods.joinToString(", ") { "\"$it\"" }}]"
+            ).joinToString(separator)
+            val modified = original.trimEnd() + separator + separator + entry + separator
+            changes += Change(
+                file = modsToml,
+                line = original.lines().size,
+                description = "Register the optional dependency's Mixin config only when that mod is loaded",
+                before = "neoforge.mods.toml without [[mixins]] $configName",
+                after = "[[mixins]] config=\"$configName\" requiredMods=$requiredMods",
+                confidence = Confidence.HIGH,
+                ruleId = "build-third-party-optional-accessor-registration"
+            )
+            if (!dryRun) modsToml.writeText(modified)
         }
         return changes
     }
@@ -362,7 +447,220 @@ internal class ThirdPartyReflectionMixinMigration {
         return String(chars)
     }
 
+    /** A NeoForge-owned field that access transformers cannot reach, read through a Mixin accessor. */
+    data class PlatformField(val ownerFqn: String, val fieldName: String, val returnType: String)
+
+    /**
+     * The accessor that reads [field] for code in [consumerSource]: it lives under the Mixin config
+     * owning that source's package. Null when no single structured Mixin config owns it.
+     */
+    fun platformAccessorName(projectDir: Path, consumerSource: String, field: PlatformField): String? {
+        val config = runCatching {
+            findOwningMixinConfig(GradleModLayout.modModule(projectDir), listOf(consumerSource))
+        }.getOrNull() ?: return null
+        return "${config.packageName}.modporter.ModPorter${platformSimpleName(field.ownerFqn)}Accessor"
+    }
+
+    fun platformAccessorMethod(fieldName: String): String = accessorMethodName(fieldName)
+
+    /**
+     * Writes one accessor interface per owner for [fields] and registers them in the common list of
+     * the owning Mixin config (data generation loads these classes in any distribution).
+     */
+    fun writePlatformAccessors(
+        projectDir: Path,
+        consumerSources: List<String>,
+        fields: Collection<PlatformField>,
+        dryRun: Boolean
+    ): List<Change> {
+        if (fields.isEmpty()) return emptyList()
+        val moduleDir = GradleModLayout.modModule(projectDir)
+        val srcDir = moduleDir.resolve("src/main/java")
+        val config = findOwningMixinConfig(moduleDir, consumerSources)
+        val generatedPackage = "${config.packageName}.modporter"
+        val changes = mutableListOf<Change>()
+        val entries = mutableListOf<String>()
+        fields.groupBy { it.ownerFqn }.forEach { (ownerFqn, ownerFields) ->
+            val className = "ModPorter${platformSimpleName(ownerFqn)}Accessor"
+            val file = srcDir.resolve(generatedPackage.replace('.', '/')).resolve("$className.java")
+            val content = buildString {
+                appendLine("package $generatedPackage;")
+                appendLine()
+                appendLine("import org.spongepowered.asm.mixin.Mixin;")
+                appendLine("import org.spongepowered.asm.mixin.gen.Accessor;")
+                appendLine()
+                appendLine("@Mixin(value = $ownerFqn.class, remap = false)")
+                appendLine("public interface $className {")
+                ownerFields.distinctBy { it.fieldName }.sortedBy { it.fieldName }.forEach { field ->
+                    appendLine("\t@Accessor(value = \"${field.fieldName}\", remap = false)")
+                    appendLine("\t${field.returnType} ${accessorMethodName(field.fieldName)}();")
+                    appendLine()
+                }
+                appendLine("}")
+            }
+            require(!file.exists() || file.readText() == content) {
+                "Generated platform accessor path is already owned by different content: $file"
+            }
+            entries += "modporter.$className"
+            changes += Change(
+                file = file,
+                line = 1,
+                description = "Generate a Mixin accessor for NeoForge fields that access transformers cannot reach",
+                before = ownerFields.joinToString { it.fieldName },
+                after = "$generatedPackage.$className",
+                confidence = Confidence.HIGH,
+                ruleId = "build-platform-field-accessor-source"
+            )
+            if (!dryRun) {
+                file.parent.createDirectories()
+                file.writeText(content)
+            }
+        }
+        val updatedConfig = addMixinEntries(config.root, entries, client = false)
+        if (updatedConfig != config.root) {
+            changes += Change(
+                file = config.file,
+                line = 1,
+                description = "Register generated platform field accessors in the owning Mixin config",
+                before = "Mixin list without generated platform accessors",
+                after = entries.joinToString(),
+                confidence = Confidence.HIGH,
+                ruleId = "build-platform-field-accessor-config"
+            )
+            if (!dryRun) config.file.writeText(JSON.encodeToString(JsonObject.serializer(), updatedConfig) + "\n")
+        }
+        return changes
+    }
+
+    /** A platform method 1.21.1 declares protected, called through a Mixin invoker. */
+    data class PlatformInvoker(
+        val ownerFqn: String,
+        val methodName: String,
+        val returnType: String,
+        val parameterTypes: List<String>
+    ) {
+        val invokerMethod: String get() = "modporter\$invoke" + methodName.replaceFirstChar { it.uppercase() }
+    }
+
+    /** The invoker interface for [ownerFqn] under the Mixin config owning [consumerSource]. */
+    fun platformInvokerName(projectDir: Path, consumerSource: String, ownerFqn: String): String? {
+        val config = runCatching {
+            findOwningMixinConfig(GradleModLayout.modModule(projectDir), listOf(consumerSource))
+        }.getOrNull() ?: return null
+        return "${config.packageName}.modporter.ModPorter${platformSimpleName(ownerFqn)}Invoker"
+    }
+
+    /**
+     * Writes one invoker interface per owner for [invokers] and registers them in the common list
+     * of the owning Mixin config.
+     */
+    fun writePlatformInvokers(
+        projectDir: Path,
+        consumerSources: List<String>,
+        invokers: Collection<PlatformInvoker>,
+        dryRun: Boolean
+    ): List<Change> {
+        if (invokers.isEmpty()) return emptyList()
+        val moduleDir = GradleModLayout.modModule(projectDir)
+        val srcDir = moduleDir.resolve("src/main/java")
+        val config = findOwningMixinConfig(moduleDir, consumerSources)
+        val generatedPackage = "${config.packageName}.modporter"
+        val changes = mutableListOf<Change>()
+        val entries = mutableListOf<String>()
+        invokers.groupBy { it.ownerFqn }.forEach { (ownerFqn, ownerInvokers) ->
+            val className = "ModPorter${platformSimpleName(ownerFqn)}Invoker"
+            val file = srcDir.resolve(generatedPackage.replace('.', '/')).resolve("$className.java")
+            val content = buildString {
+                appendLine("package $generatedPackage;")
+                appendLine()
+                appendLine("import org.spongepowered.asm.mixin.Mixin;")
+                appendLine("import org.spongepowered.asm.mixin.gen.Invoker;")
+                appendLine()
+                appendLine("@Mixin(value = $ownerFqn.class, remap = false)")
+                appendLine("public interface $className {")
+                ownerInvokers.distinctBy { it.methodName to it.parameterTypes }.sortedBy { it.methodName }.forEach { invoker ->
+                    val parameters = invoker.parameterTypes.mapIndexed { index, type -> "$type arg$index" }.joinToString(", ")
+                    appendLine("\t@Invoker(value = \"${invoker.methodName}\", remap = false)")
+                    appendLine("\t${invoker.returnType} ${invoker.invokerMethod}($parameters);")
+                    appendLine()
+                }
+                appendLine("}")
+            }
+            require(!file.exists() || file.readText() == content) {
+                "Generated platform invoker path is already owned by different content: $file"
+            }
+            entries += "modporter.$className"
+            changes += Change(
+                file = file,
+                line = 1,
+                description = "Generate a Mixin invoker for platform methods 1.21.1 declares protected",
+                before = ownerInvokers.joinToString { it.methodName },
+                after = "$generatedPackage.$className",
+                confidence = Confidence.HIGH,
+                ruleId = "build-platform-protected-invoker-source"
+            )
+            if (!dryRun) {
+                file.parent.createDirectories()
+                file.writeText(content)
+            }
+        }
+        val updatedConfig = addMixinEntries(config.root, entries, client = false)
+        if (updatedConfig != config.root) {
+            changes += Change(
+                file = config.file,
+                line = 1,
+                description = "Register generated platform invokers in the owning Mixin config",
+                before = "Mixin list without generated platform invokers",
+                after = entries.joinToString(),
+                confidence = Confidence.HIGH,
+                ruleId = "build-platform-protected-invoker-config"
+            )
+            if (!dryRun) config.file.writeText(JSON.encodeToString(JsonObject.serializer(), updatedConfig) + "\n")
+        }
+        return changes
+    }
+
+    private fun platformSimpleName(ownerFqn: String): String =
+        ownerFqn.substringAfterLast('.').replace('$', '_')
+
     companion object {
         private val JSON = Json { prettyPrint = true }
+
+        /** Java source type for a JVM field signature or descriptor, or null for type variables. */
+        fun javaTypeOf(signature: String): String? {
+            var index = 0
+            fun parse(): String? {
+                if (index >= signature.length) return null
+                return when (val c = signature[index++]) {
+                    'Z' -> "boolean"; 'B' -> "byte"; 'C' -> "char"; 'S' -> "short"
+                    'I' -> "int"; 'J' -> "long"; 'F' -> "float"; 'D' -> "double"; 'V' -> "void"
+                    '[' -> parse()?.let { "$it[]" }
+                    'L' -> {
+                        val name = StringBuilder()
+                        val arguments = mutableListOf<String>()
+                        while (index < signature.length && signature[index] != ';' && signature[index] != '<') {
+                            name.append(signature[index++])
+                        }
+                        if (index < signature.length && signature[index] == '<') {
+                            index++
+                            while (index < signature.length && signature[index] != '>') {
+                                arguments += when (signature[index]) {
+                                    '*' -> { index++; "?" }
+                                    '+' -> { index++; "? extends " + (parse() ?: return null) }
+                                    '-' -> { index++; "? super " + (parse() ?: return null) }
+                                    else -> parse() ?: return null
+                                }
+                            }
+                            index++
+                        }
+                        index++
+                        val type = name.toString().replace('/', '.').replace('$', '.')
+                        if (arguments.isEmpty()) type else "$type<${arguments.joinToString(", ")}>"
+                    }
+                    else -> null
+                }
+            }
+            return parse()?.takeIf { index == signature.length }
+        }
     }
 }

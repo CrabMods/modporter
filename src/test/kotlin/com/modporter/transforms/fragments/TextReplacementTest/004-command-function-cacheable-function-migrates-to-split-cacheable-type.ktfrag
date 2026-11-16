@@ -66,10 +66,7 @@
 
         assertFalse(transformed.contains("ITagManager"))
         assertFalse(transformed.contains("net.neoforged.neoforge.registries.tags"))
-        assertTrue(transformed.contains("BuiltInRegistries.ITEM.getTagOrEmpty(itemTag).forEach"), transformed)
-        assertTrue(transformed.contains("Holder<Item> itemHolder"), transformed)
-        assertTrue(transformed.contains("Item item = itemHolder.value();"), transformed)
-        assertTrue(transformed.contains("getMap().put(item, burnTime);"), transformed)
+        assertTrue(transformed.contains("BuiltInRegistries.ITEM.getTagOrEmpty(itemTag).forEach((holder) -> { Item item = holder.value(); getMap().put(item, burnTime); });"), transformed)
         assertTrue(transformed.contains("if (!BuiltInRegistries.ITEM.getTagOrEmpty(itemTag).iterator().hasNext()) {"), transformed)
     }
 

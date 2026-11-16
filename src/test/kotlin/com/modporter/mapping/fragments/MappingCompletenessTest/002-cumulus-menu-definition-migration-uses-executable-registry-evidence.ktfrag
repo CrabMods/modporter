@@ -572,68 +572,35 @@
 
     @Test
     fun `split tick phase cleanup uses executable phase evidence`() {
-        val source = StructuralRuleSources.file("StructuralRules03.kt")
-        fun functionBody(declaration: String): String {
-            val start = source.indexOf(declaration)
-            assertTrue(start >= 0, "$declaration is missing")
-            val end = Regex("""(?m)^(?:internal|private) fun StructuralRefactorPass\.""")
-                .find(source, start + declaration.length)
-                ?.range
-                ?.first
-                ?: source.length
-            return source.substring(start, end)
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun cleanupSplitTickPhaseChecks")
+        assertTrue(start >= 0, "cleanupSplitTickPhaseChecks is missing")
+        val end = source.indexOf("private fun migrateRemovedTitleScreenAccessors", start + 1).let {
+            if (it < 0) source.length else it
         }
-
-        val entry = functionBody(
-            "internal fun StructuralRefactorPass.removeLegacyTickPhaseChecks"
-        )
-        val typedMethods = functionBody(
-            "private fun StructuralRefactorPass.removeSplitTickPhaseChecksInTypedMethods"
-        )
-        val phaseRewriter = functionBody(
-            "internal fun StructuralRefactorPass.removeSplitTickPhaseChecksForEventName"
-        )
+        val body = source.substring(start, end)
         val forbidden = listOf(
-            "raw split event scan" to Regex("""\.findAll\(source\)""").containsMatchIn(typedMethods),
-            "unbounded generic phase removal" to
-                Regex("""event\\\.phase[^\n]+\.replace\(result""").containsMatchIn(phaseRewriter),
-            "raw phase rewrite" to
-                Regex("""Regex\([\s\S]*?\.phase[\s\S]*?\)\s*\.replace\(source""")
-                    .containsMatchIn(phaseRewriter)
+            "raw START phase scan" to Regex("""modified\.contains\("event\.phase\s*(?:==|!=)\s*TickEvent\.Phase\.START"\)"""),
+            "raw RenderFrameEvent replacement" to Regex("""\.replace\("RenderFrameEvent\.Post""""),
+            "raw modified replacement" to Regex("""\.replace\(modified"""),
+            "raw TickEvent phase residual scan" to Regex("""containsMatchIn\(modified\)""")
         )
-            .filter { (_, found) -> found }
+            .filter { (_, marker) -> marker.containsMatchIn(body) }
             .map { (label, _) -> "split tick phase cleanup contains $label" }
-        val executableReplacementCount =
-            Regex("""replaceExecutableRegex\(""").findAll(phaseRewriter).count()
-        val required = buildList {
-            if (!entry.contains("val executableSource = maskJavaCommentsAndLiterals(source)")) {
-                add("executable legacy phase mask")
-            }
-            if (!entry.contains("removeSplitTickPhaseChecksInTypedMethods(result, hasBoundLegacyPhase)")) {
-                add("typed method delegation")
-            }
-            if (!typedMethods.contains("val unit = parser.parse(source).result.orElse(null) ?: return source")) {
-                add("parsed Java source")
-            }
-            if (!typedMethods.contains("val typing = SourceValueTypes(this, source)")) {
-                add("source type proof")
-            }
-            if (!typedMethods.contains("unit.findAll(MethodDeclaration::class.java)")) {
-                add("AST method scan")
-            }
-            if (!typedMethods.contains("typing.isTypeName(parameter.typeAsString, \"${'$'}it.Post\")") ||
-                !typedMethods.contains("typing.isTypeName(parameter.typeAsString, \"${'$'}it.Pre\")")
-            ) {
-                add("exact split event owner proof")
-            }
-            if (!typedMethods.contains("body.findAll(FieldAccessExpr::class.java)")) {
-                add("AST phase access proof")
-            }
-            if (!typedMethods.contains("removeSplitTickPhaseChecksForEventName(")) {
-                add("scoped phase rewrite")
-            }
-            if (executableReplacementCount < 7) add("executable phase replacements")
-        }
+        val required = listOf(
+            "executable mask" to Regex("""val\s+executableOriginal\s*=\s*maskJavaCommentsAndLiterals\(original\)"""),
+            "executable START phase scan" to Regex("""executableOriginal\.contains\("event\.phase\s*==\s*TickEvent\.Phase\.START"\)"""),
+            "executable START not-equals scan" to Regex("""executableOriginal\.contains\("event\.phase\s*!=\s*TickEvent\.Phase\.START"\)"""),
+            "executable RenderFrameEvent replacement" to Regex("""replaceExecutableRegex\(\s*modified,\s*Regex\("{3}\\bRenderFrameEvent\\\.Post\\b"{3}\)"""),
+            "executable event phase replacements" to Regex("""replaceExecutableRegex\(\s*modified,\s*Regex\("{3}[^"]*event\\\.phase"""),
+            "executable residual mask" to Regex("""val\s+executableModified\s*=\s*maskJavaCommentsAndLiterals\(modified\)"""),
+            "bounded residual identifier scan" to Regex("""containsJavaIdentifier\(executableModified,\s*"TickEvent"\)""")
+        )
+            .filterNot { (_, marker) -> marker.containsMatchIn(body) }
+            .map { (label, _) -> "split tick phase cleanup missing $label" }
 
         assertTrue(
             required.isEmpty(),
@@ -1172,5 +1139,60 @@
         assertTrue(
             offenders.isEmpty(),
             "Offset Java call rewrites must reuse the executable-code scanner instead of raw source traversal: $offenders"
+        )
+    }
+
+    @Test
+    fun `invocation argument helper delegates to executable scanner`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun rewriteJavaInvocationArguments(")
+        assertTrue(start >= 0, "rewriteJavaInvocationArguments is missing")
+        val end = source.indexOf("private fun rewriteExecutableJavaInvocationArguments", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+
+        val offenders = listOf(
+            "missing executable delegate" to !body.contains("rewriteExecutableJavaInvocationArguments(source, methodName, transform)"),
+            "raw token scan" to body.contains("result.indexOf(token, cursor)"),
+            "raw parenthesis matcher" to body.contains("findMatchingParen(result, openParen)"),
+            "raw token boundary" to body.contains("result[tokenIndex - 1]")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Invocation argument rewrites must reuse the executable-code scanner instead of raw source traversal: $offenders"
+        )
+    }
+
+    @Test
+    fun `offset invocation argument helper delegates to executable scanner`() {
+        val source = StructuralRuleSources.text
+        val start = source.indexOf("private fun rewriteJavaInvocationArgumentsWithOffset(")
+        assertTrue(start >= 0, "rewriteJavaInvocationArgumentsWithOffset is missing")
+        val executableStart = source.indexOf("private fun rewriteExecutableJavaInvocationArgumentsWithOffset", start + 1)
+        assertTrue(executableStart > start, "rewriteExecutableJavaInvocationArgumentsWithOffset must follow the delegating helper")
+        val delegatingBody = source.substring(start, executableStart)
+        val end = source.indexOf("private fun rewriteJavaNew", executableStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val executableBody = source.substring(executableStart, end)
+
+        val offenders = listOf(
+            "missing executable offset delegate" to !delegatingBody.contains("rewriteExecutableJavaInvocationArgumentsWithOffset(source, methodName, transform)"),
+            "raw token scan in delegate" to delegatingBody.contains("result.indexOf(token, cursor)"),
+            "missing executable mask" to !executableBody.contains("val executableCode = maskJavaCommentsAndLiterals(result)"),
+            "raw token scan in executable helper" to executableBody.contains("result.indexOf(token, cursor)"),
+            "raw parenthesis matcher" to executableBody.contains("findMatchingParen(result, openParen)"),
+            "raw token boundary" to executableBody.contains("result[tokenIndex - 1]")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Offset invocation argument rewrites must use executable Java for call and argument structure: $offenders"
         )
     }

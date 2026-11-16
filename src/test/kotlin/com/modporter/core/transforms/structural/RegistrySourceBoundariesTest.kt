@@ -98,13 +98,34 @@ class RegistrySourceBoundariesTest {
     }
 
     @Test
-    fun `built in registration changes only the registration metadata slot`() {
+    fun `writable registry registration changes only the registration metadata slot`() {
+        val accessor =
+            """
+            package example.mixin;
+
+            import net.minecraft.core.WritableRegistry;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.gen.Accessor;
+
+            @Mixin(BuiltInRegistries.class)
+            public interface RootRegistryAccessor {
+                @Accessor("WRITABLE_REGISTRY")
+                static WritableRegistry<WritableRegistry<?>> example${'$'}rootRegistry() {
+                    throw new AssertionError();
+                }
+
+                static Object unrelated() {
+                    throw new AssertionError();
+                }
+            }
+            """.trimIndent() + "\n"
         val source =
             """
             package example;
 
             import com.mojang.serialization.Lifecycle;
-            import com.simibubi.create.foundation.mixin.accessor.BuiltInRegistriesAccessor;
+            import example.mixin.RootRegistryAccessor;
             import net.minecraft.core.MappedRegistry;
             import net.minecraft.core.Registry;
             import net.minecraft.core.WritableRegistry;
@@ -119,71 +140,47 @@ class RegistrySourceBoundariesTest {
                 static <T> Registry<T> register(
                     ResourceKey<Registry<T>> key,
                     WritableRegistry<T> registry) {
-                    BuiltInRegistriesAccessor.create${'$'}getWRITABLE_REGISTRY()
+                    RootRegistryAccessor.example${'$'}rootRegistry()
                         .register(
                             (ResourceKey<WritableRegistry<?>>) (Object) key,
                             registry,
                             Lifecycle.stable());
                     return registry;
                 }
-            }
-            """.trimIndent() + "\n"
 
-        val migrated = StructuralRefactorPass()
-            .migrateRegistrySourceBoundaries(source)
-        assertTrue(
-            migrated.contains("import net.minecraft.core.RegistrationInfo;"),
-            migrated
-        )
-        assertTrue(
-            compact(migrated).contains(
-                "registry, RegistrationInfo.BUILT_IN)"
-            ),
-            migrated
-        )
-        assertTrue(
-            compact(migrated).contains(
-                "new MappedRegistry<>(key, Lifecycle.stable(), false)"
-            ),
-            migrated
-        )
-        assertEquals(
-            migrated,
-            StructuralRefactorPass().migrateRegistrySourceBoundaries(migrated)
-        )
-    }
+                static void local(MappedRegistry<Object> mapped, ResourceKey<Object> key, Object value) {
+                    mapped.register(key, value, Lifecycle.stable());
+                }
 
-    @Test
-    fun `id bearing Create triggers register through the trigger registry`() {
-        val source =
-            """
-            package com.simibubi.create.foundation.advancement;
-
-            import java.util.LinkedList;
-            import java.util.List;
-            import net.minecraft.advancements.CriteriaTriggers;
-
-            public class AllTriggers {
-                private static final List<CriterionTriggerBase<?>> triggers =
-                    new LinkedList<>();
-
-                public static void register() {
-                    triggers.forEach(CriteriaTriggers::register);
+                static void unproven(ResourceKey<Object> key, Object value) {
+                    ((Holder) RootRegistryAccessor.unrelated()).register(key, value, Lifecycle.stable());
                 }
             }
             """.trimIndent() + "\n"
 
-        val migrated = StructuralRefactorPass()
-            .migrateRegistrySourceBoundaries(source)
+        val pass = StructuralRefactorPass().also {
+            it.projectSourceDeclarations = ProjectSourceDeclarations.of(listOf(accessor, source))
+        }
+        val migrated = pass.migrateRegistrySourceBoundaries(source)
         val compact = compact(migrated)
+        assertTrue(migrated.contains("import net.minecraft.core.RegistrationInfo;"), migrated)
+        assertTrue(compact.contains("registry, RegistrationInfo.BUILT_IN)"), migrated)
+        assertTrue(compact.contains("mapped.register(key, value, RegistrationInfo.BUILT_IN)"), migrated)
+        assertTrue(compact.contains(".register(key, value, Lifecycle.stable())"), migrated)
+        assertTrue(compact.contains("new MappedRegistry<>(key, Lifecycle.stable(), false)"), migrated)
+        assertEquals(migrated, pass.migrateRegistrySourceBoundaries(migrated))
+    }
+
+    @Test
+    fun `id bearing project triggers register through the trigger registry`() {
+        val pass = StructuralRefactorPass().also {
+            it.projectSourceDeclarations = ProjectSourceDeclarations.of(listOf(triggerBase(), triggers()))
+        }
+        val migrated = pass.migrateRegistrySourceBoundaries(triggers())
+        val compact = compact(migrated)
+        assertTrue(migrated.contains("import net.minecraft.core.Registry;"), migrated)
         assertTrue(
-            migrated.contains("import net.minecraft.core.Registry;"),
-            migrated
-        )
-        assertTrue(
-            migrated.contains(
-                "import net.minecraft.core.registries.BuiltInRegistries;"
-            ),
+            migrated.contains("import net.minecraft.core.registries.BuiltInRegistries;"),
             migrated
         )
         assertTrue(
@@ -195,40 +192,69 @@ class RegistrySourceBoundariesTest {
         )
         assertFalse(migrated.contains("CriteriaTriggers::register"), migrated)
         assertFalse(
-            migrated.contains(
-                "import net.minecraft.advancements.CriteriaTriggers;"
-            ),
+            migrated.contains("import net.minecraft.advancements.CriteriaTriggers;"),
             migrated
         )
-        assertEquals(
-            migrated,
-            StructuralRefactorPass().migrateRegistrySourceBoundaries(migrated)
-        )
+        assertEquals(migrated, pass.migrateRegistrySourceBoundaries(migrated))
     }
 
     @Test
-    fun `similarly named triggers outside the canonical family remain unchanged`() {
-        val source =
-            """
-            package example;
-
-            import java.util.List;
-            import net.minecraft.advancements.CriteriaTriggers;
-
-            class AllTriggers {
-                private static final List<Object> triggers = List.of();
-
-                static void register() {
-                    triggers.forEach(CriteriaTriggers::register);
-                }
-            }
-            """.trimIndent() + "\n"
-
-        assertEquals(
-            source,
-            StructuralRefactorPass().migrateRegistrySourceBoundaries(source)
+    fun `triggers without a declared resource location id remain unchanged`() {
+        val withoutId = triggerBase().replace(
+            "public ResourceLocation getId() {\n        return id;\n    }",
+            "public String getId() {\n        return id.toString();\n    }"
         )
+        val objects = triggers().replace("List<TriggerBase<?>>", "List<Object>")
+        listOf(
+            "non resource location id" to (listOf(withoutId, triggers()) to triggers()),
+            "untyped element" to (listOf(triggerBase(), objects) to objects),
+            "no project declarations" to (emptyList<String>() to triggers())
+        ).forEach { (case, fixture) ->
+            val (declarations, source) = fixture
+            val pass = StructuralRefactorPass().also {
+                it.projectSourceDeclarations = ProjectSourceDeclarations.of(declarations)
+            }
+            assertEquals(source, pass.migrateRegistrySourceBoundaries(source), case)
+        }
     }
+
+    private fun triggerBase(): String =
+        """
+        package example.advancement;
+
+        import net.minecraft.advancements.CriterionTrigger;
+        import net.minecraft.resources.ResourceLocation;
+
+        public abstract class TriggerBase<T> implements CriterionTrigger<T> {
+            private final ResourceLocation id;
+
+            protected TriggerBase(ResourceLocation id) {
+                this.id = id;
+            }
+
+            public ResourceLocation getId() {
+                return id;
+            }
+        }
+        """.trimIndent() + "\n"
+
+    private fun triggers(): String =
+        """
+        package example.advancement;
+
+        import java.util.LinkedList;
+        import java.util.List;
+        import net.minecraft.advancements.CriteriaTriggers;
+
+        public class ModTriggers {
+            private static final List<TriggerBase<?>> triggers =
+                new LinkedList<>();
+
+            public static void register() {
+                triggers.forEach(CriteriaTriggers::register);
+            }
+        }
+        """.trimIndent() + "\n"
 
     private fun compact(source: String): String =
         source.replace(Regex("""\s+"""), " ")

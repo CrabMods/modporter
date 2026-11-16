@@ -1,5 +1,6 @@
 package com.modporter.transforms
 
+import com.modporter.core.transforms.structural.ProjectSourceDeclarations
 import com.modporter.core.transforms.structural.StructuralRefactorPass
 import com.modporter.core.transforms.structural.migrateLegacyClientBaseApiCompat
 import org.junit.jupiter.api.Test
@@ -351,9 +352,9 @@ class LegacyClientBaseApiCompatTest {
     }
 
     @Test
-    fun `shopping list tooltips retain their context level for entry baking`() {
+    fun `tooltip context passed to a project level parameter uses its level`() {
         val source = """
-            package com.simibubi.create.content.logistics.tableCloth;
+            package example.item;
 
             import java.util.List;
             import javax.annotation.Nullable;
@@ -364,8 +365,8 @@ class LegacyClientBaseApiCompatTest {
             import net.minecraft.world.item.TooltipFlag;
             import net.minecraft.world.level.LevelAccessor;
 
-            public class ShoppingListItem extends Item {
-                public record ShoppingList() {
+            public class LedgerItem extends Item {
+                public record Ledger() {
                     public Object bakeEntries(
                         LevelAccessor level, @Nullable BlockPos ignored
                     ) {
@@ -373,11 +374,11 @@ class LegacyClientBaseApiCompatTest {
                     }
                 }
 
-                public ShoppingListItem(Properties properties) {
+                public LedgerItem(Properties properties) {
                     super(properties);
                 }
 
-                static ShoppingList getList(ItemStack stack) {
+                static Ledger getLedger(ItemStack stack) {
                     return null;
                 }
 
@@ -388,14 +389,20 @@ class LegacyClientBaseApiCompatTest {
                     List<Component> tooltip,
                     TooltipFlag flag
                 ) {
-                    ShoppingList list = getList(stack);
+                    Ledger list = getLedger(stack);
                     if (list != null) {
                         Object baked = list.bakeEntries(context, null);
+                        Object kept = describe(context);
                     }
+                }
+
+                static Object describe(Item.TooltipContext context) {
+                    return context;
                 }
             }
         """.trimIndent()
 
+        pass.projectSourceDeclarations = ProjectSourceDeclarations.of(listOf(source))
         val migrated = pass.migrateLegacyClientBaseApiCompat(source)
         val compact = migrated.replace(Regex("""\s+"""), "")
 
@@ -403,6 +410,7 @@ class LegacyClientBaseApiCompatTest {
             compact.contains("list.bakeEntries(context.level(),null)"),
             migrated
         )
+        assertTrue(compact.contains("Objectkept=describe(context);"), migrated)
         assertTrue(
             compact.contains("returnlevel.getBlockEntity(ignored);"),
             migrated
@@ -415,9 +423,9 @@ class LegacyClientBaseApiCompatTest {
     }
 
     @Test
-    fun `deployer packet listener cookie retains the fake player profile`() {
+    fun `legacy game packet listener constructor receives the fake player cookie`() {
         val source = """
-            package com.simibubi.create.content.kinetics.deployer;
+            package example.player;
 
             import net.minecraft.network.Connection;
             import net.minecraft.server.MinecraftServer;
@@ -426,19 +434,19 @@ class LegacyClientBaseApiCompatTest {
             import net.minecraft.server.network.ServerGamePacketListenerImpl;
             import net.neoforged.neoforge.common.util.FakePlayer;
 
-            public class DeployerFakePlayer extends FakePlayer {
-                private static final Connection NETWORK_MANAGER = null;
+            public class WorkerPlayer extends FakePlayer {
+                private static final Connection CONNECTION = null;
 
-                public DeployerFakePlayer(ServerLevel level) {
+                public WorkerPlayer(ServerLevel level) {
                     super(level, null);
                 }
 
-                private static class FakePlayNetHandler
+                private static class NetHandler
                     extends ServerGamePacketListenerImpl {
-                    public FakePlayNetHandler(
+                    public NetHandler(
                         MinecraftServer server, ServerPlayer playerIn
                     ) {
-                        super(server, NETWORK_MANAGER, playerIn);
+                        super(server, CONNECTION, playerIn);
                     }
                 }
             }
@@ -449,7 +457,7 @@ class LegacyClientBaseApiCompatTest {
 
         assertTrue(
             compact.contains(
-                "super(server,NETWORK_MANAGER,playerIn," +
+                "super(server,CONNECTION,playerIn," +
                     "CommonListenerCookie.createInitial(" +
                     "playerIn.getGameProfile(),false));"
             ),
@@ -468,9 +476,9 @@ class LegacyClientBaseApiCompatTest {
     }
 
     @Test
-    fun `shopping and deployer near matches retain their declared contracts`() {
-        val shopping = """
-            package com.simibubi.create.content.logistics.tableCloth;
+    fun `tooltip and packet listener near matches retain their declared contracts`() {
+        val ledger = """
+            package example.item;
 
             import java.util.List;
             import net.minecraft.core.BlockPos;
@@ -480,16 +488,20 @@ class LegacyClientBaseApiCompatTest {
             import net.minecraft.world.item.ItemStack;
             import net.minecraft.world.item.TooltipFlag;
 
-            public class ShoppingListItem extends Item {
-                public record ShoppingList() {
+            public class LedgerItem extends Item {
+                public record Ledger() {
                     Object bakeEntries(
                         HolderLookup.Provider registries, BlockPos ignored
                     ) {
                         return registries;
                     }
+
+                    Object describe(Object anything, BlockPos ignored) {
+                        return anything;
+                    }
                 }
 
-                ShoppingListItem(Properties properties) {
+                LedgerItem(Properties properties) {
                     super(properties);
                 }
 
@@ -500,13 +512,15 @@ class LegacyClientBaseApiCompatTest {
                     List<Component> tooltip,
                     TooltipFlag flag
                 ) {
-                    ShoppingList list = null;
+                    Ledger list = null;
                     list.bakeEntries(context, null);
+                    list.describe(context, null);
+                    unknown.bakeEntries(context, null);
                 }
             }
         """.trimIndent()
-        val deployer = """
-            package com.simibubi.create.content.kinetics.deployer;
+        val player = """
+            package example.player;
 
             import net.minecraft.network.Connection;
             import net.minecraft.server.MinecraftServer;
@@ -516,36 +530,41 @@ class LegacyClientBaseApiCompatTest {
             import net.minecraft.server.network.ServerGamePacketListenerImpl;
             import net.neoforged.neoforge.common.util.FakePlayer;
 
-            public class DeployerFakePlayer extends FakePlayer {
-                private static final Connection NETWORK_MANAGER = null;
+            public class WorkerPlayer extends FakePlayer {
+                private static final Connection CONNECTION = null;
 
-                public DeployerFakePlayer(ServerLevel level) {
+                public WorkerPlayer(ServerLevel level) {
                     super(level, null);
                 }
 
-                private static class FakePlayNetHandler
+                private static class NetHandler
                     extends ServerGamePacketListenerImpl {
-                    FakePlayNetHandler(
+                    NetHandler(
                         MinecraftServer server, ServerPlayer playerIn
                     ) {
                         super(
                             server,
-                            NETWORK_MANAGER,
+                            CONNECTION,
                             playerIn,
                             CommonListenerCookie.createInitial(
                                 playerIn.getGameProfile(), false));
+                    }
+
+                    NetHandler(MinecraftServer server, Object playerIn) {
+                        super(server, CONNECTION, (ServerPlayer) playerIn);
                     }
                 }
             }
         """.trimIndent()
 
+        pass.projectSourceDeclarations = ProjectSourceDeclarations.of(listOf(ledger, player))
         assertEquals(
-            shopping,
-            pass.migrateLegacyClientBaseApiCompat(shopping)
+            ledger,
+            pass.migrateLegacyClientBaseApiCompat(ledger)
         )
         assertEquals(
-            deployer,
-            pass.migrateLegacyClientBaseApiCompat(deployer)
+            player,
+            pass.migrateLegacyClientBaseApiCompat(player)
         )
     }
 

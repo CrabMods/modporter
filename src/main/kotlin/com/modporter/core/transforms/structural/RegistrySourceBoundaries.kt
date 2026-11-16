@@ -18,6 +18,7 @@ import com.github.javaparser.ast.expr.MethodReferenceExpr
 import com.github.javaparser.ast.expr.NameExpr
 import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter
 import com.modporter.core.transforms.util.JavaSourceText
+import com.modporter.mapping.TargetMembers
 
 /**
  * Repairs registry source boundaries whose target type follows from the declaring receiver:
@@ -26,13 +27,17 @@ import com.modporter.core.transforms.util.JavaSourceText
  *    `getRegistryKey()`;
  * 2. DeferredRegister<ParticleType<?>> fixes the first DeferredHolder generic without changing
  *    its specialized ParticleType<D> value;
- * 3. the built-in writable registry requires RegistrationInfo.BUILT_IN at its registration slot;
- *    and
- * 4. Create's retained id-bearing trigger base registers through the trigger registry.
+ * 3. `WritableRegistry#register(key, value, Lifecycle)` became `register(key, value,
+ *    RegistrationInfo)` (1.21.1 member table); a `Lifecycle.stable()` slot is exactly
+ *    `RegistrationInfo.BUILT_IN` when the receiver is proven to be a writable registry; and
+ * 4. 1.20.1 `CriteriaTriggers.register(T)` registered a trigger under its own `getId()`; 1.21.1
+ *    triggers carry no id, so a `forEach(CriteriaTriggers::register)` over triggers whose project
+ *    type still declares `ResourceLocation getId()` registers each through the trigger registry
+ *    under that id.
  *
- * Every admission is tied to canonical imports and the local declaration that supplies the
- * receiver or generic position. Unrelated method names, lifecycle arguments, and holder types are
- * left unchanged.
+ * Every admission is tied to canonical imports and the declaration that supplies the receiver,
+ * element or generic position (project declarations through [ProjectSourceDeclarations]).
+ * Unrelated method names, lifecycle arguments, and holder types are left unchanged.
  */
 internal fun StructuralRefactorPass.migrateRegistrySourceBoundaries(
     source: String
@@ -55,8 +60,8 @@ internal fun StructuralRefactorPass.migrateRegistrySourceBoundaries(
 
     val registryKeyChanged = migrateVanillaRegistryKeyCalls(unit)
     val particleChanged = migrateParticleDeferredHolderBase(unit, parser)
-    val registrationInfoChanged = migrateBuiltInRegistrationInfo(unit, parser)
-    val triggersChanged = migrateIdBearingTriggerRegistration(unit, parser)
+    val registrationInfoChanged = migrateBuiltInRegistrationInfo(unit, parser, projectSourceDeclarations)
+    val triggersChanged = migrateIdBearingTriggerRegistration(unit, parser, projectSourceDeclarations)
     if (!registryKeyChanged && !particleChanged &&
         !registrationInfoChanged && !triggersChanged
     ) {
@@ -251,61 +256,20 @@ private fun registryBoundaryAssignedName(expression: Expression): String? =
 
 private fun migrateBuiltInRegistrationInfo(
     unit: CompilationUnit,
-    parser: JavaParser
+    parser: JavaParser,
+    declarations: ProjectSourceDeclarations
 ): Boolean {
-    if (!registryBoundaryCanonicalSimpleType(
-            unit,
-            "Lifecycle",
-            LIFECYCLE
-        ) ||
-        !registryBoundaryCanonicalSimpleType(
-            unit,
-            "WritableRegistry",
-            WRITABLE_REGISTRY
-        ) ||
-        !registryBoundaryCanonicalSimpleType(
-            unit,
-            "ResourceKey",
-            RESOURCE_KEY
-        ) ||
-        !registryBoundaryCanonicalSimpleType(
-            unit,
-            "Registry",
-            REGISTRY
-        ) ||
-        !registryBoundaryCanonicalSimpleType(
-            unit,
-            "BuiltInRegistriesAccessor",
-            BUILT_IN_REGISTRIES_ACCESSOR
-        ) ||
-        !registryBoundarySimpleNameAvailable(
-            unit,
-            "RegistrationInfo",
-            REGISTRATION_INFO
-        )
+    if (!registryBoundaryCanonicalSimpleType(unit, "Lifecycle", LIFECYCLE) ||
+        !registryBoundarySimpleNameAvailable(unit, "RegistrationInfo", REGISTRATION_INFO) ||
+        !TargetMembers.hasField(REGISTRATION_INFO, "BUILT_IN") ||
+        !writableRegistrationTakesRegistrationInfo()
     ) {
         return false
     }
 
     var changed = false
     for (call in unit.findAll(MethodCallExpr::class.java).toList()) {
-        if (call.nameAsString != "register" ||
-            call.arguments.size != 3
-        ) {
-            continue
-        }
-        val accessor = call.scope.orElse(null) as? MethodCallExpr ?: continue
-        if (accessor.nameAsString != "create\$getWRITABLE_REGISTRY" ||
-            accessor.arguments.isNotEmpty() ||
-            !registryBoundaryCanonicalOwner(
-                unit,
-                accessor.scope.orElse(null),
-                "BuiltInRegistriesAccessor",
-                BUILT_IN_REGISTRIES_ACCESSOR
-            )
-        ) {
-            continue
-        }
+        if (call.nameAsString != "register" || call.arguments.size != 3) continue
         val lifecycle = call.arguments[2] as? MethodCallExpr ?: continue
         if (lifecycle.nameAsString != "stable" ||
             lifecycle.arguments.isNotEmpty() ||
@@ -318,23 +282,9 @@ private fun migrateBuiltInRegistrationInfo(
         ) {
             continue
         }
-        val method = call.findAncestor(MethodDeclaration::class.java)
-            .orElse(null) ?: continue
-        val key = method.parameters.singleOrNull {
-            registryBoundaryNormalized(it.type.asString())
-                .startsWith("ResourceKey<Registry<")
-        } ?: continue
-        val registry = method.parameters.singleOrNull {
-            registryBoundaryNormalized(it.type.asString())
-                .startsWith("WritableRegistry<")
-        } ?: continue
-        if (call.arguments[0].toString()
-                .let { !it.contains(key.nameAsString) } ||
-            (call.arguments[1] as? NameExpr)?.nameAsString !=
-            registry.nameAsString
-        ) {
-            continue
-        }
+        val receiver = call.scope.orElse(null) ?: continue
+        val receiverType = runCatching { declarations.expressionType(receiver) }.getOrNull()?.name ?: continue
+        if (!isWritableRegistry(receiverType)) continue
         call.setArgument(
             2,
             parser.parseExpression<Expression>(
@@ -346,83 +296,88 @@ private fun migrateBuiltInRegistrationInfo(
     return changed
 }
 
+/** 1.21.1 `WritableRegistry#register` takes `RegistrationInfo` in the slot 1.20.1 gave a `Lifecycle`. */
+private fun writableRegistrationTakesRegistrationInfo(): Boolean {
+    val descriptors = TargetMembers.methodDescriptors(WRITABLE_REGISTRY, "register")
+    return descriptors.any {
+        TargetMembers.parameterTypes(it) == listOf(
+            "Lnet/minecraft/resources/ResourceKey;",
+            "Ljava/lang/Object;",
+            "Lnet/minecraft/core/RegistrationInfo;"
+        )
+    } && descriptors.none { it.contains("Lcom/mojang/serialization/Lifecycle;") }
+}
+
+private fun isWritableRegistry(type: String): Boolean {
+    if (type == WRITABLE_REGISTRY) return true
+    val binary = ProjectSourceDeclarations.platformBinary(type) ?: return false
+    return TargetMembers.inheritsFrom(binary, WRITABLE_REGISTRY)
+}
+
 private fun migrateIdBearingTriggerRegistration(
     unit: CompilationUnit,
-    parser: JavaParser
+    parser: JavaParser,
+    declarations: ProjectSourceDeclarations
 ): Boolean {
-    if (unit.packageDeclaration.map {
-            it.nameAsString
-        }.orElse("") != CREATE_ADVANCEMENT_PACKAGE ||
-        unit.findAll(ClassOrInterfaceDeclaration::class.java).none {
-            it.nameAsString == "AllTriggers"
-        } ||
-        !registryBoundaryCanonicalSimpleType(
-            unit,
-            "CriteriaTriggers",
-            CRITERIA_TRIGGERS
-        ) ||
-        !registryBoundaryCanonicalSimpleType(
-            unit,
-            "List",
-            LIST
-        ) ||
-        !registryBoundarySimpleNameAvailable(
-            unit,
-            "Registry",
-            REGISTRY
-        ) ||
-        !registryBoundarySimpleNameAvailable(
-            unit,
-            "BuiltInRegistries",
-            BUILT_IN_REGISTRIES
-        )
-    ) {
-        return false
-    }
-    val owner = unit.findAll(ClassOrInterfaceDeclaration::class.java)
-        .singleOrNull { it.nameAsString == "AllTriggers" }
-        ?: return false
-    val triggerField = owner.fields.flatMap { it.variables }
-        .singleOrNull {
-            it.nameAsString == "triggers" &&
-                registryBoundaryNormalized(it.type.asString()) ==
-                "List<CriterionTriggerBase<?>>"
-        } ?: return false
-    if (unit.findAll(TypeDeclaration::class.java).any {
-            it.nameAsString == "CriterionTriggerBase"
-        }
+    if (!registryBoundaryCanonicalSimpleType(unit, "CriteriaTriggers", CRITERIA_TRIGGERS) ||
+        !registryBoundarySimpleNameAvailable(unit, "Registry", REGISTRY) ||
+        !registryBoundarySimpleNameAvailable(unit, "BuiltInRegistries", BUILT_IN_REGISTRIES) ||
+        !TargetMembers.hasField(BUILT_IN_REGISTRIES, "TRIGGER_TYPES") ||
+        // 1.21.1 offers only register(String, T): the 1.20.1 id-taking register(T) is gone
+        TargetMembers.methodDescriptors(CRITERIA_TRIGGERS, "register")
+            .any { TargetMembers.parameterTypes(it).size == 1 }
     ) {
         return false
     }
 
-    val register = owner.methods.singleOrNull {
-        it.nameAsString == "register" &&
-            it.parameters.isEmpty() &&
-            it.type.isVoidType
-    } ?: return false
-    val calls = register.findAll(MethodCallExpr::class.java).filter { call ->
-        call.nameAsString == "forEach" &&
-            call.arguments.size == 1 &&
-            (call.scope.orElse(null) as? NameExpr)?.nameAsString ==
-            triggerField.nameAsString &&
-            (call.arguments.single() as? MethodReferenceExpr)?.let {
-                it.identifier == "register" &&
-                    registryBoundaryCanonicalOwner(
-                        unit,
-                        it.scope,
-                        "CriteriaTriggers",
-                        CRITERIA_TRIGGERS
-                    )
-            } == true
+    var changed = false
+    for (call in unit.findAll(MethodCallExpr::class.java).toList()) {
+        if (call.nameAsString != "forEach" || call.arguments.size != 1) continue
+        val reference = call.arguments.single() as? MethodReferenceExpr ?: continue
+        if (reference.identifier != "register" ||
+            !registryBoundaryCanonicalOwner(unit, reference.scope, "CriteriaTriggers", CRITERIA_TRIGGERS)
+        ) {
+            continue
+        }
+        val triggers = call.scope.orElse(null) as? NameExpr ?: continue
+        val element = runCatching { declarations.declaredElementType(triggers) }.getOrNull()?.name ?: continue
+        if (!declaresResourceLocationId(element, declarations)) continue
+        val name = freshLambdaParameterName(call, "trigger")
+        val replacement = parser.parseExpression<Expression>(
+            "$name -> Registry.register(" +
+                "BuiltInRegistries.TRIGGER_TYPES, " +
+                "$name.getId(), $name)"
+        ).result.orElse(null) as? LambdaExpr ?: continue
+        call.setArgument(0, replacement)
+        changed = true
     }
-    val call = calls.singleOrNull() ?: return false
-    val replacement = parser.parseExpression<Expression>(
-        "trigger -> Registry.register(" +
-            "BuiltInRegistries.TRIGGER_TYPES, " +
-            "trigger.getId(), trigger)"
-    ).result.orElse(null) as? LambdaExpr ?: return false
-    call.setArgument(0, replacement)
-    return true
+    return changed
+}
+
+/** Every `getId()` a value of the project type [owner] can dispatch to returns a `ResourceLocation`. */
+private fun declaresResourceLocationId(owner: String, declarations: ProjectSourceDeclarations): Boolean {
+    if (!declarations.declares(owner)) return false
+    val getters = runCatching { declarations.methods(owner, "getId", 0) }.getOrNull()
+        ?.takeIf { it.isNotEmpty() } ?: return false
+    return getters.all { method ->
+        (declarations.resolve(method.declaration.type, method.declaration) as?
+            ProjectSourceDeclarations.TypeRef.Named)?.name == RESOURCE_LOCATION
+    }
+}
+
+/** [base], or [base] with underscores, that no local, parameter or lambda parameter around [node] uses. */
+private fun freshLambdaParameterName(node: Node, base: String): String {
+    val callable = node.findAncestor(com.github.javaparser.ast.body.CallableDeclaration::class.java).orElse(null)
+    val taken = buildSet {
+        callable?.parameters?.forEach { add(it.nameAsString) }
+        callable?.findAll(VariableDeclarator::class.java)?.forEach { add(it.nameAsString) }
+        callable?.findAll(LambdaExpr::class.java)?.forEach { lambda ->
+            lambda.parameters.forEach { add(it.nameAsString) }
+        }
+    }
+    var name = base
+    while (name in taken) name += "_"
+    return name
 }
 
 private fun registryBoundaryShadowedBetween(
@@ -547,10 +502,6 @@ private fun registryBoundaryNormalized(type: String): String =
 
 private const val BUILT_IN_REGISTRIES =
     "net.minecraft.core.registries.BuiltInRegistries"
-private const val BUILT_IN_REGISTRIES_ACCESSOR =
-    "com.simibubi.create.foundation.mixin.accessor.BuiltInRegistriesAccessor"
-private const val CREATE_ADVANCEMENT_PACKAGE =
-    "com.simibubi.create.foundation.advancement"
 private const val CRITERIA_TRIGGERS =
     "net.minecraft.advancements.CriteriaTriggers"
 private const val DEFERRED_HOLDER =
@@ -559,13 +510,12 @@ private const val DEFERRED_REGISTER =
     "net.neoforged.neoforge.registries.DeferredRegister"
 private const val LIFECYCLE =
     "com.mojang.serialization.Lifecycle"
-private const val LIST = "java.util.List"
 private const val PARTICLE_OPTIONS =
     "net.minecraft.core.particles.ParticleOptions"
 private const val PARTICLE_TYPE =
     "net.minecraft.core.particles.ParticleType"
 private const val REGISTRATION_INFO = "net.minecraft.core.RegistrationInfo"
 private const val REGISTRY = "net.minecraft.core.Registry"
-private const val RESOURCE_KEY = "net.minecraft.resources.ResourceKey"
+private const val RESOURCE_LOCATION = "net.minecraft.resources.ResourceLocation"
 private const val WRITABLE_REGISTRY =
     "net.minecraft.core.WritableRegistry"

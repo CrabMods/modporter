@@ -640,10 +640,10 @@
         StructuralRefactorPass().apply(tempDir)
         val handler = srcDir.resolve("SeasonsHandler.java").readText()
 
-        assertTrue(handler.contains("public static void onLivingTick(EntityTickEvent.Pre event) {"), handler)
+        assertTrue(handler.contains("public static void onLivingTick(EntityTickEvent.Post event) {"), handler)
         assertTrue(handler.contains("if (!(event.getEntity() instanceof LivingEntity living)) return;"), handler)
         assertTrue(handler.contains("if(!(living instanceof Player)&&living.tickCount%MOB_INTERVAL==0)"), handler)
-        assertTrue(handler.contains("public static void onEntityTick(net.neoforged.neoforge.event.tick.EntityTickEvent.Pre event) {"), handler)
+        assertTrue(handler.contains("public static void onEntityTick(net.neoforged.neoforge.event.tick.EntityTickEvent.Post event) {"), handler)
         assertTrue(handler.contains("net.minecraft.world.entity.Entity subject = event.getEntity();"), handler)
         assertFalse(handler.contains("LivingTickEvent"), handler)
     }
@@ -932,7 +932,7 @@
         assertTrue(test.contains("""net.minecraft.world.item.component.CustomData.update(net.minecraft.core.component.DataComponents.CUSTOM_DATA, unknownBucket, tag -> { net.minecraft.nbt.CompoundTag child = tag.getCompound("HotbathCustomFluid"); child.putString("FluidId", "hotbath:unregistered"); tag.put("HotbathCustomFluid", child); });"""), test)
         assertTrue(test.contains("var pipe = OpenEndedPipe.fromNBT(saved, level.registryAccess(), pipePos);"), test)
         assertTrue(test.contains("pipe.manageSource(level, null);"), test)
-        assertTrue(test.contains("var handler = pipe.provideHandler().getCapability();"), test)
+        assertTrue(test.contains("var handler = java.util.Optional.ofNullable(pipe.provideHandler().getCapability()).orElseThrow(() -> new AssertionError(\"Missing open pipe handler\"));"), test)
         assertTrue(test.contains("""byKey(id("example:mix_" + names(level).get(0)))"""), test)
         assertTrue(test.contains(".map(net.minecraft.world.item.crafting.RecipeHolder::value)"), test)
         assertTrue(test.contains("int amount = fluids.get(0).amount();"), test)

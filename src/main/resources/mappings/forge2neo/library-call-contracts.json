@@ -1,0 +1,31 @@
+{
+  "description": "Dependency methods whose NeoForge 1.21.1 build changed a call contract in a way a call site can follow exactly (javap of the Forge 1.20.1 and NeoForge 1.21.1 jars). Applied only where the owner is imported or written fully qualified and is not a project source type; instance contracts need a receiver proven to be an owner value. kind provider-parameter: a HolderLookup.Provider parameter was inserted at providerIndex. kind appended-argument: a trailing parameter was added that the target implementation ignores; argument is passed. kind lazy-optional-accessor: a LazyOptional return became a provider whose accessor returns the value or null.",
+  "contracts": [
+    {
+      "owner": "com.simibubi.create.content.fluids.OpenEndedPipe",
+      "name": "fromNBT",
+      "kind": "provider-parameter",
+      "static": true,
+      "forgeParameters": ["net.minecraft.nbt.CompoundTag", "net.minecraft.core.BlockPos"],
+      "providerIndex": 1,
+      "returnsOwner": true,
+      "notes": "Create 6.0.8 for Forge 1.20.1 (curse.maven:create-328085:7178761): public static OpenEndedPipe fromNBT(CompoundTag, BlockPos). Create 6.0.9 for NeoForge 1.21.1 (curse.maven:create-328085:7408951): public static OpenEndedPipe fromNBT(CompoundTag, HolderLookup$Provider, BlockPos)."
+    },
+    {
+      "owner": "com.simibubi.create.content.fluids.OpenEndedPipe",
+      "name": "manageSource",
+      "kind": "appended-argument",
+      "forgeParameters": ["net.minecraft.world.level.Level"],
+      "argument": "null",
+      "notes": "Create 6.0.8 (7178761): public void manageSource(Level). Create 6.0.9 (7408951): public void manageSource(Level, BlockEntity); javap -c shows its body only stores the Level (aload_0, aload_1, putfield world, return) and FlowSource.manageSource(Level, BlockEntity) is empty, so the BlockEntity is never read; no class in the 6.0.9 jar extends OpenEndedPipe."
+    },
+    {
+      "owner": "com.simibubi.create.content.fluids.OpenEndedPipe",
+      "name": "provideHandler",
+      "kind": "lazy-optional-accessor",
+      "forgeParameters": [],
+      "accessor": "getCapability",
+      "notes": "Create 6.0.8 (7178761): public LazyOptional<IFluidHandler> provideHandler(). Create 6.0.9 (7408951): public com.simibubi.create.foundation.ICapabilityProvider<IFluidHandler> provideHandler(); ICapabilityProvider<T> declares the single abstract T getCapability(), the handler or null."
+    }
+  ]
+}

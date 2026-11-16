@@ -30,9 +30,9 @@ class LegacyModelDataManagerCompatTest {
     lateinit var temporary: Path
 
     @Test
-    fun `exact Create pair receives live nullable manager bridge and client-only accessor`() {
+    fun `wrapper provider and getter query receive the live nullable manager bridge`() {
         val fixture = fixture()
-        writeCreateSources(fixture.project)
+        writeOwnedSources(fixture.project)
 
         val changes = LegacyModelDataManagerCompatMigration.migrate(
             StructuralRefactorPass(),
@@ -45,13 +45,11 @@ class LegacyModelDataManagerCompatTest {
         val compat = fixture.project.resolve(
             "src/main/java/com/modporter/generated/copycat_test/compat"
         )
-        val filtered = fixture.project.resolve(
-            "src/main/java/com/simibubi/create/content/decoration/copycat/" +
-                "FilteredBlockAndTintGetter.java"
-        ).readText()
-        val copycat = fixture.project.resolve(
-            "src/main/java/com/simibubi/create/content/decoration/copycat/" +
-                "CopycatBlock.java"
+        val masked = fixture.project.resolve(
+            "src/main/java/example/decor/MaskedBlockAndTintGetter.java"
+        ).readText().replace("\r\n", "\n")
+        val mimic = fixture.project.resolve(
+            "src/main/java/example/decor/MimicBlock.java"
         ).readText()
         val resolver = compat.resolve("LegacyModelDataManagers.java").readText()
         val view = compat.resolve("LegacyRenderChunkRegionView.java").readText()
@@ -64,38 +62,38 @@ class LegacyModelDataManagerCompatTest {
         val metadata = fixture.project.resolve(
             "src/main/resources/META-INF/neoforge.mods.toml"
         ).readText()
-        val copycatCompact = copycat.replace(Regex("""\s+"""), " ")
+        val mimicCompact = mimic.replace(Regex("""\s+"""), " ")
 
         assertTrue(
-            filtered.contains(
-                "com.modporter.generated.copycat_test.compat." +
+            masked.contains(
+                "implements BlockAndTintGetter, com.modporter.generated.copycat_test.compat." +
                     "LegacyModelDataManagerProvider"
             ),
-            filtered
+            masked
         )
         assertTrue(
-            filtered.contains(
-                "modporter\$getLegacyModelDataManager"
-            ) && filtered.contains(
-                "LegacyModelDataManagers.resolve(wrapped)"
+            masked.contains(
+                "public @Nullable ModelDataManager modporter\$getLegacyModelDataManager() {\n" +
+                    "        return com.modporter.generated.copycat_test.compat." +
+                    "LegacyModelDataManagers.resolve(wrapped);"
             ),
-            filtered
+            masked
         )
         assertTrue(
-            copycatCompact.contains(
+            mimicCompact.contains(
                 "ModelDataManager modelDataManager = " +
                     "com.modporter.generated.copycat_test.compat." +
                     "LegacyModelDataManagers.resolve(level);"
             ),
-            copycat
+            mimic
         )
         assertTrue(
-            copycatCompact.contains("if (modelDataManager == null)") &&
-                copycatCompact.contains("return getMaterial(level, pos);") &&
-                copycatCompact.contains(
-                    "CopycatModel.getMaterial(modelDataManager.getAt(pos))"
+            mimicCompact.contains("if (modelDataManager == null)") &&
+                mimicCompact.contains("return getMaterial(level, pos);") &&
+                mimicCompact.contains(
+                    "MimicModel.getMaterial(modelDataManager.getAt(pos))"
                 ),
-            copycat
+            mimic
         )
 
         val providerIndex = resolver.indexOf(
@@ -150,75 +148,78 @@ class LegacyModelDataManagerCompatTest {
     }
 
     @Test
-    fun `Copycat admission preserves the real five argument connectivity guard`() {
+    fun `a getter of another shape queried through this is bridged the same way`() {
         val fixture = fixture()
-        writeCreateSources(fixture.project)
-        val copycat = fixture.project.resolve(
-            "src/main/java/com/simibubi/create/content/decoration/copycat/" +
-                "CopycatBlock.java"
+        val view = java(
+            fixture.project,
+            "example/view/LayeredView.java",
+            """
+            package example.view;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.BlockAndTintGetter;
+            import net.neoforged.neoforge.client.model.data.ModelData;
+            import net.neoforged.neoforge.client.model.data.ModelDataManager;
+
+            public abstract class LayeredView implements BlockAndTintGetter {
+                public boolean hasData(BlockPos target) {
+                    ModelDataManager manager = getModelDataManager();
+                    return manager != null && Layers.marker(manager.getAt(target)) != null;
+                }
+            }
+
+            final class Layers {
+                static Object MARKER = null;
+
+                static Object marker(ModelData data) {
+                    return data != null ? data.get(MARKER) : null;
+                }
+            }
+            """
         )
-        val before = copycat.readText()
-        val realGuard = "level, state, side, pos, queryPos))"
-        val driftedGuard = "level, state, side, pos, queryState, queryPos))"
-        assertTrue(before.contains(realGuard), before)
-        val drifted = before.replace(realGuard, driftedGuard)
-        assertFalse(drifted == before)
-        copycat.writeText(drifted)
 
-        val failure = assertFailsWith<IllegalArgumentException> {
-            LegacyModelDataManagerCompatMigration.migrate(
-                StructuralRefactorPass(),
-                fixture.project,
-                dryRun = false,
-                inventory = fixture.inventory
-            )
-        }
+        LegacyModelDataManagerCompatMigration.migrate(
+            StructuralRefactorPass(),
+            fixture.project,
+            dryRun = false,
+            inventory = fixture.inventory
+        )
 
+        val migrated = view.readText()
         assertTrue(
-            failure.message.orEmpty().contains("connectivity guard changed"),
-            failure.message
-        )
-        assertEquals(drifted, copycat.readText())
-        assertFalse(
-            fixture.project.resolve(
-                "src/main/java/com/modporter/generated/copycat_test/compat/" +
-                    "LegacyModelDataManagers.java"
-            ).exists()
-        )
-    }
-
-    @Test
-    fun `either exact residual activates fail closed full-family admission`() {
-        val fixture = fixture()
-        writeCreateSources(fixture.project)
-        Files.delete(
-            fixture.project.resolve(
-                "src/main/java/com/simibubi/create/content/decoration/copycat/" +
-                    "CopycatBlock.java"
-            )
-        )
-        Files.delete(
-            fixture.project.resolve(
-                "src/main/java/com/simibubi/create/content/decoration/copycat/" +
-                    "CopycatModel.java"
-            )
-        )
-
-        val failure = assertFailsWith<IllegalArgumentException> {
-            LegacyModelDataManagerCompatMigration.migrate(
-                StructuralRefactorPass(),
-                fixture.project,
-                dryRun = false,
-                inventory = fixture.inventory
-            )
-        }
-
-        assertTrue(
-            failure.message.orEmpty().contains(
-                "Expected exactly one source declaration"
+            migrated.contains(
+                "ModelDataManager manager = com.modporter.generated.copycat_test.compat." +
+                    "LegacyModelDataManagers.resolve(this);"
             ),
-            failure.message
+            migrated
         )
+    }
+
+    @Test
+    fun `a consumer that can tell null from an empty model data gates the transaction`() {
+        val fixture = fixture()
+        writeOwnedSources(fixture.project)
+        val model = fixture.project.resolve("src/main/java/example/decor/MimicModel.java")
+        model.writeText(
+            model.readText().replace(
+                "BlockState material =\n            data == null ? null : data.get(MATERIAL_PROPERTY);",
+                "if (data == null)\n            return null;\n        BlockState material = data.get(MATERIAL_PROPERTY);"
+            )
+        )
+        val mimic = fixture.project.resolve("src/main/java/example/decor/MimicBlock.java")
+        val before = mimic.readText()
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            LegacyModelDataManagerCompatMigration.migrate(
+                StructuralRefactorPass(),
+                fixture.project,
+                dryRun = false,
+                inventory = fixture.inventory
+            )
+        }
+
+        assertTrue(failure.message.orEmpty().contains("null from ModelData.EMPTY"), failure.message)
+        assertEquals(before, mimic.readText())
         assertFalse(
             fixture.project.resolve(
                 "src/main/java/com/modporter/generated/copycat_test/compat/" +
@@ -228,12 +229,12 @@ class LegacyModelDataManagerCompatTest {
     }
 
     @Test
-    fun `extra project manager query rejects the whole transaction before writes`() {
+    fun `a query whose manager escapes to unproven callers rejects the whole transaction`() {
         val fixture = fixture()
-        writeCreateSources(fixture.project)
-        val extra = fixture.project.resolve("src/main/java/example/Extra.java")
-        extra.parent.createDirectories()
-        extra.writeText(
+        writeOwnedSources(fixture.project)
+        java(
+            fixture.project,
+            "example/Extra.java",
             """
             package example;
 
@@ -244,13 +245,12 @@ class LegacyModelDataManagerCompatTest {
                     return level.getModelDataManager();
                 }
             }
-            """.trimIndent() + "\n"
+            """
         )
-        val filtered = fixture.project.resolve(
-            "src/main/java/com/simibubi/create/content/decoration/copycat/" +
-                "FilteredBlockAndTintGetter.java"
+        val masked = fixture.project.resolve(
+            "src/main/java/example/decor/MaskedBlockAndTintGetter.java"
         )
-        val before = filtered.readText()
+        val before = masked.readText()
 
         val failure = assertFailsWith<IllegalArgumentException> {
             LegacyModelDataManagerCompatMigration.migrate(
@@ -261,8 +261,45 @@ class LegacyModelDataManagerCompatTest {
             )
         }
 
-        assertTrue(failure.message.orEmpty().contains("additional"))
-        assertEquals(before, filtered.readText())
+        assertTrue(failure.message.orEmpty().contains("returns the manager"), failure.message)
+        assertEquals(before, masked.readText())
+        assertFalse(
+            fixture.project.resolve(
+                "src/main/java/com/modporter/generated/copycat_test/compat/" +
+                    "LegacyModelDataManagers.java"
+            ).exists()
+        )
+    }
+
+    @Test
+    fun `a Level receiver keeps its target getter and starts no migration`() {
+        val fixture = fixture()
+        val source = java(
+            fixture.project,
+            "example/LevelUser.java",
+            """
+            package example;
+
+            import net.minecraft.world.level.Level;
+
+            final class LevelUser {
+                Object query(Level level) {
+                    return level.getModelDataManager();
+                }
+            }
+            """
+        )
+        val before = source.readText()
+
+        val changes = LegacyModelDataManagerCompatMigration.migrate(
+            StructuralRefactorPass(),
+            fixture.project,
+            dryRun = false,
+            inventory = fixture.inventory
+        )
+
+        assertTrue(changes.isEmpty())
+        assertEquals(before, source.readText())
         assertFalse(
             fixture.project.resolve(
                 "src/main/java/com/modporter/generated/copycat_test/compat/" +
@@ -274,12 +311,11 @@ class LegacyModelDataManagerCompatTest {
     @Test
     fun `dependency manager declaration rejects the exact sealed classpath`() {
         val fixture = fixture(dependencyManagerDeclaration = true)
-        writeCreateSources(fixture.project)
-        val filtered = fixture.project.resolve(
-            "src/main/java/com/simibubi/create/content/decoration/copycat/" +
-                "FilteredBlockAndTintGetter.java"
+        writeOwnedSources(fixture.project)
+        val masked = fixture.project.resolve(
+            "src/main/java/example/decor/MaskedBlockAndTintGetter.java"
         )
-        val before = filtered.readText()
+        val before = masked.readText()
 
         val failure = assertFailsWith<IllegalArgumentException> {
             LegacyModelDataManagerCompatMigration.migrate(
@@ -295,13 +331,13 @@ class LegacyModelDataManagerCompatTest {
                 failure.message.orEmpty().contains("dependency"),
             failure.message
         )
-        assertEquals(before, filtered.readText())
+        assertEquals(before, masked.readText())
     }
 
     @Test
     fun `common helpers preserve provider priority nullness and live manager replacement`() {
         val fixture = fixture()
-        writeCreateSources(fixture.project)
+        writeOwnedSources(fixture.project)
         LegacyModelDataManagerCompatMigration.migrate(
             StructuralRefactorPass(),
             fixture.project,
@@ -478,21 +514,18 @@ class LegacyModelDataManagerCompatTest {
         }
     }
 
-    private fun writeCreateSources(project: Path) {
-        val root = project.resolve(
-            "src/main/java/com/simibubi/create/content/decoration/copycat"
-        )
-        root.createDirectories()
-        root.resolve("FilteredBlockAndTintGetter.java").writeText(
+    private fun writeOwnedSources(project: Path) {
+        java(
+            project,
+            "example/decor/MaskedBlockAndTintGetter.java",
             """
-            package com.simibubi.create.content.decoration.copycat;
+            package example.decor;
 
             import org.jetbrains.annotations.Nullable;
             import net.minecraft.world.level.BlockAndTintGetter;
             import net.neoforged.neoforge.client.model.data.ModelDataManager;
 
-            public class FilteredBlockAndTintGetter
-                    implements BlockAndTintGetter {
+            public class MaskedBlockAndTintGetter implements BlockAndTintGetter {
                 private BlockAndTintGetter wrapped;
 
                 @Override
@@ -500,21 +533,23 @@ class LegacyModelDataManagerCompatTest {
                     return wrapped.getModelDataManager();
                 }
             }
-            """.trimIndent() + "\n"
-        )
-        root.resolve("CopycatBlock.java").writeText(
             """
-            package com.simibubi.create.content.decoration.copycat;
+        )
+        java(
+            project,
+            "example/decor/MimicBlock.java",
+            """
+            package example.decor;
 
             import org.jetbrains.annotations.Nullable;
             import net.minecraft.core.BlockPos;
             import net.minecraft.core.Direction;
             import net.minecraft.world.level.BlockAndTintGetter;
+            import net.minecraft.world.level.BlockGetter;
             import net.minecraft.world.level.block.state.BlockState;
             import net.neoforged.neoforge.client.model.data.ModelDataManager;
 
-            public abstract class CopycatBlock {
-                @Override
+            public abstract class MimicBlock {
                 public BlockState getAppearance(
                         BlockState state,
                         BlockAndTintGetter level,
@@ -529,32 +564,47 @@ class LegacyModelDataManagerCompatTest {
                         level.getModelDataManager();
                     if (modelDataManager == null)
                         return getMaterial(level, pos);
-                    return CopycatModel.getMaterial(modelDataManager.getAt(pos));
+                    return MimicModel.getMaterial(modelDataManager.getAt(pos));
+                }
+
+                abstract boolean isIgnoredConnectivitySide(
+                    BlockAndTintGetter level, BlockState state, Direction side,
+                    BlockPos pos, BlockPos queryPos);
+
+                static BlockState getMaterial(BlockGetter reader, BlockPos pos) {
+                    return null;
                 }
             }
-            """.trimIndent() + "\n"
-        )
-        root.resolve("CopycatModel.java").writeText(
             """
-            package com.simibubi.create.content.decoration.copycat;
+        )
+        java(
+            project,
+            "example/decor/MimicModel.java",
+            """
+            package example.decor;
 
-            import com.simibubi.create.AllBlocks;
             import net.minecraft.world.level.block.state.BlockState;
             import net.neoforged.neoforge.client.model.data.ModelData;
 
-            public abstract class CopycatModel {
+            public abstract class MimicModel {
                 public static final Object MATERIAL_PROPERTY = null;
+                static final BlockState FALLBACK = null;
 
                 public static BlockState getMaterial(ModelData data) {
                     BlockState material =
                         data == null ? null : data.get(MATERIAL_PROPERTY);
-                    return material == null
-                        ? AllBlocks.COPYCAT_BASE.getDefaultState()
-                        : material;
+                    return material == null ? FALLBACK : material;
                 }
             }
-            """.trimIndent() + "\n"
+            """
         )
+    }
+
+    private fun java(project: Path, relative: String, source: String): Path {
+        val path = project.resolve("src/main/java").resolve(relative)
+        path.parent.createDirectories()
+        path.writeText(source.trimIndent() + "\n")
+        return path
     }
 
     private fun fixture(
@@ -774,8 +824,26 @@ class LegacyModelDataManagerCompatTest {
         "net/neoforged/neoforge/client/model/data/ModelData.java" to """
             package net.neoforged.neoforge.client.model.data;
             public class ModelData {
-                public static final ModelData EMPTY = new ModelData();
-                public <T> T get(Object property) { return null; }
+                public static final ModelData EMPTY = ModelData.builder().build();
+                private final java.util.Map<Object, Object> properties;
+                private ModelData(java.util.Map<Object, Object> properties) {
+                    this.properties = properties;
+                }
+                @SuppressWarnings("unchecked")
+                public <T> T get(Object property) {
+                    return (T) properties.get(property);
+                }
+                public static Builder builder() {
+                    return new Builder(null);
+                }
+                public static final class Builder {
+                    private final java.util.Map<Object, Object> properties =
+                        new java.util.HashMap<>();
+                    private Builder(ModelData parent) {}
+                    public ModelData build() {
+                        return new ModelData(properties);
+                    }
+                }
             }
         """.trimIndent() + "\n",
         "net/neoforged/neoforge/client/model/data/ModelDataManager.java" to """

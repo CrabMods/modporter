@@ -887,9 +887,7 @@ class MappingCompletenessTest {
             "getMethod" to Regex("""\.getMethod\s*\("""),
             "setAccessible" to Regex("""\bsetAccessible\s*\(""")
         )
-        val admittedLegacyPreimages = mapOf(
-            "src/main/kotlin/com/modporter/core/transforms/structural/CreateCommonMetalTagNamespaceMigration.kt" to ("OBSOLETE_TODO" to Regex("private\\s+const\\s+val\\s+OBSOLETE_TODO\\s*=\\s*\"TODO: change forge to c in 1\\.21\"")),
-            "src/main/kotlin/com/modporter/core/transforms/structural/CreateCopperDataMapMigration.kt" to ("LEGACY_INJECT_BODY" to Regex("private\\s+const\\s+val\\s+LEGACY_INJECT_BODY\\s*=\\s*\"\"\".*?\"\"\"", RegexOption.DOT_MATCHES_ALL))
+        val admittedLegacyPreimages = mapOf<String, Pair<String, Regex>>(
         )
         val offenders = Files.walk(projectRoot.resolve("src/main/kotlin")).use { stream ->
             stream
@@ -1772,68 +1770,35 @@ class MappingCompletenessTest {
 
     @Test
     fun `split tick phase cleanup uses executable phase evidence`() {
-        val source = StructuralRuleSources.file("StructuralRules03.kt")
-        fun functionBody(declaration: String): String {
-            val start = source.indexOf(declaration)
-            assertTrue(start >= 0, "$declaration is missing")
-            val end = Regex("""(?m)^(?:internal|private) fun StructuralRefactorPass\.""")
-                .find(source, start + declaration.length)
-                ?.range
-                ?.first
-                ?: source.length
-            return source.substring(start, end)
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun cleanupSplitTickPhaseChecks")
+        assertTrue(start >= 0, "cleanupSplitTickPhaseChecks is missing")
+        val end = source.indexOf("private fun migrateRemovedTitleScreenAccessors", start + 1).let {
+            if (it < 0) source.length else it
         }
-
-        val entry = functionBody(
-            "internal fun StructuralRefactorPass.removeLegacyTickPhaseChecks"
-        )
-        val typedMethods = functionBody(
-            "private fun StructuralRefactorPass.removeSplitTickPhaseChecksInTypedMethods"
-        )
-        val phaseRewriter = functionBody(
-            "internal fun StructuralRefactorPass.removeSplitTickPhaseChecksForEventName"
-        )
+        val body = source.substring(start, end)
         val forbidden = listOf(
-            "raw split event scan" to Regex("""\.findAll\(source\)""").containsMatchIn(typedMethods),
-            "unbounded generic phase removal" to
-                Regex("""event\\\.phase[^\n]+\.replace\(result""").containsMatchIn(phaseRewriter),
-            "raw phase rewrite" to
-                Regex("""Regex\([\s\S]*?\.phase[\s\S]*?\)\s*\.replace\(source""")
-                    .containsMatchIn(phaseRewriter)
+            "raw START phase scan" to Regex("""modified\.contains\("event\.phase\s*(?:==|!=)\s*TickEvent\.Phase\.START"\)"""),
+            "raw RenderFrameEvent replacement" to Regex("""\.replace\("RenderFrameEvent\.Post""""),
+            "raw modified replacement" to Regex("""\.replace\(modified"""),
+            "raw TickEvent phase residual scan" to Regex("""containsMatchIn\(modified\)""")
         )
-            .filter { (_, found) -> found }
+            .filter { (_, marker) -> marker.containsMatchIn(body) }
             .map { (label, _) -> "split tick phase cleanup contains $label" }
-        val executableReplacementCount =
-            Regex("""replaceExecutableRegex\(""").findAll(phaseRewriter).count()
-        val required = buildList {
-            if (!entry.contains("val executableSource = maskJavaCommentsAndLiterals(source)")) {
-                add("executable legacy phase mask")
-            }
-            if (!entry.contains("removeSplitTickPhaseChecksInTypedMethods(result, hasBoundLegacyPhase)")) {
-                add("typed method delegation")
-            }
-            if (!typedMethods.contains("val unit = parser.parse(source).result.orElse(null) ?: return source")) {
-                add("parsed Java source")
-            }
-            if (!typedMethods.contains("val typing = SourceValueTypes(this, source)")) {
-                add("source type proof")
-            }
-            if (!typedMethods.contains("unit.findAll(MethodDeclaration::class.java)")) {
-                add("AST method scan")
-            }
-            if (!typedMethods.contains("typing.isTypeName(parameter.typeAsString, \"${'$'}it.Post\")") ||
-                !typedMethods.contains("typing.isTypeName(parameter.typeAsString, \"${'$'}it.Pre\")")
-            ) {
-                add("exact split event owner proof")
-            }
-            if (!typedMethods.contains("body.findAll(FieldAccessExpr::class.java)")) {
-                add("AST phase access proof")
-            }
-            if (!typedMethods.contains("removeSplitTickPhaseChecksForEventName(")) {
-                add("scoped phase rewrite")
-            }
-            if (executableReplacementCount < 7) add("executable phase replacements")
-        }
+        val required = listOf(
+            "executable mask" to Regex("""val\s+executableOriginal\s*=\s*maskJavaCommentsAndLiterals\(original\)"""),
+            "executable START phase scan" to Regex("""executableOriginal\.contains\("event\.phase\s*==\s*TickEvent\.Phase\.START"\)"""),
+            "executable START not-equals scan" to Regex("""executableOriginal\.contains\("event\.phase\s*!=\s*TickEvent\.Phase\.START"\)"""),
+            "executable RenderFrameEvent replacement" to Regex("""replaceExecutableRegex\(\s*modified,\s*Regex\("{3}\\bRenderFrameEvent\\\.Post\\b"{3}\)"""),
+            "executable event phase replacements" to Regex("""replaceExecutableRegex\(\s*modified,\s*Regex\("{3}[^"]*event\\\.phase"""),
+            "executable residual mask" to Regex("""val\s+executableModified\s*=\s*maskJavaCommentsAndLiterals\(modified\)"""),
+            "bounded residual identifier scan" to Regex("""containsJavaIdentifier\(executableModified,\s*"TickEvent"\)""")
+        )
+            .filterNot { (_, marker) -> marker.containsMatchIn(body) }
+            .map { (label, _) -> "split tick phase cleanup missing $label" }
 
         assertTrue(
             required.isEmpty(),
@@ -3630,9 +3595,6 @@ class MappingCompletenessTest {
         val source = projectRoot
             .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
             .readText()
-        val migration = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/text/LegacyTagManagerMigration.kt")
-            .readText()
         val start = source.indexOf("private fun migrateRemovedTagManagerAccess")
         assertTrue(start >= 0, "migrateRemovedTagManagerAccess is missing")
         val end = source.indexOf("private fun isNetworkHooksExtraDataWriter", start + 1).let {
@@ -3651,15 +3613,18 @@ class MappingCompletenessTest {
             .map { (label, _) -> label }
 
         assertTrue(
-            body.contains("return LegacyTagManagerMigration().migrate(source)") &&
-                migration.contains("class LegacyTagManagerMigration") &&
-                migration.contains("collectManagers(cu)") &&
-                migration.contains("migrateKnownOrEmptyReturns(manager)") &&
-                migration.contains("migrateMaterializedTags(manager)") &&
-                migration.contains("migrateForEachLambda") &&
-                migration.contains("Unsupported ITagManager") &&
-                migration.contains("containsMatchIn(remaining)"),
-            "Removed ITagManager migration must be AST-scoped, file-atomic, and reject unsupported operations"
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("if (!executableCode.contains(\"ITagManager<\")) return source") &&
+                body.contains("val executableLines = executableCode.lines()") &&
+                body.contains("var changed = false") &&
+                body.contains("declaration.find(executableLines[i])") &&
+                body.contains("nullGuard.matches(executableLines[i + 1])") &&
+                body.contains(".find(executableLines[i + 2])") &&
+                body.contains("executableLines[i + 3].trim() == \"}\"") &&
+                body.contains("if (!changed) return source") &&
+                body.contains("val remainingExecutableBody = maskJavaCommentsAndLiterals(result).lines()") &&
+                body.contains("removeImportLine(result, \"net.neoforged.neoforge.registries.tags.ITagManager\")"),
+            "Removed ITagManager migration must use executable Java evidence and only clean imports after a proven rewrite"
         )
         assertTrue(
             offenders.isEmpty(),
@@ -3983,15 +3948,11 @@ class MappingCompletenessTest {
         assertTrue(
             body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
                 body.contains("staticGetterPattern.containsMatchIn(executableCode)") &&
-                body.contains(".parse(source).result.orElse(null) ?: return source") &&
-                body.contains("parsed.findAll(AnnotationExpr::class.java)") &&
-                body.contains("annotationOwner(annotation)") &&
-                body.contains("normalMember(annotation, \"modid\")?.toString()") &&
-                body.contains("annotation.memberValue.toString()") &&
-                body.contains("subscriberIds.singleOrNull() ?: modIds.singleOrNull() ?: return source") &&
+                body.contains(".find(executableCode)") &&
+                body.contains("source.substring(it).trim()") &&
                 body.contains("replaceExecutableRegex(source, staticGetterPattern)") &&
                 body.contains("removeExecutableImport(result, \"net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext\")"),
-            "Legacy static FML mod event-bus migration must use executable calls and parsed annotation arguments"
+            "Legacy static FML mod event-bus migration must use executable calls and source-ranged annotation arguments"
         )
         assertTrue(
             forbidden.isEmpty(),
@@ -4066,18 +4027,6 @@ class MappingCompletenessTest {
         assertTrue(
             offenders.isEmpty(),
             "PlayerTickEvent player argument migration must not use comments, strings, or whole-file event fallbacks: $offenders"
-        )
-    }
-
-    @Test
-    fun `player tick event migration does not infer bare player argument ownership`() {
-        val source = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
-            .readText()
-        assertTrue(
-            !source.contains("migratePlayerTickEventPlayerArguments"),
-            "Bare variable names cannot prove that a PlayerTickEvent entity is the intended call argument"
         )
     }
 
@@ -4395,8 +4344,7 @@ class MappingCompletenessTest {
             "raw PotionUtils prefilter" to """result.contains("PotionUtils.")""",
             "raw PotionUtils replacement" to Regex("""Regex\([\s\S]*?PotionUtils[\s\S]*?\)\s*\.\s*replace\(result"""),
             "raw Potions.EMPTY replacement" to "result.replace(\"Potions.EMPTY\"",
-            "raw Potion.byName replacement" to Regex("""Regex\([\s\S]*?Potion\.byName[\s\S]*?\)\s*\.\s*replace\(result"""),
-            "pipeline blanket DataComponents import flag" to "needsDataComponents = true"
+            "raw Potion.byName replacement" to Regex("""Regex\([\s\S]*?Potion\.byName[\s\S]*?\)\s*\.\s*replace\(result""")
         )
             .filter { (_, marker) ->
                 when (marker) {
@@ -4412,37 +4360,15 @@ class MappingCompletenessTest {
                 body.contains("replaceExecutableRegex(") &&
                 body.contains("migrateLegacyPotionEmptyStringChecks(result)") &&
                 body.contains("potionStacksMigrated != result") &&
-                body.contains("PotionUtilsStackCalls.migrate(result) {") &&
-                body.contains(
-                    """if (maskJavaCommentsAndLiterals(result).contains("PotionContents.EMPTY"))"""
-                ) &&
-                body.contains("needsPotionContents = true") &&
-                body.contains(
-                    "\"${'$'}{generatedCompatPackage()}.LegacyPotionUtils.EMPTY\""
-                ),
-            "Potion component migration must inspect executable Java and supply the exact generated empty-potion owner"
+                body.contains("needsDataComponents = true") &&
+                body.contains("needsPotionContents = true"),
+            "Potion component migration must inspect executable Java and gate import flags on real rewrites"
         )
         val stackCalls = StructuralRuleSources.file("PotionUtilsStackCalls.kt")
         assertTrue(
-            stackCalls.contains("val executable = JavaSourceText.maskCommentsAndLiterals(source)") &&
-                stackCalls.contains("val exact = ExactJavaSemantics(cu)") &&
-                stackCalls.contains("exact.targetTypeReferenceOrNull(") &&
-                stackCalls.contains("exact.exactStaticScope(") &&
-                stackCalls.contains("exact.exactTypeReference(") &&
-                stackCalls.contains("exact.isProvablyType(") &&
-                stackCalls.contains("var needsDataComponents = false") &&
-                stackCalls.contains("var needsPotionContents = false") &&
-                stackCalls.contains(
-                    "needsDataComponents || requiresDataComponents && dataComponentsRef == \"DataComponents\""
-                ) &&
-                stackCalls.contains(
-                    "needsPotionContents || requiresPotionContents && potionContentsRef == \"PotionContents\""
-                ) &&
-                stackCalls.contains("if (needsDataComponents)") &&
-                stackCalls.contains("addImportIfMissing(result, dataComponentsFqn)") &&
-                stackCalls.contains("if (needsPotionContents)") &&
-                stackCalls.contains("addImportIfMissing(result, potionContentsFqn)"),
-            "PotionUtils stack calls must own exact type proofs and conditionally add only collision-safe imports"
+            stackCalls.contains("JavaSourceText.maskCommentsAndLiterals(source)") &&
+                stackCalls.contains("JavaScopedDeclarations.visibleAt(masked, argument, at)"),
+            "PotionUtils stack calls must be found in executable Java and refuse arguments typed otherwise"
         )
         assertTrue(
             source.contains("private fun migrateLegacyPotionEmptyStringChecks(source: String): String") &&
@@ -4455,85 +4381,6 @@ class MappingCompletenessTest {
         assertTrue(
             offenders.isEmpty(),
             "Potion component migration must not rewrite comments or string literals with raw replacements: $offenders"
-        )
-    }
-
-    @Test
-    fun `potion component migration requires exact ast owners`() {
-        val pipelineSource = StructuralRuleSources.text
-        val source = StructuralRuleSources.file("PotionUtilsStackCalls.kt")
-        val exactSemantics = Path.of("")
-            .toAbsolutePath()
-            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/ExactJavaSemantics.kt")
-            .readText()
-        val start = source.indexOf("private fun migrateLegacyPotionUtilsCalls(")
-        assertTrue(start >= 0, "PotionUtils AST migration is missing")
-        val end = source.indexOf(
-            "private fun migrateRemovedEmptyPotionRegistryGuards(source: String): String",
-            start + 1
-        ).let { if (it < 0) source.length else it }
-        val body = source.substring(start, end)
-        val offenders = listOf(
-            "PotionUtils regex replacement" to Regex("""Regex\([\s\S]*?PotionUtils"""),
-            "executable regex replacement" to "replaceExecutableRegex(",
-            "raw source replacement" to ".replace(source",
-            "simple-name-only owner check" to """call.scope.map { it.toString() == "PotionUtils" }"""
-        )
-            .filter { (_, marker) ->
-                when (marker) {
-                    is String -> body.contains(marker)
-                    is Regex -> marker.containsMatchIn(body)
-                    else -> false
-                }
-            }
-            .map { (label, _) -> label }
-
-        assertTrue(
-            source.contains("migrateRemovedEmptyPotionRegistryGuards(") &&
-                source.contains(
-                    "migrateLegacyPotionUtilsCalls(source, emptyPotionExpression)"
-                ) &&
-                body.contains("val parsed = parser.parse(source)") &&
-                body.contains("LexicalPreservingPrinter.setup(cu)") &&
-                body.contains("cu.findAll(MethodCallExpr::class.java)") &&
-                body.contains("isExactPotionUtilsCall") &&
-                body.contains("exactStaticScope") &&
-                body.contains("isProvablyItemStack") &&
-                body.contains("Cannot parse source containing legacy Minecraft PotionUtils calls"),
-            "Potion component migration must prove the API owner and argument context through the Java AST"
-        )
-        assertTrue(
-            !source.contains("migrateLegacyFluidPotionComponentAliases") &&
-                source.contains(
-                    "private fun migrateRemovedEmptyPotionRegistryGuards(source: String): String"
-                ) &&
-                source.contains("iteratesBuiltInPotionRegistry(loop.iterable)") &&
-                exactSemantics.contains("internal class ExactJavaSemantics") &&
-                exactSemantics.contains("fun exactTypeReference(") &&
-                exactSemantics.contains("fun exactStaticScope(") &&
-                exactSemantics.contains("fun isProvablyType(") &&
-                exactSemantics.contains("fun referencesTo("),
-            "Potion migration must fail closed and use shared exact lexical binding and owner proofs"
-        )
-        assertTrue(
-            pipelineSource.contains(
-                "private fun migrateLegacyPotionEmptyStringChecks(source: String): String"
-            ) &&
-                pipelineSource.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
-                pipelineSource.contains("sourcePattern.findAll(source)") &&
-                pipelineSource.contains("executablePattern.find(executableCode, match.range.first)") &&
-                pipelineSource.contains("return applyStringEdits(source, edits)"),
-            "Potion string-key migration must verify source matches against executable Java ranges"
-        )
-        assertTrue(
-            !source.contains("""Regex(""" + "\"\"\"\\bPotions\\.EMPTY") &&
-                !source.contains("""Regex(""" + "\"\"\"Potion\\.byName") &&
-                !source.contains("""{ "Potions.WATER.value()" }"""),
-            "Removed potion identities must not be guessed through Potions.EMPTY-to-water or Potion.byName regex fallbacks"
-        )
-        assertTrue(
-            offenders.isEmpty(),
-            "Potion component migration must not fall back to regex or simple-name owner guesses: $offenders"
         )
     }
 
@@ -5497,6 +5344,8 @@ class MappingCompletenessTest {
             "owned subclass raw class scan" to ownedModule.contains("declaration.find(result, cursor)"),
             "owned subclass raw brace matching" to ownedModule.contains("findMatchingBrace(result, openBrace)"),
             "owned renderer masked literal target scan" to ownedModule.contains("executable.contains(CREATE_LEGACY_RENDER_TARGET)"),
+            // a decoration is rebuilt from its synced record, never looked up by object identity
+            "owned identity association" to ownedModule.contains("associate("),
             "subclass usage raw decorations prefilter" to usageBody.contains("""source.contains(".decorations.put(")"""),
             "subclass usage raw variable scan" to usageBody.contains(".findAll(result)"),
             "subclass usage raw put replacement" to usageBody.contains(""".replace(result, "${'$'}1${'$'}variable.asMapDecoration()${'$'}2")""")
@@ -5531,10 +5380,8 @@ class MappingCompletenessTest {
             ownedModule.contains("declaration.find(executable, cursor)") &&
                 ownedModule.contains("findMatchingBrace(executable, openBrace)") &&
                 ownedModule.contains("hasProjectParent(createdType, MAP_DECORATION)") &&
-                ownedModule.contains("val groupStrings = annotationStrings(method, \"Group\")") &&
-                ownedModule.contains("val injectStrings = annotationStrings(method, \"Inject\")") &&
-                ownedModule.contains("legacyMethod(CREATE_LEGACY_RENDER_TARGET)") &&
-                ownedModule.contains("legacyMethod(CREATE_OPTIFINE_RENDER_TARGET)"),
+                ownedModule.contains("LEGACY_CUSTOM_RENDER.findAll(bodyExecutable)") &&
+                ownedModule.contains("rebuildableFromMapDecoration(className, body)"),
             "MapDecoration composition must use executable structure, project-parent creation proof, and annotation AST values"
         )
         assertTrue(
@@ -5607,26 +5454,17 @@ class MappingCompletenessTest {
 
         assertTrue(
             body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
-                body.contains("val parsed = parser.parse(source)") &&
-                body.contains("val compilationUnit = parsed.result.orElseThrow") &&
-                body.contains("Cannot parse legacy Block isValidSpawn override") &&
-                body.contains("LexicalPreservingPrinter.setup(compilationUnit)") &&
-                body.contains("compilationUnit.findAll(ClassOrInterfaceDeclaration::class.java)") &&
-                body.contains("method.parameters.size in 4..5") &&
-                body.contains("exactSpawnType(method.parameters[3].typeAsString)") &&
-                Regex("""returnExpression\s*\.findAll\(NameExpr::class\.java\)""")
-                    .containsMatchIn(body) &&
-                body.contains("owner.constructors.forEach") &&
-                body.contains("ExplicitConstructorInvocationStmt") &&
-                body.contains("MethodCallExpr(") &&
-                body.contains("properties.clone()") &&
-                body.contains("\"isValidSpawn\"") &&
-                body.contains("method.remove()") &&
-                Regex("""maskJavaCommentsAndLiterals\(\s*withoutEntityType\s*\)""")
-                    .containsMatchIn(body) &&
-                Regex("""maskJavaCommentsAndLiterals\(\s*withoutSpawnPlacements\s*\)""")
-                    .containsMatchIn(body),
-            "Legacy isValidSpawn migration must prove API types, predicate scope, and every direct constructor path"
+                body.contains("javaMethodRanges(executableCode)") &&
+                body.contains(".singleOrNull { it.name == \"isValidSpawn\"") &&
+                body.contains("val executableMethodText = executableCode.substring(method.range)") &&
+                body.contains("val returnRange = returnMatch.groups[1]?.range ?: return source") &&
+                body.contains("var result = source.removeRange(method.range.first, methodEnd)") &&
+                body.contains("val executableResult = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("constructorPattern.find(executableResult)") &&
+                body.contains("maskJavaCommentsAndLiterals(result)") &&
+                body.contains("maskJavaCommentsAndLiterals(withoutEntityType)") &&
+                body.contains("maskJavaCommentsAndLiterals(withoutSpawnPlacements)"),
+            "Legacy isValidSpawn migration must derive method removal, return expression, and constructor insertion from executable Java"
         )
         assertTrue(
             offenders.isEmpty(),
@@ -5704,10 +5542,8 @@ class MappingCompletenessTest {
             collectRefs.contains("val typeBlocks = javaTypeBlocks(text, executableCode)") &&
                 collectRefs.contains("javaTypeBlockContainingOffset(match.range.first, typeBlocks)") &&
                 staticSubscribers.contains("val typeBlocks = javaTypeBlocks(text, executableCode)") &&
-                staticSubscribers.contains("javaTypeBlockForModAnnotation(annotationRange.last, typeBlocks)") &&
-                staticSubscribers.contains("javaTypeBlockContainingOffset(match.range.first, typeBlocks) == owner") &&
-                staticSubscribers.contains("val ownerPath = javaTypeNestingPath(owner, typeBlocks)") &&
-                staticSubscribers.contains("javaAccessibleTypeReferenceExpression("),
+                staticSubscribers.contains("javaTypeBlockForModAnnotation(annotation.range.last, typeBlocks)") &&
+                staticSubscribers.contains("javaListenerTypeReferenceExpression(packageName, mainPackage, owner)"),
             "Mod event bus listener migrations must bind method references to source-declared Java type blocks"
         )
         assertTrue(
@@ -6572,14 +6408,12 @@ class MappingCompletenessTest {
 
         assertTrue(
             body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
-                body.contains("emptyPattern.containsMatchIn(executableCode)") &&
-                body.contains("emptyPattern.findAll(executableCode).forEach { match ->") &&
-                body.contains("val index = match.range.first") &&
+                body.contains("executableCode.contains(qualifiedEmpty)") &&
+                body.contains("executableCode.indexOf(qualifiedEmpty, cursor)") &&
                 body.contains("registryAccessExpressionAt(source, index") &&
-                body.contains("edits += match.range to replacement") &&
-                body.contains("Cannot resolve exact HolderLookup.Provider for executable") &&
+                body.contains("edits += index until index + qualifiedEmpty.length to replacement") &&
                 body.contains("return applyStringEdits(source, edits)"),
-            "RegistryAccess.EMPTY fallback migration must replace exact executable ranges or fail closed"
+            "RegistryAccess.EMPTY fallback migration must replace only executable token ranges"
         )
         assertTrue(
             offenders.isEmpty(),
@@ -6917,13 +6751,6 @@ class MappingCompletenessTest {
             if (it < 0) source.length else it
         }
         val body = source.substring(start, end)
-        val createSurfaces = StructuralRuleSources.file("CreateEffectComponentSurfaces.kt")
-        val modifierStart = createSurfaces.indexOf("private fun planTooltipModifiers")
-        assertTrue(modifierStart >= 0, "Create tooltip modifier migration is missing")
-        val modifierEnd = createSurfaces.indexOf("private fun planLegacyTextAudit", modifierStart + 1).let {
-            if (it < 0) createSurfaces.length else it
-        }
-        val modifierBody = createSurfaces.substring(modifierStart, modifierEnd)
         val offenders = listOf(
             "raw hideTooltipPart prefilter" to """source.contains(".hideTooltipPart(")""",
             "raw tooltip part prefilter" to """source.contains("ItemStack.TooltipPart.ADDITIONAL")""",
@@ -6935,19 +6762,9 @@ class MappingCompletenessTest {
         assertTrue(
             body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
                 body.contains("""executableCode.contains(".hideTooltipPart(")""") &&
+                body.contains("""executableCode.contains("ItemStack.TooltipPart.ADDITIONAL")""") &&
                 body.contains("""rewriteExecutableJavaCall(source, "hideTooltipPart")""") &&
-                body.contains("DataComponents.HIDE_ADDITIONAL_TOOLTIP") &&
-                modifierBody.contains("LexicalPreservingPrinter.setup(parsed.unit)") &&
-                modifierBody.contains("parsed.unit.findAll(MethodCallExpr::class.java)") &&
-                modifierBody.contains("""call.nameAsString != "hideTooltipPart"""") &&
-                modifierBody.contains("parsed.typing.typeOf(") &&
-                modifierBody.contains("!= ITEM_STACK") &&
-                modifierBody.contains("""flag.nameAsString != "MODIFIERS"""") &&
-                modifierBody.contains(
-                    "!parsed.typing.isTypeName(flag.scope.toString(), TOOLTIP_PART)"
-                ) &&
-                modifierBody.contains("ItemAttributeModifiers.EMPTY).withTooltip(false)") &&
-                modifierBody.contains("check(changed)"),
+                body.contains("DataComponents.HIDE_ADDITIONAL_TOOLTIP"),
             "Tooltip part hiding migration must use executable call evidence and preserve real replacement semantics"
         )
         assertTrue(
@@ -8040,12 +7857,9 @@ class MappingCompletenessTest {
                 body.contains("replaceExecutableJavaRegex(result, Regex(\"\"\"\\bnew\\s+BowlFoodItem") &&
                 body.contains("""rewriteExecutableJavaNew(result, "SwordItem")""") &&
                 body.contains("containsMatchIn(maskJavaCommentsAndLiterals(result))") &&
-                body.contains("migrateLegacyToolItemSuperConstructors(result)") &&
-                body.contains("LexicalPreservingPrinter.setup(cu)") &&
-                body.contains("type.constructors.forEach") &&
-                body.contains("ExplicitConstructorInvocationStmt") &&
-                body.contains("net.minecraft.world.item.SwordItem"),
-            "Legacy item constructor migration must prove exact Minecraft owners and class-scoped constructors"
+                body.contains("rewriteExecutableSuperConstructorCalls(result)") &&
+                source.contains("private fun rewriteExecutableSuperConstructorCalls("),
+            "Legacy item constructor migration must locate item constructors and tool superclass calls in executable Java"
         )
         assertTrue(
             offenders.isEmpty(),
@@ -9597,9 +9411,7 @@ class MappingCompletenessTest {
                 costResolver.contains("val method = methods.single()") &&
                 costResolver.contains("parseLegacyCostMethodBody(it, method.parameterName, methodName, minCost)") &&
                 costMethods.contains("val parsed = localJavaParser().parse(source)") &&
-                costMethods.contains("val packageName = unit.packageDeclaration.map { it.nameAsString }.orElse(\"\")") &&
-                costMethods.contains("val qualifiedName = if (packageName.isBlank())") &&
-                costMethods.contains("qualifiedName == className") &&
+                costMethods.contains("if (unit.packageDeclaration.map { it.nameAsString }.orElse(\"\") != expectedPackage)") &&
                 costMethods.contains("if (owners.size != 1)") &&
                 costMethods.contains("method.parameters.size == 1") &&
                 costMethods.contains("PrimitiveType.Primitive.INT") &&

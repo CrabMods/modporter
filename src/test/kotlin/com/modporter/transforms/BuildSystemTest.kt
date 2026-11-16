@@ -7813,8 +7813,65 @@ class BuildSystemTest {
 
 
     @Test
-    fun `model builder varhandle reads without a complete public api flow remain hard gated`() {
+    fun `model builder varhandle reads go through a generated accessor`() {
         val projectDir = tempDir.resolve("varhandle-at-direct")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("src/main/resources").createDirectories()
+        projectDir.resolve("src/main/resources/example.mixins.json").writeText(
+            "{\n  \"required\": true,\n  \"package\": \"com.example.mixin\",\n  \"mixins\": []\n}\n"
+        )
+        srcDir.resolve("ModelTextures.java").writeText("""
+            package com.example;
+
+            import java.lang.invoke.MethodHandles;
+            import java.lang.invoke.VarHandle;
+            import java.util.Map;
+            import net.neoforged.neoforge.client.model.generators.ModelBuilder;
+
+            public class ModelTextures {
+                private static final String DOC = "TEXTURES_HANDLE.get(builder)";
+                public static final VarHandle TEXTURES_HANDLE;
+
+                static {
+                    try {
+                        MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(ModelBuilder.class, MethodHandles.lookup());
+                        TEXTURES_HANDLE = lookup.findVarHandle(ModelBuilder.class, "textures", Map.class);
+                    } catch (IllegalAccessException | NoSuchFieldException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+
+                static Map<String, String> textures(ModelBuilder<?> builder) {
+                    // TEXTURES_HANDLE.get(builder)
+                    return (Map<String, String>) TEXTURES_HANDLE.get(builder);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("ModelTextures.java").readText()
+        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
+
+        assertTrue(result.errors.none { it.contains("Forbidden reflection") }, result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-varhandle-at-direct-field" })
+        assertTrue(result.changes.any { it.ruleId == "build-platform-field-accessor-source" })
+        assertTrue(content.contains("return (Map<String, String>) ((com.example.mixin.modporter.ModPorterModelBuilderAccessor) (Object) (builder)).modporter${'$'}getTextures();"), content)
+        assertTrue(content.contains("DOC = \"TEXTURES_HANDLE.get(builder)\""), content)
+        assertTrue(content.contains("// TEXTURES_HANDLE.get(builder)"), content)
+        assertFalse(content.contains("findVarHandle"), content)
+        assertFalse(content.contains("MethodHandles"), content)
+        val accessor = projectDir.resolve("src/main/java/com/example/mixin/modporter/ModPorterModelBuilderAccessor.java")
+        assertTrue(accessor.readText().contains("@Mixin(value = net.neoforged.neoforge.client.model.generators.ModelBuilder.class, remap = false)"), accessor.readText())
+        assertTrue(accessor.readText().contains("java.util.Map<java.lang.String, java.lang.String> modporter${'$'}getTextures();"), accessor.readText())
+        assertTrue(projectDir.resolve("src/main/resources/example.mixins.json").readText().contains("modporter.ModPorterModelBuilderAccessor"))
+        // access transformers do not reach NeoForge classes
+        assertFalse(atFile.exists(), atFile.takeIf { it.exists() }?.readText().orEmpty())
+    }
+
+    @Test
+    fun `model builder varhandle reads without a mixin config to own an accessor remain hard gated`() {
+        val projectDir = tempDir.resolve("varhandle-without-mixin-config")
         val srcDir = projectDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
         srcDir.resolve("ModelTextures.java").writeText("""
@@ -7852,20 +7909,20 @@ class BuildSystemTest {
         assertTrue(result.errors.any { it.contains("Forbidden reflection") }, result.errors.joinToString("\n"))
         assertFalse(result.changes.any { it.ruleId == "build-varhandle-at-direct-field" })
         assertTrue(content.contains("return (Map<String, String>) TEXTURES_HANDLE.get(builder);"), content)
-        assertTrue(content.contains("DOC = \"TEXTURES_HANDLE.get(builder)\""), content)
-        assertTrue(content.contains("// TEXTURES_HANDLE.get(builder)"), content)
-        assertTrue(content.contains("VarHandle"), content)
-        assertTrue(content.contains("MethodHandles"), content)
         assertTrue(content.contains("findVarHandle"), content)
         assertFalse(atFile.exists())
     }
 
 
     @Test
-    fun `model builder texture map varhandles migrate to the public texture api without an at`() {
+    fun `model builder texture map varhandles keep their unchecked map writes through a generated accessor`() {
         val projectDir = tempDir.resolve("varhandle-model-texture-api")
         val srcDir = projectDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
+        projectDir.resolve("src/main/resources").createDirectories()
+        projectDir.resolve("src/main/resources/example.mixins.json").writeText(
+            "{\n  \"required\": true,\n  \"package\": \"com.example.mixin\",\n  \"mixins\": []\n}\n"
+        )
         srcDir.resolve("GeneratedModels.java").writeText("""
             package com.example;
 
@@ -7899,10 +7956,18 @@ class BuildSystemTest {
         val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
 
         assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${result.errors}")
-        assertTrue(content.contains("builder.texture(\"layer1\", layer);"), content)
+        // ModelBuilder.texture(...) rejects a texture no resource pack contains yet; the source
+        // writes the map directly for textures generated elsewhere, so the write must stay a map write.
+        assertTrue(content.contains("(Map<String, String>) ((com.example.mixin.modporter.ModPorterModelBuilderAccessor) (Object) (builder)).modporter${'$'}getTextures();"), content)
+        assertTrue(content.contains("textures.put(\"layer1\", layer.toString());"), content)
+        assertFalse(content.contains("builder.texture("), content)
         assertFalse(content.contains("TEXTURES_HANDLE"), content)
         assertFalse(content.contains("java.lang.invoke"), content)
-        assertFalse(content.contains("java.util.Map"), content)
+        val accessor = projectDir.resolve("src/main/java/com/example/mixin/modporter/ModPorterModelBuilderAccessor.java")
+        assertTrue(accessor.readText().contains("@Mixin(value = net.neoforged.neoforge.client.model.generators.ModelBuilder.class, remap = false)"), accessor.readText())
+        assertTrue(accessor.readText().contains("java.util.Map<java.lang.String, java.lang.String> modporter${'$'}getTextures();"), accessor.readText())
+        assertTrue(projectDir.resolve("src/main/resources/example.mixins.json").readText().contains("modporter.ModPorterModelBuilderAccessor"))
+        // access transformers do not reach NeoForge classes
         assertFalse(atFile.exists(), atFile.takeIf { it.exists() }?.readText().orEmpty())
     }
 
@@ -8379,7 +8444,7 @@ class BuildSystemTest {
 
 
     @Test
-    fun `build migration does not erase split tick phase semantics`() {
+    fun `build migration folds split tick phase checks per handler`() {
         val projectDir = tempDir.resolve("split-tick-phase")
         val srcDir = projectDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -8407,6 +8472,11 @@ class BuildSystemTest {
                     }
                 }
 
+                public static void renderEnd(RenderFrameEvent.Post event) {
+                    if (event.phase != TickEvent.Phase.END) return;
+                    render();
+                }
+
                 private static boolean ready() { return true; }
                 private static boolean blocked() { return false; }
                 private static void run() {}
@@ -8417,17 +8487,21 @@ class BuildSystemTest {
         val result = pass.apply(projectDir)
 
         val source = srcDir.resolve("TickHandlers.java").readText()
-        assertFalse(result.changes.any { it.ruleId == "build-cleanup-split-tick-phase" })
-        assertTrue(source.contains("public static void renderTick(RenderFrameEvent.Post event)"))
-        assertTrue(source.contains("if (event.phase == TickEvent.Phase.END && ready())"))
-        assertTrue(source.contains("if (event.phase != TickEvent.Phase.END || blocked())"))
-        assertTrue(source.contains("if (event.phase == TickEvent.Phase.START)"))
-        assertTrue(source.contains("import net.neoforged.neoforge.event.TickEvent;"), source)
+        assertTrue(result.changes.any { it.ruleId == "build-cleanup-split-tick-phase" }, result.changes.joinToString("\n") { it.ruleId })
+        // Post runs where the legacy handler saw END: END checks fold to the rest of the condition
+        assertTrue(source.contains("public static void clientTick(ClientTickEvent.Post event)"), source)
+        assertTrue(source.contains("if (ready()) {"), source)
+        assertTrue(source.contains("if (blocked()) {"), source)
+        // the START handler becomes Pre; the END handler in the same file keeps Post
+        assertTrue(source.contains("public static void renderTick(RenderFrameEvent.Pre event)"), source)
+        assertTrue(source.contains("public static void renderEnd(RenderFrameEvent.Post event)"), source)
+        assertFalse(source.contains("event.phase"), source)
+        assertFalse(source.contains("import net.neoforged.neoforge.event.TickEvent;"), source)
     }
 
 
     @Test
-    fun `build pass leaves split tick source and documentation to structural migration`() {
+    fun `split tick cleanup edits only the handler code and never documentation`() {
         val projectDir = tempDir.resolve("split-tick-phase-docs")
         val srcDir = projectDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -8461,13 +8535,14 @@ class BuildSystemTest {
         val before = srcDir.resolve("TickHandlers.java").readText()
         val result = pass.apply(projectDir)
         val source = srcDir.resolve("TickHandlers.java").readText()
+        fun textBlock(text: String) = text.substring(text.indexOf("String docs ="), text.indexOf("\"\"\";") + 4)
 
         assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        assertFalse(result.changes.any { it.ruleId == "build-cleanup-split-tick-phase" })
-        assertEquals(before, source)
         assertTrue(source.contains("String note = \"RenderFrameEvent.Post event.phase == TickEvent.Phase.START\";"), source)
-        assertTrue(source.contains("public static void renderTick(RenderFrameEvent.Post event) {"), source)
+        assertEquals(textBlock(before), textBlock(source), source)
         assertTrue(source.contains("// if (event.phase == TickEvent.Phase.START) { render(); }"), source)
+        assertTrue(source.contains("public static void renderTick(RenderFrameEvent.Pre event) {"), source)
+        assertEquals(1, Regex("""(?m)^\s*if \(event\.phase == TickEvent\.Phase\.START\) \{""").findAll(source).count(), source)
     }
 
 
@@ -8634,6 +8709,64 @@ class BuildSystemTest {
         assertTrue(mixin.contains("return function.testFunction;"))
     }
 
+
+    @Test
+    fun `reobfuscation task dependencies disappear while documentation stays`() {
+        val projectDir = tempDir.resolve("reobfuscation-task-dependency")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            jar {
+                manifest {
+                    attributes(["Specification-Title": "example"])
+                }
+
+                // This is the preferred method to reobfuscate your jar file
+                finalizedBy 'reobfJar'
+            }
+
+            jar.finalizedBy('reobfJar')
+            tasks.jar.dependsOn(tasks.reobfJar)
+
+            // However if you are in a multi-project build:
+            // tasks.named('publish').configure {
+            //     dependsOn 'reobfJar'
+            // }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val build = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${result.errors}")
+        assertFalse(build.contains("finalizedBy 'reobfJar'"), build)
+        assertFalse(build.contains("jar.finalizedBy('reobfJar')"), build)
+        assertFalse(build.contains("dependsOn(tasks.reobfJar)"), build)
+        assertFalse(build.contains("tasks.named(\"jar\")"), build)
+        assertTrue(build.contains("//     dependsOn 'reobfJar'"), build)
+        assertTrue(result.changes.any { it.ruleId == "build-migrate-reobfuscation-task-dependency" })
+    }
+
+    @Test
+    fun `an unhandled reobfuscation task reference by name is reported`() {
+        val projectDir = tempDir.resolve("reobfuscation-task-reference")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            tasks.named('publish').configure {
+                dependsOn 'reobfJar', 'javadocJar'
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        assertTrue(result.errors.any { it.contains("Unmigrated ForgeGradle reobfuscation DSL") }, result.errors.joinToString("\n"))
+    }
 
     @Test
     fun `forgegradle reobfuscation dsl preserves publication blocks on moddev jar task`() {
@@ -9111,5 +9244,96 @@ class BuildSystemTest {
 
         assertTrue(migrated.contains("NonNullFunction<DeferredHolder<T, T>"), migrated)
         assertFalse(changes.any { it.ruleId == "build-registrate-deferredholder-factory-generics" })
+    }
+
+    @Test
+    fun `cleans split tick phase checks after NeoForge event migration`() {
+        val projectDir = tempDir.resolve("split-tick-phase")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("TickHandlers.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.client.event.ClientTickEvent;
+            import net.neoforged.neoforge.client.event.RenderFrameEvent;
+            import net.neoforged.neoforge.event.TickEvent;
+
+            public class TickHandlers {
+                public static void clientTick(ClientTickEvent.Post event) {
+                    if (event.phase == TickEvent.Phase.END && ready()) {
+                        run();
+                    }
+                    if (event.phase != TickEvent.Phase.END || blocked()) {
+                        return;
+                    }
+                    run();
+                }
+
+                public static void renderTick(RenderFrameEvent.Post event) {
+                    if (event.phase == TickEvent.Phase.START) {
+                        render();
+                    }
+                }
+
+                private static boolean ready() { return true; }
+                private static boolean blocked() { return false; }
+                private static void run() {}
+                private static void render() {}
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val source = srcDir.resolve("TickHandlers.java").readText()
+        assertTrue(result.changes.any { it.ruleId == "build-cleanup-split-tick-phase" })
+        assertTrue(source.contains("public static void renderTick(RenderFrameEvent.Pre event)"))
+        assertTrue(source.contains("if (ready())"))
+        assertTrue(source.contains("if (blocked())"))
+        assertFalse(source.contains("TickEvent.Phase"))
+        assertFalse(source.contains("event.phase"))
+        assertFalse(source.contains("import net.neoforged.neoforge.event.TickEvent;"), source)
+    }
+
+    @Test
+    fun `split tick cleanup ignores comments strings and text blocks`() {
+        val projectDir = tempDir.resolve("split-tick-phase-docs")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("TickHandlers.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.client.event.RenderFrameEvent;
+            import net.neoforged.neoforge.event.TickEvent;
+
+            public class TickHandlers {
+                String note = "RenderFrameEvent.Post event.phase == TickEvent.Phase.START";
+                String docs = ${"\"\"\""}
+                    public static void renderTick(RenderFrameEvent.Post event) {
+                        if (event.phase == TickEvent.Phase.START) {
+                            render();
+                        }
+                    }
+                    ${"\"\"\""};
+
+                public static void renderTick(RenderFrameEvent.Post event) {
+                    // if (event.phase == TickEvent.Phase.START) { render(); }
+                    if (event.phase == TickEvent.Phase.START) {
+                        render();
+                    }
+                }
+
+                private static void render() {}
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val source = srcDir.resolve("TickHandlers.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-cleanup-split-tick-phase" })
+        assertTrue(source.contains("public static void renderTick(RenderFrameEvent.Pre event)"), source)
+        assertTrue(source.contains("String note = \"RenderFrameEvent.Post event.phase == TickEvent.Phase.START\";"), source)
+        assertTrue(source.contains("public static void renderTick(RenderFrameEvent.Post event) {"), source)
+        assertTrue(source.contains("// if (event.phase == TickEvent.Phase.START) { render(); }"), source)
     }
 }

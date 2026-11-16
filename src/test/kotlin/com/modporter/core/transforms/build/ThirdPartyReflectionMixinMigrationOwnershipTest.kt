@@ -47,15 +47,24 @@ class ThirdPartyReflectionMixinMigrationOwnershipTest {
         ownerConfig.writeText(config("com.simibubi.create.foundation.mixin"))
         modelConfig.writeText(config("com.modporter.generated.create.compat.mixin"))
         gameTestConfig.writeText(config("com.modporter.generated.gametest.mixin"))
+        val modsToml = resources.resolve("META-INF/neoforge.mods.toml")
+        modsToml.parent.createDirectories()
+        modsToml.writeText("modLoader=\"javafml\"\n\n[[mixins]]\nconfig=\"create.mixins.json\"\n")
 
         val original = snapshot()
         val preview = ThirdPartyReflectionMixinMigration().migrate(directory, dryRun = true)
-        assertTrue(preview.any { it.ruleId == "build-third-party-pseudo-accessor-config" })
+        assertTrue(preview.any { it.ruleId == "build-third-party-optional-accessor-config" })
         assertEquals(original, snapshot())
         val changes = ThirdPartyReflectionMixinMigration().migrate(directory, dryRun = false)
 
-        assertTrue(changes.any { it.ruleId == "build-third-party-pseudo-accessor-config" })
-        assertTrue(ownerConfig.readText().contains("modporter.ModPorterLargeMapScreenAccessor"))
+        // FTB Chunks is an optional dependency with a catalogued mod id: its accessors live in a
+        // config NeoForge loads only when ftbchunks is present, never in the owning config
+        assertTrue(changes.any { it.ruleId == "build-third-party-optional-accessor-config" })
+        val optionalConfig = resources.resolve("create.modporter-optional-ftbchunks.mixins.json")
+        assertTrue(optionalConfig.readText().contains("\"package\": \"com.simibubi.create.foundation.mixin.modporter\""), optionalConfig.readText())
+        assertTrue(optionalConfig.readText().contains("\"ModPorterLargeMapScreenAccessor\""), optionalConfig.readText())
+        assertTrue(modsToml.readText().contains("config=\"create.modporter-optional-ftbchunks.mixins.json\"\nrequiredMods=[\"ftbchunks\"]"), modsToml.readText())
+        assertFalse(ownerConfig.readText().contains("ModPorterLargeMapScreenAccessor"))
         assertFalse(modelConfig.readText().contains("ModPorterLargeMapScreenAccessor"))
         assertFalse(gameTestConfig.readText().contains("ModPorterLargeMapScreenAccessor"))
         assertTrue(
@@ -66,6 +75,34 @@ class ThirdPartyReflectionMixinMigrationOwnershipTest {
         val migrated = snapshot()
         assertTrue(ThirdPartyReflectionMixinMigration().migrate(directory, dryRun = false).isEmpty())
         assertEquals(migrated, snapshot())
+    }
+
+    @Test
+    fun `optional accessor without a catalogued mod id stays in the owning config`() {
+        val source = directory.resolve("src/main/java/org/example/compat/OtherMap.java")
+        source.parent.createDirectories()
+        source.writeText(
+            """
+            package org.example.compat;
+
+            import org.unlisted.mapmod.MapScreen;
+            import org.unlisted.mapmod.MapPanel;
+            import net.neoforged.fml.util.ObfuscationReflectionHelper;
+
+            public class OtherMap {
+                void render(MapScreen screen) {
+                    MapPanel panel = ObfuscationReflectionHelper.getPrivateValue(MapScreen.class, screen, "panel");
+                }
+            }
+            """.trimIndent() + "\n"
+        )
+        writeConfig("example", "org.example.mixin")
+
+        val changes = ThirdPartyReflectionMixinMigration().migrate(directory, dryRun = false)
+
+        assertTrue(changes.any { it.ruleId == "build-third-party-pseudo-accessor-config" })
+        assertFalse(changes.any { it.ruleId == "build-third-party-optional-accessor-config" })
+        assertTrue(directory.resolve("src/main/resources/example.mixins.json").readText().contains("modporter.ModPorterMapScreenAccessor"))
     }
 
     @Test

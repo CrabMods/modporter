@@ -67,19 +67,12 @@ internal object LegacyBlockEntityCapabilities {
         }
     }
 
-    fun migrate(
-        projectDir: Path,
-        modId: String,
-        compatPackageSupplier: () -> String,
-        dryRun: Boolean,
-        priorErrors: List<String> = emptyList()
-    ): Result {
+    fun migrate(projectDir: Path, modId: String, compatPackageSupplier: () -> String, dryRun: Boolean): Result {
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.isDirectory()) return Result.EMPTY
         val files = JavaSourceText.walkJavaSourceRoots(srcDir).use { paths -> paths.filter { it.extension == "java" }.toList() }
         val sources = files.associateWith { runCatching { it.readText() }.getOrDefault("") }
         val index = JavaProjectIndex.build(files)
-        val exactProviderRefusals = exactProviderRefusalFiles(projectDir, priorErrors)
         val legacyOwners = sources.filter { (_, source) -> legacyMethod.containsMatchIn(JavaSourceText.maskCommentsAndLiterals(source)) }
             .keys
             .mapNotNull { file -> index.declarationsIn(file).firstOrNull { isBlockEntity(it.name, index) }?.let { it.name to file } }
@@ -92,10 +85,6 @@ internal object LegacyBlockEntityCapabilities {
         val adapted = linkedMapOf<Path, String>()
         val roots = legacyOwners.keys.associateWith { owner -> ancestors(owner, index).lastOrNull { it in legacyOwners } ?: owner }
         for ((owner, file) in legacyOwners.entries.sortedBy { (owner, _) -> if (roots.getValue(owner) == owner) 0 else 1 }) {
-            if (file.toAbsolutePath().normalize() in exactProviderRefusals) {
-                refused.add(file)
-                continue
-            }
             val root = roots.getValue(owner)
             if (root != owner && legacyOwners.getValue(root) !in adapted) {
                 gates += "Legacy block entity capability adapter cannot keep ${relative(file)}: its root $root was not adapted"
@@ -148,19 +137,6 @@ internal object LegacyBlockEntityCapabilities {
             }
         }
         return Result(changes, adapted.keys, gates)
-    }
-
-    private fun exactProviderRefusalFiles(projectDir: Path, errors: List<String>): Set<Path> {
-        val refusal = Regex(
-            """^(?:Cannot migrate|Cannot partially migrate) BlockEntity getCapability in (.+?): """ +
-                """(?:no source-shaped provider for Capabilities\.(?!\*)|""" +
-                """external block capability predicate/provider branch is not structurally closed|""" +
-                """unproven predicate branches )"""
-        )
-        return errors.mapNotNull { error ->
-            val relative = refusal.find(error)?.groupValues?.get(1) ?: return@mapNotNull null
-            projectDir.resolve(relative).toAbsolutePath().normalize()
-        }.toSet()
     }
 
     /**

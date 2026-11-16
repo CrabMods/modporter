@@ -1056,13 +1056,8 @@
         assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
         assertTrue(transformed.contains("stack.set(net.minecraft.core.component.DataComponents.BLOCK_ENTITY_DATA, net.minecraft.world.item.component.CustomData.of(blockEntityTag));"))
         assertTrue(transformed.contains("CustomData.update(net.minecraft.core.component.DataComponents.CUSTOM_DATA, stack, tag -> tag.put(TAG_MARKER, ByteTag.valueOf((byte) 1)));"))
-        assertTrue(transformed.contains("modPorterCustomDataValue = blockEntityTag;"), transformed)
-        assertTrue(transformed.contains(".remove(net.minecraft.core.component.DataComponents.CUSTOM_DATA);"), transformed)
-        assertTrue(
-            Regex("""\.set\(net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA, net\.minecraft\.world\.item\.component\.CustomData\.of\(modPorterCustomDataValue\d*\)\);""")
-                .containsMatchIn(transformed),
-            transformed
-        )
+        // Forge setTag(null) removed the tag: a tag that may be null keeps that meaning
+        assertTrue(transformed.contains("{ net.minecraft.nbt.CompoundTag modporterTag = blockEntityTag; if (modporterTag == null) stack.remove(net.minecraft.core.component.DataComponents.CUSTOM_DATA); else stack.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.of(modporterTag)); }"), transformed)
         assertTrue(transformed.contains("registry.get(Enchantments.SILK_TOUCH)"))
         assertTrue(transformed.contains("EnchantmentHelper.getItemEnchantmentLevel(holder, tool)"))
         assertTrue(transformed.contains("super.finalizeSpawn(accessor, difficulty, reason, spawnDataIn)"))

@@ -18,8 +18,14 @@ internal object LateClientBaseApiMigration {
         val parser = JavaParser(
             ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
         )
-        val planned = pass.walkJavaSourceRoots(root).use { paths ->
-            paths.filter { it.extension == "java" }.toList().mapNotNull { file ->
+        val files = pass.walkJavaSourceRoots(root).use { paths ->
+            paths.filter { it.extension == "java" }.toList()
+        }
+        // Declaration-proven rewrites read the project as it stands after propagation.
+        val earlierDeclarations = pass.projectSourceDeclarations
+        pass.projectSourceDeclarations = ProjectSourceDeclarations.collect(files)
+        val planned = try {
+            files.mapNotNull { file ->
                 val original = file.readText()
                 val migrated = pass.migrateLegacyClientBaseApiCompat(original)
                 if (original == migrated) return@mapNotNull null
@@ -29,6 +35,8 @@ internal object LateClientBaseApiMigration {
                 }
                 Triple(file, original, migrated)
             }
+        } finally {
+            pass.projectSourceDeclarations = earlierDeclarations
         }
         // Validate every proposed source before publishing any of this pass's edits.
         if (!dryRun) planned.forEach { (file, original, migrated) ->

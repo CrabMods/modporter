@@ -17,7 +17,7 @@ import com.modporter.core.transforms.util.JavaSourceText
 import com.modporter.mapping.TargetMembers
 
 /**
- * Migrates bound buffer writer references consumed by Iterable/Stream.forEach.
+ * Draft migration for bound buffer writer references consumed by Iterable/Stream.forEach.
  *
  * The collection element, bound receiver and receiver parameter must all have exact source types.
  * Restricting the receiver to an effectively-final method parameter keeps anonymous-adapter capture

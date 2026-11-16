@@ -351,5 +351,891 @@
       "neoforgeField": "TOOLS_SPEAR",
       "forgePath": "tools/tridents"
     }
+  ],
+  "intersections": [
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_BLACK",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_BLACK"
+      ],
+      "forgePath": "glass/black",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/black"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_BLUE",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_BLUE"
+      ],
+      "forgePath": "glass/blue",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/blue"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_BROWN",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_BROWN"
+      ],
+      "forgePath": "glass/brown",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/brown"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_CYAN",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_CYAN"
+      ],
+      "forgePath": "glass/cyan",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/cyan"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_GRAY",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_GRAY"
+      ],
+      "forgePath": "glass/gray",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/gray"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_GREEN",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_GREEN"
+      ],
+      "forgePath": "glass/green",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/green"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_LIGHT_BLUE",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_LIGHT_BLUE"
+      ],
+      "forgePath": "glass/light_blue",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/light_blue"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_LIGHT_GRAY",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_LIGHT_GRAY"
+      ],
+      "forgePath": "glass/light_gray",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/light_gray"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_LIME",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_LIME"
+      ],
+      "forgePath": "glass/lime",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/lime"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_MAGENTA",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_MAGENTA"
+      ],
+      "forgePath": "glass/magenta",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/magenta"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_ORANGE",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_ORANGE"
+      ],
+      "forgePath": "glass/orange",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/orange"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_PANES_BLACK",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_BLACK"
+      ],
+      "forgePath": "glass_panes/black",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/black"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_PANES_BLUE",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_BLUE"
+      ],
+      "forgePath": "glass_panes/blue",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/blue"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_PANES_BROWN",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_BROWN"
+      ],
+      "forgePath": "glass_panes/brown",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/brown"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_PANES_CYAN",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_CYAN"
+      ],
+      "forgePath": "glass_panes/cyan",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/cyan"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_PANES_GRAY",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_GRAY"
+      ],
+      "forgePath": "glass_panes/gray",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/gray"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_PANES_GREEN",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_GREEN"
+      ],
+      "forgePath": "glass_panes/green",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/green"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_PANES_LIGHT_BLUE",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_LIGHT_BLUE"
+      ],
+      "forgePath": "glass_panes/light_blue",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/light_blue"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_PANES_LIGHT_GRAY",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_LIGHT_GRAY"
+      ],
+      "forgePath": "glass_panes/light_gray",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/light_gray"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_PANES_LIME",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_LIME"
+      ],
+      "forgePath": "glass_panes/lime",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/lime"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_PANES_MAGENTA",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_MAGENTA"
+      ],
+      "forgePath": "glass_panes/magenta",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/magenta"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_PANES_ORANGE",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_ORANGE"
+      ],
+      "forgePath": "glass_panes/orange",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/orange"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_PANES_PINK",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_PINK"
+      ],
+      "forgePath": "glass_panes/pink",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/pink"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_PANES_PURPLE",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_PURPLE"
+      ],
+      "forgePath": "glass_panes/purple",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/purple"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_PANES_RED",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_RED"
+      ],
+      "forgePath": "glass_panes/red",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/red"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_PANES_WHITE",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_WHITE"
+      ],
+      "forgePath": "glass_panes/white",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/white"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_PANES_YELLOW",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_YELLOW"
+      ],
+      "forgePath": "glass_panes/yellow",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/yellow"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_PINK",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_PINK"
+      ],
+      "forgePath": "glass/pink",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/pink"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_PURPLE",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_PURPLE"
+      ],
+      "forgePath": "glass/purple",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/purple"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_RED",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_RED"
+      ],
+      "forgePath": "glass/red",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/red"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_WHITE",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_WHITE"
+      ],
+      "forgePath": "glass/white",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/white"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "GLASS_YELLOW",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_YELLOW"
+      ],
+      "forgePath": "glass/yellow",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/yellow"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "STAINED_GLASS",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED"
+      ],
+      "forgePath": "stained_glass",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed"
+      ]
+    },
+    {
+      "class": "Blocks",
+      "forgeField": "STAINED_GLASS_PANES",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED"
+      ],
+      "forgePath": "stained_glass_panes",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_BLACK",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_BLACK"
+      ],
+      "forgePath": "glass/black",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/black"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_BLUE",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_BLUE"
+      ],
+      "forgePath": "glass/blue",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/blue"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_BROWN",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_BROWN"
+      ],
+      "forgePath": "glass/brown",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/brown"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_CYAN",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_CYAN"
+      ],
+      "forgePath": "glass/cyan",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/cyan"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_GRAY",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_GRAY"
+      ],
+      "forgePath": "glass/gray",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/gray"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_GREEN",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_GREEN"
+      ],
+      "forgePath": "glass/green",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/green"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_LIGHT_BLUE",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_LIGHT_BLUE"
+      ],
+      "forgePath": "glass/light_blue",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/light_blue"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_LIGHT_GRAY",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_LIGHT_GRAY"
+      ],
+      "forgePath": "glass/light_gray",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/light_gray"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_LIME",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_LIME"
+      ],
+      "forgePath": "glass/lime",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/lime"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_MAGENTA",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_MAGENTA"
+      ],
+      "forgePath": "glass/magenta",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/magenta"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_ORANGE",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_ORANGE"
+      ],
+      "forgePath": "glass/orange",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/orange"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_PANES_BLACK",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_BLACK"
+      ],
+      "forgePath": "glass_panes/black",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/black"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_PANES_BLUE",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_BLUE"
+      ],
+      "forgePath": "glass_panes/blue",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/blue"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_PANES_BROWN",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_BROWN"
+      ],
+      "forgePath": "glass_panes/brown",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/brown"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_PANES_CYAN",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_CYAN"
+      ],
+      "forgePath": "glass_panes/cyan",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/cyan"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_PANES_GRAY",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_GRAY"
+      ],
+      "forgePath": "glass_panes/gray",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/gray"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_PANES_GREEN",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_GREEN"
+      ],
+      "forgePath": "glass_panes/green",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/green"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_PANES_LIGHT_BLUE",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_LIGHT_BLUE"
+      ],
+      "forgePath": "glass_panes/light_blue",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/light_blue"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_PANES_LIGHT_GRAY",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_LIGHT_GRAY"
+      ],
+      "forgePath": "glass_panes/light_gray",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/light_gray"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_PANES_LIME",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_LIME"
+      ],
+      "forgePath": "glass_panes/lime",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/lime"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_PANES_MAGENTA",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_MAGENTA"
+      ],
+      "forgePath": "glass_panes/magenta",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/magenta"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_PANES_ORANGE",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_ORANGE"
+      ],
+      "forgePath": "glass_panes/orange",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/orange"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_PANES_PINK",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_PINK"
+      ],
+      "forgePath": "glass_panes/pink",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/pink"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_PANES_PURPLE",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_PURPLE"
+      ],
+      "forgePath": "glass_panes/purple",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/purple"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_PANES_RED",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_RED"
+      ],
+      "forgePath": "glass_panes/red",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/red"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_PANES_WHITE",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_WHITE"
+      ],
+      "forgePath": "glass_panes/white",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/white"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_PANES_YELLOW",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED_YELLOW"
+      ],
+      "forgePath": "glass_panes/yellow",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed/yellow"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_PINK",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_PINK"
+      ],
+      "forgePath": "glass/pink",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/pink"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_PURPLE",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_PURPLE"
+      ],
+      "forgePath": "glass/purple",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/purple"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_RED",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_RED"
+      ],
+      "forgePath": "glass/red",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/red"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_WHITE",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_WHITE"
+      ],
+      "forgePath": "glass/white",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/white"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "GLASS_YELLOW",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED_YELLOW"
+      ],
+      "forgePath": "glass/yellow",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed/yellow"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "STAINED_GLASS",
+      "neoforgeFields": [
+        "GLASS_BLOCKS",
+        "DYED"
+      ],
+      "forgePath": "stained_glass",
+      "neoforgeTags": [
+        "c:glass_blocks",
+        "c:dyed"
+      ]
+    },
+    {
+      "class": "Items",
+      "forgeField": "STAINED_GLASS_PANES",
+      "neoforgeFields": [
+        "GLASS_PANES",
+        "DYED"
+      ],
+      "forgePath": "stained_glass_panes",
+      "neoforgeTags": [
+        "c:glass_panes",
+        "c:dyed"
+      ]
+    }
   ]
 }

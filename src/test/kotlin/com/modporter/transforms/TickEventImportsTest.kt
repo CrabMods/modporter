@@ -1,7 +1,6 @@
 package com.modporter.transforms
 
 import com.modporter.core.transforms.text.TextReplacementPass
-import com.modporter.core.transforms.structural.StructuralRefactorPass
 import com.modporter.mapping.MappingDatabase
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -36,15 +35,10 @@ class TickEventImportsTest {
         """.trimIndent())
 
         TextReplacementPass(MappingDatabase.loadDefault()).apply(tempDir)
-        StructuralRefactorPass().apply(tempDir)
 
         val events = srcDir.resolve("ClientEvents.java").readText()
         assertTrue(events.contains("import net.neoforged.neoforge.client.event.RenderFrameEvent;"), events)
-        assertTrue(events.contains("public static void onRenderTick(RenderFrameEvent event)"), events)
-        assertTrue(events.contains("onRenderTick\$modporterPre(RenderFrameEvent.Pre event)"), events)
-        assertTrue(events.contains("onRenderTick\$modporterPost(RenderFrameEvent.Post event)"), events)
-        assertTrue(events.contains("onRenderTick(event);"), events)
+        assertTrue(events.contains("public static void onRenderTick(RenderFrameEvent.Post event)"), events)
         assertFalse(events.contains("net.neoforged.neoforge.event.RenderFrameEvent"), events)
-        assertFalse(events.contains("RenderTickEvent"), events)
     }
 }

@@ -6,9 +6,7 @@ import com.github.javaparser.ast.body.BodyDeclaration
 import com.github.javaparser.ast.body.MethodDeclaration
 import com.github.javaparser.ast.body.TypeDeclaration
 import com.github.javaparser.ast.expr.BinaryExpr
-import com.github.javaparser.ast.expr.Expression
 import com.github.javaparser.ast.expr.FieldAccessExpr
-import com.github.javaparser.ast.expr.MethodCallExpr
 import com.github.javaparser.ast.expr.NameExpr
 import com.github.javaparser.ast.stmt.BlockStmt
 import com.github.javaparser.ast.stmt.IfStmt
@@ -17,53 +15,13 @@ import com.github.javaparser.ast.stmt.Statement
 import com.github.javaparser.ast.stmt.ThrowStmt
 import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter
 
-private data class NativeTickEventFamily(
-    val canonical: String,
-    val legacy: Set<String> = emptySet(),
-    val levelFields: Boolean = false,
-    val renderFields: Boolean = false
-) {
-    val baseOwners: Set<String> = legacy + canonical
-}
+private data class NativeTickEventFamily(val canonical: String)
 
 private val nativeTickEventFamilies = listOf(
-    NativeTickEventFamily(
-        "net.neoforged.neoforge.client.event.ClientTickEvent",
-        setOf(
-            "net.minecraftforge.event.TickEvent.ClientTickEvent",
-            "net.neoforged.neoforge.event.TickEvent.ClientTickEvent"
-        )
-    ),
-    NativeTickEventFamily(
-        "net.neoforged.neoforge.event.tick.ServerTickEvent",
-        setOf(
-            "net.minecraftforge.event.TickEvent.ServerTickEvent",
-            "net.neoforged.neoforge.event.TickEvent.ServerTickEvent"
-        )
-    ),
-    NativeTickEventFamily(
-        "net.neoforged.neoforge.event.tick.LevelTickEvent",
-        setOf(
-            "net.minecraftforge.event.TickEvent.LevelTickEvent",
-            "net.neoforged.neoforge.event.TickEvent.LevelTickEvent"
-        ),
-        levelFields = true
-    ),
-    NativeTickEventFamily(
-        "net.neoforged.neoforge.event.tick.PlayerTickEvent",
-        setOf(
-            "net.minecraftforge.event.TickEvent.PlayerTickEvent",
-            "net.neoforged.neoforge.event.TickEvent.PlayerTickEvent"
-        )
-    ),
-    NativeTickEventFamily(
-        "net.neoforged.neoforge.client.event.RenderFrameEvent",
-        setOf(
-            "net.minecraftforge.event.TickEvent.RenderTickEvent",
-            "net.neoforged.neoforge.event.TickEvent.RenderTickEvent"
-        ),
-        renderFields = true
-    )
+    NativeTickEventFamily("net.neoforged.neoforge.client.event.ClientTickEvent"),
+    NativeTickEventFamily("net.neoforged.neoforge.event.tick.ServerTickEvent"),
+    NativeTickEventFamily("net.neoforged.neoforge.event.tick.LevelTickEvent"),
+    NativeTickEventFamily("net.neoforged.neoforge.event.tick.PlayerTickEvent")
 )
 
 /**
@@ -71,6 +29,7 @@ private val nativeTickEventFamilies = listOf(
  * native phase or the closed two-phase dispatch shape used by legacy client tick handlers.
  */
 internal fun StructuralRefactorPass.migrateUnsplitTickEventHandlers(source: String): String {
+    if (!source.contains(".phase")) return source
     val parser = JavaParser(ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE))
     val unit = parser.parse(source).result.orElse(null) ?: return source
     val typing = SourceValueTypes(this, source)
@@ -128,216 +87,7 @@ internal fun StructuralRefactorPass.migrateUnsplitTickEventHandlers(source: Stri
         guard.remove()
         changed = true
     }
-    val phaseMigrated = if (changed) LexicalPreservingPrinter.print(unit) else source
-    return migrateLegacyBaseTickEventHandlers(phaseMigrated)
-}
-
-/**
- * Legacy base tick events carried a phase field. NeoForge exposes one base event for shared
- * logic plus typed Pre/Post subclasses for subscriptions. Normalize the shared helper and fan
- * out only exact subscribed handlers, preserving the original SubscribeEvent arguments.
- */
-private fun StructuralRefactorPass.migrateLegacyBaseTickEventHandlers(source: String): String {
-    val parser = JavaParser(ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE))
-    val unit = parser.parse(source).result.orElse(null) ?: return source
-    val typing = SourceValueTypes(this, source)
-    val candidates = unit.findAll(MethodDeclaration::class.java).mapNotNull { method ->
-        val parameter = method.parameters.singleOrNull() ?: return@mapNotNull null
-        if (!method.type.isVoidType || method.body.isEmpty) return@mapNotNull null
-        val family = nativeTickEventFamilies.singleOrNull { candidate ->
-            candidate.baseOwners.any { typing.isTypeName(parameter.typeAsString, it) }
-        } ?: return@mapNotNull null
-        if (typing.isTypeName(parameter.typeAsString, "${family.canonical}.Pre") ||
-            typing.isTypeName(parameter.typeAsString, "${family.canonical}.Post")
-        ) {
-            return@mapNotNull null
-        }
-        val resolvedOwner = family.baseOwners.single { typing.isTypeName(parameter.typeAsString, it) }
-        val body = method.body.orElseThrow()
-        val hasLegacyField = body.findAll(FieldAccessExpr::class.java).any { field ->
-            field.scope.toString() == parameter.nameAsString &&
-                (field.nameAsString == "phase" ||
-                    family.levelFields && field.nameAsString in setOf("level", "side") ||
-                    family.renderFields && field.nameAsString == "renderTickTime")
-        } || family.renderFields && body.findAll(MethodCallExpr::class.java).any { call ->
-            call.nameAsString == "getDeltaTracker" &&
-                call.arguments.isEmpty() &&
-                call.scope.orElse(null)?.toString() == parameter.nameAsString
-        }
-        val subscribed = method.annotations.any {
-            typing.isTypeName(it.nameAsString, "net.neoforged.bus.api.SubscribeEvent") ||
-                typing.isTypeName(it.nameAsString, "net.minecraftforge.eventbus.api.SubscribeEvent")
-        }
-        if (resolvedOwner == family.canonical && !hasLegacyField && !subscribed) return@mapNotNull null
-        Triple(method, parameter, family)
-    }
-    if (candidates.isEmpty()) return source
-
-    // Refuse the file before mutation when a wrapper name already belongs to the owner or when
-    // a phase access is not one of the exact legacy comparisons this migration can preserve.
-    for ((method, parameter, family) in candidates) {
-        val owner = method.parentNode.orElse(null) as? TypeDeclaration<*> ?: return source
-        val subscribe = method.annotations.singleOrNull {
-            typing.isTypeName(it.nameAsString, "net.neoforged.bus.api.SubscribeEvent") ||
-                typing.isTypeName(it.nameAsString, "net.minecraftforge.eventbus.api.SubscribeEvent")
-        }
-        if (subscribe != null) {
-            val wrapperNames = setOf(
-                "${method.nameAsString}\$modporterPre",
-                "${method.nameAsString}\$modporterPost"
-            )
-            if (owner.methods.any { it !== method && it.nameAsString in wrapperNames }) return source
-        }
-        val phaseUses = method.body.orElseThrow().findAll(FieldAccessExpr::class.java).filter {
-            it.nameAsString == "phase" && it.scope.toString() == parameter.nameAsString
-        }
-        if (phaseUses.any { legacyTickPhaseReplacement(it, parameter.nameAsString, parameter.typeAsString, family, source, this) == null }) {
-            return source
-        }
-    }
-
-    LexicalPreservingPrinter.setup(unit)
-    val canonicalImports = linkedSetOf<String>()
-    val legacyImports = linkedSetOf<String>()
-    var changed = false
-    for ((method, parameter, family) in candidates) {
-        val body = method.body.orElseThrow()
-        val parameterName = parameter.nameAsString
-        val simpleTarget = family.canonical.substringAfterLast('.')
-        val usedSimpleType = '.' !in parameter.typeAsString
-        val resolvedOwner = family.baseOwners.single {
-            typing.isTypeName(parameter.typeAsString, it)
-        }
-
-        val phaseUses = body.findAll(FieldAccessExpr::class.java).filter {
-            it.nameAsString == "phase" && it.scope.toString() == parameterName
-        }
-        val phaseReplacements = phaseUses.map {
-            it.findAncestor(BinaryExpr::class.java).orElseThrow() to
-                legacyTickPhaseReplacement(it, parameterName, parameter.typeAsString, family, source, this)!!
-        }.distinctBy { it.first }
-        phaseReplacements.forEach { (comparison, replacement) ->
-            comparison.replace(parser.parseExpression<Expression>(replacement).result.orElseThrow())
-            changed = true
-        }
-
-        if (family.levelFields) {
-            var needsLogicalSide = false
-            body.findAll(FieldAccessExpr::class.java).filter {
-                it.scope.toString() == parameterName && it.nameAsString in setOf("level", "side")
-            }.toList().forEach { field ->
-                if (field.nameAsString == "side") needsLogicalSide = true
-                val replacement = if (field.nameAsString == "level") {
-                    "$parameterName.getLevel()"
-                } else {
-                    "($parameterName.getLevel().isClientSide() ? LogicalSide.CLIENT : LogicalSide.SERVER)"
-                }
-                field.replace(parser.parseExpression<Expression>(replacement).result.orElseThrow())
-                changed = true
-            }
-            if (needsLogicalSide) canonicalImports += "net.neoforged.fml.LogicalSide"
-        }
-
-        if (family.renderFields) {
-            body.findAll(FieldAccessExpr::class.java).filter {
-                it.scope.toString() == parameterName && it.nameAsString == "renderTickTime"
-            }.toList().forEach { field ->
-                field.replace(
-                    parser.parseExpression<Expression>(
-                        "$parameterName.getPartialTick().getGameTimeDeltaPartialTick(false)"
-                    ).result.orElseThrow()
-                )
-                changed = true
-            }
-            body.findAll(MethodCallExpr::class.java).filter { call ->
-                call.nameAsString == "getDeltaTracker" &&
-                    call.arguments.isEmpty() &&
-                    call.scope.orElse(null)?.toString() == parameterName &&
-                    (call.parentNode.orElse(null) as? MethodCallExpr)?.let { outer ->
-                        outer.nameAsString == "getGameTimeDeltaPartialTick" &&
-                            outer.arguments.singleOrNull()?.toString() == "false"
-                    } == true
-            }.toList().forEach { call ->
-                call.setName("getPartialTick")
-                changed = true
-            }
-        }
-
-        if (resolvedOwner in family.legacy) legacyImports += resolvedOwner
-        parameter.setType(if (usedSimpleType) simpleTarget else family.canonical)
-        if (usedSimpleType) canonicalImports += family.canonical
-        changed = true
-
-        val subscribe = method.annotations.singleOrNull {
-            typing.isTypeName(it.nameAsString, "net.neoforged.bus.api.SubscribeEvent") ||
-                typing.isTypeName(it.nameAsString, "net.minecraftforge.eventbus.api.SubscribeEvent")
-        } ?: continue
-        val owner = method.parentNode.orElseThrow() as TypeDeclaration<*>
-        val insertion = owner.members.indexOf(method)
-        val wrappers = listOf("Pre", "Post").map { phase ->
-            val wrapper = method.clone()
-            wrapper.setName("${method.nameAsString}\$modporter$phase")
-            wrapper.parameters[0].setType("${if (usedSimpleType) simpleTarget else family.canonical}.$phase")
-            wrapper.annotations.clear()
-            wrapper.addAnnotation(subscribe.clone())
-            wrapper.setBody(BlockStmt().addStatement("${method.nameAsString}($parameterName);"))
-            parser.parseBodyDeclaration<MethodDeclaration>(wrapper.toString()).result.orElseThrow()
-        }
-        method.annotations.remove(subscribe)
-        wrappers.forEachIndexed { index, wrapper ->
-            owner.members.add(insertion + index + 1, wrapper as BodyDeclaration<*>)
-        }
-    }
-    if (!changed) return source
-
-    var result = LexicalPreservingPrinter.print(unit)
-    legacyImports.forEach { result = removeImport(result, it) }
-    canonicalImports.forEach { result = addImportIfMissing(result, it) }
-    return result
-}
-
-private fun legacyTickPhaseReplacement(
-    field: FieldAccessExpr,
-    parameterName: String,
-    parameterType: String,
-    family: NativeTickEventFamily,
-    source: String,
-    pass: StructuralRefactorPass
-): String? {
-    val comparison = field.parentNode.orElse(null) as? BinaryExpr ?: return null
-    if (comparison.operator !in setOf(BinaryExpr.Operator.EQUALS, BinaryExpr.Operator.NOT_EQUALS)) return null
-    val other = when {
-        comparison.left === field -> comparison.right
-        comparison.right === field -> comparison.left
-        else -> return null
-    }
-    val legacyPhase = legacyPhaseToken(other.toString(), source, pass) ?: return null
-    val eventType = if ('.' in parameterType) family.canonical else family.canonical.substringAfterLast('.')
-    val target = "$parameterName instanceof $eventType.${if (legacyPhase == "START") "Pre" else "Post"}"
-    return if (comparison.operator == BinaryExpr.Operator.EQUALS) target else "!($target)"
-}
-
-internal fun StructuralRefactorPass.validateLegacyTickPhaseValueUses(source: String) {
-    if (!source.contains(".phase")) return
-    val parser = JavaParser(ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE))
-    val unit = parser.parse(source).result.orElse(null) ?: return
-    val typing = SourceValueTypes(this, source)
-    for (method in unit.findAll(MethodDeclaration::class.java)) {
-        val parameter = method.parameters.singleOrNull() ?: continue
-        val family = nativeTickEventFamilies.singleOrNull { candidate ->
-            candidate.baseOwners.any { typing.isTypeName(parameter.typeAsString, it) }
-        } ?: continue
-        val invalid = method.findAll(FieldAccessExpr::class.java).any {
-            it.nameAsString == "phase" &&
-                it.scope.toString() == parameter.nameAsString &&
-                legacyTickPhaseReplacement(it, parameter.nameAsString, parameter.typeAsString, family, source, this) == null
-        }
-        if (invalid) {
-            throw IllegalStateException(
-                "Cannot migrate ${method.nameAsString}: ${parameter.nameAsString}.phase is used as a value"
-            )
-        }
-    }
+    return if (changed) LexicalPreservingPrinter.print(unit) else source
 }
 
 private fun splitMixedTickEventHandler(

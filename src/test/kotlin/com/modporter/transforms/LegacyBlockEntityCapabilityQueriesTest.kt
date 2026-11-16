@@ -328,9 +328,11 @@ class LegacyBlockEntityCapabilityQueriesTest {
             boundary.contains("return provider.getCapability(capability, side);"),
             boundary
         )
+        // a native lookup that finds nothing is empty, never a present optional of null
+        assertTrue(boundary.contains("T nativeValue = nativeCapability(blockEntity, capability, side);"), boundary)
         assertTrue(
             boundary.contains(
-                "return nativeValue == null ? LazyOptional.empty() : LazyOptional.ofNullable(nativeValue);"
+                "return nativeValue == null ? LazyOptional.empty() : LazyOptional.of(() -> nativeValue);"
             ),
             boundary
         )

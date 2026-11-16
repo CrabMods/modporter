@@ -1141,3 +1141,56 @@ class RealModBenchmarkTest {
             "Slow deferred work warnings require input source evidence"
         )
     }
+
+    @Test
+    fun `runtime log audit keeps slow deferred work warning when setup fingerprints diverge`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeSourceInheritedDeferredWorkEvidence(
+            sourceDir,
+            forgePackage = "net.minecraftforge",
+            resourceLocationCall = "new ResourceLocation(\"example\", \"overworld\")",
+            extraDeferredCall = "DifferentRegistry.register();"
+        )
+        writeSourceInheritedDeferredWorkEvidence(
+            projectDir,
+            forgePackage = "net.neoforged",
+            resourceLocationCall = "ResourceLocation.fromNamespaceAndPath(\"example\", \"overworld\")"
+        )
+        val logFile = tempDir.resolve("deferred-work-diverged.log")
+        logFile.writeText("""
+            [06:14:12] [Render thread/WARN] [ne.ne.fm.DeferredWorkQueue/LOADING]: Mod 'example' took 1.082 s to run a deferred task.
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("took 1.082 s to run a deferred task") },
+            "Slow deferred work warnings require identical input and converted enqueueWork call fingerprints"
+        )
+    }
+
+    @Test
+    fun `runtime log audit records slow deferred work of an external mod as a host load-time notice`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        writeSourceInheritedServerLagEvidence(projectDir)
+        val logFile = tempDir.resolve("external-deferred-work.log")
+        logFile.writeText(
+            listOf(
+                "\t\tExample 1.0.0 (example)",
+                "\t\tJourneymap 1.21.1-6.0.0-beta.54 (journeymap)",
+                "[06:14:12] [Render thread/WARN] [ne.ne.fm.DeferredWorkQueue/LOADING]: Mod 'journeymap' took 4.712 s to run a deferred task."
+            ).joinToString("\n") + "\n"
+        )
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(audit.findings.isEmpty(), "An external mod's load time is not the converted mod's logic: $audit")
+        assertTrue(
+            audit.allowedIssues.any {
+                it.contains("host load-time notice") && it.contains("'journeymap'") &&
+                    it.contains("4.712 s") && it.contains("loaded runtime mod")
+            },
+            "The notice must stay visible in the allowed issues, got: ${audit.allowedIssues}"
+        )
+    }

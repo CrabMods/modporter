@@ -8,18 +8,23 @@ import com.github.javaparser.ast.Node
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
 import com.github.javaparser.ast.body.MethodDeclaration
 import com.github.javaparser.ast.body.VariableDeclarator
+import com.github.javaparser.ast.expr.AssignExpr
 import com.github.javaparser.ast.expr.BinaryExpr
 import com.github.javaparser.ast.expr.ConditionalExpr
 import com.github.javaparser.ast.expr.FieldAccessExpr
+import com.github.javaparser.ast.expr.LambdaExpr
 import com.github.javaparser.ast.expr.MethodCallExpr
+import com.github.javaparser.ast.expr.MethodReferenceExpr
 import com.github.javaparser.ast.expr.NameExpr
 import com.github.javaparser.ast.expr.NullLiteralExpr
-import com.github.javaparser.ast.stmt.IfStmt
+import com.github.javaparser.ast.expr.ThisExpr
+import com.github.javaparser.ast.stmt.BlockStmt
 import com.github.javaparser.ast.stmt.ReturnStmt
 import com.github.javaparser.ast.stmt.Statement
 import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter
 import com.modporter.core.pipeline.Change
 import com.modporter.core.pipeline.Confidence
+import com.modporter.mapping.TargetMembers
 import java.io.ByteArrayInputStream
 import java.io.DataInputStream
 import java.nio.charset.StandardCharsets
@@ -39,20 +44,20 @@ import kotlin.io.path.readText
 import kotlin.io.path.writeText
 
 /**
- * Preserves the exact Forge 1.20.1 nullable ModelDataManager contract used by Create's copycat
- * renderer. The migration is inventory-backed because NeoForge's RenderChunkRegion only exposes a
- * snapshot while the admitted source requires the live backing Level manager and its null branch.
+ * Preserves the Forge 1.20.1 nullable `BlockAndTintGetter#getModelDataManager()` contract for
+ * project sources. Forge declared the getter on every block getter (null by default, the live
+ * manager on ClientLevel and on RenderChunkRegion through its backing Level); NeoForge 21.1 keeps
+ * it only on Level. Each query on a receiver proven to be a non-Level BlockAndTintGetter calls a
+ * generated bridge with Forge's dispatch, and a source-owned getter that overrode the method
+ * becomes a provider of that bridge. Admission is by declared types, the sealed source and target
+ * platforms, and a proof that every consumer cannot observe NeoForge's ModelData.EMPTY where Forge
+ * returned null; it never depends on a class, package or file name. The migration is
+ * inventory-backed because NeoForge's RenderChunkRegion only exposes a snapshot while the legacy
+ * contract requires the live backing Level manager and its null branch.
  */
 internal object LegacyModelDataManagerCompatMigration {
     const val RULE_ID = "struct-legacy-model-data-manager-compat"
     const val COMPLETION_MARKER = "modporter-legacy-model-data-manager-compat-v1"
-
-    private const val FILTERED =
-        "com.simibubi.create.content.decoration.copycat.FilteredBlockAndTintGetter"
-    private const val COPYCAT_BLOCK =
-        "com.simibubi.create.content.decoration.copycat.CopycatBlock"
-    private const val COPYCAT_MODEL =
-        "com.simibubi.create.content.decoration.copycat.CopycatModel"
 
     private const val BLOCK_AND_TINT_GETTER =
         "net.minecraft.world.level.BlockAndTintGetter"
@@ -66,6 +71,8 @@ internal object LegacyModelDataManagerCompatMigration {
         "net.neoforged.neoforge.client.model.data.ModelDataManager"
     private const val TARGET_MODEL_DATA =
         "net.neoforged.neoforge.client.model.data.ModelData"
+    private const val OLD_MODEL_DATA =
+        "net.minecraftforge.client.model.data.ModelData"
     private const val OLD_BLOCK_GETTER_EXTENSION =
         "net.minecraftforge.common.extensions.IForgeBlockGetter"
     private const val TARGET_LEVEL_EXTENSION =
@@ -92,18 +99,25 @@ internal object LegacyModelDataManagerCompatMigration {
         val canonicalTypes: Map<ClassOrInterfaceDeclaration, String>
     )
 
-    private data class AdmittedSources(
-        val filtered: SourceUnit,
-        val filteredType: ClassOrInterfaceDeclaration,
-        val filteredMethod: MethodDeclaration,
-        val filteredLegacyCall: MethodCallExpr?,
-        val copycat: SourceUnit,
-        val copycatType: ClassOrInterfaceDeclaration,
-        val managerVariable: VariableDeclarator,
-        val copycatLegacyCall: MethodCallExpr?,
-        val model: SourceUnit,
-        val alreadyMigrated: Boolean
+    private class ProviderPlan(
+        val source: SourceUnit,
+        val type: ClassOrInterfaceDeclaration,
+        val method: MethodDeclaration,
+        val addInterface: Boolean
     )
+
+    private class CallPlan(
+        val source: SourceUnit,
+        val call: MethodCallExpr,
+        val receiver: String
+    )
+
+    private class GenericPlan(
+        val providers: List<ProviderPlan>,
+        val calls: List<CallPlan>
+    ) {
+        val isEmpty: Boolean get() = providers.isEmpty() && calls.isEmpty()
+    }
 
     private data class PlannedWrite(
         val file: Path,
@@ -150,25 +164,9 @@ internal object LegacyModelDataManagerCompatMigration {
                 .sorted()
                 .toList()
         }
-        val filteredPath = sourceRoot.resolve(
-            FILTERED.replace('.', '/') + ".java"
-        )
-        val copycatPath = sourceRoot.resolve(
-            COPYCAT_BLOCK.replace('.', '/') + ".java"
-        )
-        val filteredResidual = filteredPath.isRegularFile() &&
-            filteredPath.readText().let {
-                it.contains(MANAGER_GETTER) || it.contains(PROVIDER_GETTER)
-            }
-        val copycatResidual = copycatPath.isRegularFile() &&
-            copycatPath.readText().let {
-                it.contains(MANAGER_GETTER) ||
-                    it.contains("LegacyModelDataManagers.resolve")
-            }
-        val candidate = filteredResidual || copycatResidual || (
-            completionFile.isRegularFile() &&
-                completionFile.readText().contains(COMPLETION_MARKER)
-            )
+        val completed = completionFile.isRegularFile() &&
+            completionFile.readText().contains(COMPLETION_MARKER)
+        val candidate = completed || sourceFiles.any { it.readText().contains(MANAGER_GETTER) }
         if (!candidate) return emptyList()
 
         require(inventory.acceptsProject(normalizedProject)) {
@@ -211,9 +209,15 @@ internal object LegacyModelDataManagerCompatMigration {
                 "; no files changed"
         }
 
+        val plan = planGenericSources(units, generatedPackage)
+        if (plan.isEmpty && !completed) return emptyList()
         verifySealedSurfaces(inventory, parser)
-        val admitted = admitExactCreateSources(units, generatedPackage)
-        val migrated = migrateAdmittedSources(parser, admitted, generatedPackage)
+        val migrated = if (plan.isEmpty) {
+            emptyMap()
+        } else {
+            migrateGenericSources(parser, plan, generatedPackage)
+        }
+        val providerFiles = plan.providers.map { it.source.file }.toSet()
 
         val writes = mutableListOf<PlannedWrite>()
         for ((unit, text) in migrated) {
@@ -225,12 +229,10 @@ internal object LegacyModelDataManagerCompatMigration {
                 change = Change(
                     file = unit.file,
                     line = 1,
-                    description = when (unit) {
-                        admitted.filtered ->
-                            "Preserve unconditional nullable manager forwarding"
-                        admitted.copycat ->
-                            "Preserve live nullable manager lookup for copycat appearance"
-                        else -> error("Unexpected model-data source plan")
+                    description = if (unit.file in providerFiles) {
+                        "Preserve nullable manager forwarding through a source-owned provider"
+                    } else {
+                        "Preserve live nullable manager lookup through the legacy bridge"
                     },
                     before = "Forge BlockAndTintGetter#getModelDataManager()",
                     after = "$generatedPackage.LegacyModelDataManagers.resolve(...)",
@@ -290,340 +292,474 @@ internal object LegacyModelDataManagerCompatMigration {
         return writes.map { it.change }
     }
 
-    private fun admitExactCreateSources(
+    /**
+     * Plans every project use of the removed BlockAndTintGetter manager getter.
+     *
+     * A receiver is admitted only when its declared type is proven to be a BlockAndTintGetter that
+     * is not a Level: Level and its subclasses keep `getModelDataManager()` on NeoForge 21.1
+     * (ILevelExtension) and are not legacy uses. A source-owned getter class (not a Level) that
+     * declares the old override becomes a provider, so the bridge keeps Forge's dispatch. Each
+     * rewritten query must keep a consumer that cannot observe NeoForge's non-null
+     * `ModelDataManager.getAt(BlockPos)` (ModelData.EMPTY where Forge returned null): the value is
+     * only null-checked, returned by a provider, or read through `getAt(pos)` into a source-owned
+     * static method that maps a null and a property-less ModelData to the same result.
+     */
+    private fun planGenericSources(
         units: List<SourceUnit>,
         generatedPackage: String
-    ): AdmittedSources {
-        fun exactType(name: String): Pair<SourceUnit, ClassOrInterfaceDeclaration> {
-            val matches = units.flatMap { source ->
-                source.canonicalTypes.entries.mapNotNull { (type, canonical) ->
-                    if (canonical == name) source to type else null
+    ): GenericPlan {
+        val index = TypeIndex(units)
+        val providers = mutableListOf<ProviderPlan>()
+        units.forEach { source ->
+            source.unit.findAll(MethodDeclaration::class.java).forEach declaration@{ method ->
+                if (method.nameAsString != MANAGER_GETTER || method.parameters.isNotEmpty()) {
+                    return@declaration
+                }
+                val owner = method.parentNode.orElse(null) as? ClassOrInterfaceDeclaration
+                    ?: return@declaration
+                val ownerName = source.canonicalTypes[owner] ?: return@declaration
+                if (owner.isInterface || index.classify(ownerName) != GetterKind.GETTER) return@declaration
+                require(
+                    index.resolve(source, method.typeAsString, method) in setOf(OLD_MANAGER, TARGET_MANAGER) &&
+                        method.isPublic && !method.isStatic && method.body.isPresent
+                ) {
+                    "$ownerName declares a getModelDataManager() outside the public nullable manager " +
+                        "override shape; no files changed"
+                }
+                val provider = "$generatedPackage.LegacyModelDataManagerProvider"
+                providers += ProviderPlan(
+                    source,
+                    owner,
+                    method,
+                    owner.implementedTypes.none { canonicalType(source.unit, it.asString()) == provider }
+                )
+            }
+        }
+        val providerMethods = providers.map { it.method }
+
+        val calls = mutableListOf<CallPlan>()
+        units.forEach { source ->
+            source.unit.findAll(MethodReferenceExpr::class.java).forEach reference@{ reference ->
+                if (reference.identifier != MANAGER_GETTER) return@reference
+                val type = (reference.scope as? com.github.javaparser.ast.expr.TypeExpr)
+                    ?.let { index.resolve(source, it.type.asString(), reference) }
+                    ?: index.receiverType(source, reference.scope)
+                require(type == null || index.classify(type) != GetterKind.GETTER) {
+                    "${source.file} uses getModelDataManager as a method reference on a " +
+                        "BlockAndTintGetter; no files changed"
                 }
             }
-            require(matches.size == 1) {
-                "Expected exactly one source declaration for $name, found ${matches.size}; " +
-                    "no files changed"
-            }
-            return matches.single()
-        }
-
-        val (filteredUnit, filteredType) = exactType(FILTERED)
-        val (copycatUnit, copycatType) = exactType(COPYCAT_BLOCK)
-        val (modelUnit, modelType) = exactType(COPYCAT_MODEL)
-
-        require(
-            filteredType.implementedTypes.size == 1 ||
-                (
-                    filteredType.implementedTypes.size == 2 &&
-                        filteredType.implementedTypes.any {
-                            canonicalType(filteredUnit.unit, it.asString()) ==
-                                "$generatedPackage.LegacyModelDataManagerProvider"
-                        }
-                    )
-        ) {
-            "$FILTERED has unexpected direct interfaces; no files changed"
-        }
-        require(
-            filteredType.implementedTypes.any {
-                canonicalType(filteredUnit.unit, it.asString()) == BLOCK_AND_TINT_GETTER
-            }
-        ) {
-            "$FILTERED no longer directly implements BlockAndTintGetter; no files changed"
-        }
-        val wrappedFields = filteredType.fields.flatMap { it.variables }.filter {
-            it.nameAsString == "wrapped" &&
-                canonicalType(filteredUnit.unit, it.typeAsString) == BLOCK_AND_TINT_GETTER
-        }
-        require(wrappedFields.size == 1) {
-            "$FILTERED lacks its exact wrapped BlockAndTintGetter field; no files changed"
-        }
-
-        val legacyMethods = filteredType.methods.filter {
-            it.nameAsString == MANAGER_GETTER && it.parameters.isEmpty()
-        }
-        val providerMethods = filteredType.methods.filter {
-            it.nameAsString == PROVIDER_GETTER && it.parameters.isEmpty()
-        }
-        require(legacyMethods.size + providerMethods.size == 1) {
-            "$FILTERED has an ambiguous manager forwarding method; no files changed"
-        }
-        val filteredMethod = (legacyMethods + providerMethods).single()
-        require(
-            filteredMethod.isPublic &&
-                !filteredMethod.isStatic &&
-                filteredMethod.annotations.any { it.nameAsString == "Override" } &&
-                canonicalType(filteredUnit.unit, filteredMethod.typeAsString) in
-                setOf(OLD_MANAGER, TARGET_MANAGER)
-        ) {
-            "$FILTERED manager forwarding signature changed; no files changed"
-        }
-        val filteredReturn = filteredMethod.body.orElseThrow().statements.singleOrNull()
-            ?.asReturnStmt()?.expression?.orElse(null)
-            ?: error("$FILTERED manager forwarding body is not one return; no files changed")
-        val filteredLegacyCall =
-            if (filteredMethod.nameAsString == MANAGER_GETTER) {
-                filteredReturn as? MethodCallExpr
-                    ?: error("$FILTERED manager forwarding is not a call; no files changed")
-            } else {
-                null
-            }
-        if (filteredLegacyCall != null) {
-            require(
-                filteredLegacyCall.nameAsString == MANAGER_GETTER &&
-                    filteredLegacyCall.arguments.isEmpty() &&
-                    (filteredLegacyCall.scope.orElse(null) as? NameExpr)
-                        ?.nameAsString == "wrapped"
-            ) {
-                "$FILTERED no longer unconditionally forwards wrapped.getModelDataManager(); " +
-                    "no files changed"
-            }
-        } else {
-            require(
-                isResolverCall(
-                    filteredReturn,
-                    generatedPackage,
-                    expectedArgument = "wrapped"
-                ) &&
-                    filteredType.implementedTypes.any {
-                        canonicalType(filteredUnit.unit, it.asString()) ==
-                            "$generatedPackage.LegacyModelDataManagerProvider"
+            source.unit.findAll(MethodCallExpr::class.java).forEach query@{ call ->
+                if (call.nameAsString != MANAGER_GETTER || call.arguments.isNotEmpty()) return@query
+                val scope = call.scope.orElse(null)
+                val receiverType = if (scope == null) {
+                    index.enclosingType(source, call)
+                } else {
+                    require(scope !is com.github.javaparser.ast.expr.SuperExpr ||
+                        index.enclosingType(source, call)?.let(index::classify) != GetterKind.GETTER
+                    ) {
+                        "${source.file} calls super.getModelDataManager() in a BlockAndTintGetter; " +
+                            "no files changed"
                     }
-            ) {
-                "$FILTERED has a noncanonical migrated provider method; no files changed"
-            }
-        }
-
-        val appearance = copycatType.methods.singleOrNull {
-            it.nameAsString == "getAppearance" &&
-                it.parameters.size == 6 &&
-                canonicalType(copycatUnit.unit, it.typeAsString) == BLOCK_STATE
-        } ?: error("$COPYCAT_BLOCK has no exact getAppearance method; no files changed")
-        val parameterTypes = appearance.parameters.map {
-            canonicalType(copycatUnit.unit, it.typeAsString)
-        }
-        require(
-            appearance.isPublic &&
-                appearance.annotations.any { it.nameAsString == "Override" } &&
-                parameterTypes == listOf(
-                    BLOCK_STATE,
-                    BLOCK_AND_TINT_GETTER,
-                    BLOCK_POS,
-                    DIRECTION,
-                    BLOCK_STATE,
-                    BLOCK_POS
+                    index.receiverType(source, scope)
+                } ?: return@query
+                if (index.classify(receiverType) != GetterKind.GETTER) return@query
+                val failure = consumerFailure(source, call, providerMethods, index)
+                require(failure == null) {
+                    "${source.file}:${call.range.map { it.begin.line }.orElse(0)} " +
+                        "getModelDataManager() $failure; no files changed"
+                }
+                calls += CallPlan(
+                    source,
+                    call,
+                    when (scope) {
+                        null, is ThisExpr -> "this"
+                        else -> scope.toString()
+                    }
                 )
-        ) {
-            "$COPYCAT_BLOCK#getAppearance signature changed; no files changed"
-        }
-        val names = appearance.parameters.map { it.nameAsString }
-        val stateName = names[0]
-        val levelName = names[1]
-        val posName = names[2]
-        val sideName = names[3]
-        val queryPosName = names[5]
-        val statements = appearance.body.orElseThrow().statements
-        require(statements.size == 4) {
-            "$COPYCAT_BLOCK#getAppearance no longer has the exact four-statement query; " +
-                "no files changed"
-        }
-        require(
-            isIgnoredConnectivityReturn(
-                statements[0],
-                levelName,
-                stateName,
-                sideName,
-                posName,
-                queryPosName
-            )
-        ) {
-            "$COPYCAT_BLOCK#getAppearance connectivity guard changed; no files changed"
-        }
-        val managerVariable = statements[1].asExpressionStmt().expression
-            .asVariableDeclarationExpr().variables.single()
-        require(
-            canonicalType(copycatUnit.unit, managerVariable.typeAsString) in
-                setOf(OLD_MANAGER, TARGET_MANAGER)
-        ) {
-            "$COPYCAT_BLOCK#getAppearance manager local changed type; no files changed"
-        }
-        val managerName = managerVariable.nameAsString
-        val managerInitializer = managerVariable.initializer.orElseThrow()
-        val copycatLegacyCall =
-            (managerInitializer as? MethodCallExpr)?.takeIf {
-                it.nameAsString == MANAGER_GETTER &&
-                    it.arguments.isEmpty() &&
-                    (it.scope.orElse(null) as? NameExpr)?.nameAsString == levelName
-            }
-        require(
-            copycatLegacyCall != null ||
-                isResolverCall(
-                    managerInitializer,
-                    generatedPackage,
-                    expectedArgument = levelName
-                )
-        ) {
-            "$COPYCAT_BLOCK#getAppearance manager lookup changed; no files changed"
-        }
-        require(
-            isNullFallback(statements[2], managerName, levelName, posName) &&
-                isCopycatManagerConsumer(statements[3], managerName, posName)
-        ) {
-            "$COPYCAT_BLOCK#getAppearance no longer preserves the nullable fallback and " +
-                "live manager.getAt(pos) consumer; no files changed"
-        }
-
-        verifyCopycatModelConsumer(modelUnit, modelType)
-
-        val admittedLegacyNodes = listOfNotNull(filteredLegacyCall, copycatLegacyCall)
-        val allLegacyCalls = units.flatMap { source ->
-            source.unit.findAll(MethodCallExpr::class.java).filter {
-                it.nameAsString == MANAGER_GETTER && it.arguments.isEmpty()
             }
         }
-        val unexpectedCalls = allLegacyCalls.filter { call ->
-            admittedLegacyNodes.none { it === call }
-        }
-        require(unexpectedCalls.isEmpty()) {
-            "Project source contains an additional getModelDataManager() query outside the " +
-                "admitted Create pair; no files changed"
-        }
-        val allLegacyDeclarations = units.flatMap { source ->
-            source.unit.findAll(MethodDeclaration::class.java).filter {
-                it.nameAsString == MANAGER_GETTER &&
-                    it.parameters.isEmpty() &&
-                    canonicalType(source.unit, it.typeAsString) in
-                    setOf(OLD_MANAGER, TARGET_MANAGER)
-            }
-        }
-        require(
-            allLegacyDeclarations.size == legacyMethods.size &&
-                allLegacyDeclarations.all { it === legacyMethods.singleOrNull() }
-        ) {
-            "Project source contains an additional ModelDataManager getter declaration; " +
-                "no files changed"
-        }
-
-        return AdmittedSources(
-            filtered = filteredUnit,
-            filteredType = filteredType,
-            filteredMethod = filteredMethod,
-            filteredLegacyCall = filteredLegacyCall,
-            copycat = copycatUnit,
-            copycatType = copycatType,
-            managerVariable = managerVariable,
-            copycatLegacyCall = copycatLegacyCall,
-            model = modelUnit,
-            alreadyMigrated = filteredLegacyCall == null && copycatLegacyCall == null
-        )
+        return GenericPlan(providers, calls)
     }
 
-    private fun migrateAdmittedSources(
+    private fun consumerFailure(
+        source: SourceUnit,
+        call: MethodCallExpr,
+        providers: List<MethodDeclaration>,
+        index: TypeIndex
+    ): String? {
+        when (val parent = call.parentNode.orElse(null)) {
+            is ReturnStmt -> {
+                val callable = parent.findAncestor(MethodDeclaration::class.java).orElse(null)
+                val lambda = parent.findAncestor(LambdaExpr::class.java).orElse(null)
+                return if (lambda == null && providers.any { it === callable }) {
+                    null
+                } else {
+                    "returns the manager to callers that are not proven null/EMPTY-insensitive"
+                }
+            }
+            is BinaryExpr -> return if (isNullComparison(parent, call)) null else
+                "is compared outside a null check"
+            is MethodCallExpr -> return if (parent.scope.orElse(null) === call) {
+                getAtFailure(source, parent, index)
+            } else {
+                "is passed to a method that is not a proven consumer"
+            }
+            is VariableDeclarator -> {
+                val name = parent.nameAsString
+                val block = parent.findAncestor(BlockStmt::class.java).orElse(null)
+                    ?: return "is stored outside a block-local variable"
+                val declarationEnd = parent.range.map { it.end }.orElse(null)
+                    ?: return "has no source range"
+                if (block.findAll(VariableDeclarator::class.java).count { it.nameAsString == name } != 1 ||
+                    block.findAll(LambdaExpr::class.java).any { lambda ->
+                        lambda.parameters.any { it.nameAsString == name }
+                    } ||
+                    block.findAll(AssignExpr::class.java).any {
+                        (it.target as? NameExpr)?.nameAsString == name
+                    }
+                ) {
+                    return "is held in a local that is shadowed or reassigned"
+                }
+                block.findAll(NameExpr::class.java).forEach { use ->
+                    if (use.nameAsString != name ||
+                        use.range.map { !it.begin.isAfter(declarationEnd) }.orElse(true)
+                    ) return@forEach
+                    val failure = when (val holder = use.parentNode.orElse(null)) {
+                        is BinaryExpr -> if (isNullComparison(holder, use)) null else
+                            "is compared outside a null check"
+                        is MethodCallExpr -> if (holder.scope.orElse(null) === use) {
+                            getAtFailure(source, holder, index)
+                        } else {
+                            "is passed to a method that is not a proven consumer"
+                        }
+                        else -> "is used outside null checks and getAt(BlockPos)"
+                    }
+                    if (failure != null) return failure
+                }
+                return null
+            }
+            else -> return "is used outside null checks, getAt(BlockPos), and provider returns"
+        }
+    }
+
+    private fun getAtFailure(
+        source: SourceUnit,
+        getAt: MethodCallExpr,
+        index: TypeIndex
+    ): String? {
+        if (getAt.nameAsString != "getAt" || getAt.arguments.size != 1) {
+            return "reaches a ModelDataManager member other than getAt(BlockPos)"
+        }
+        val position = index.receiverType(source, getAt.arguments.single())
+        if (position != BLOCK_POS) return "reaches getAt with an argument not proven to be a BlockPos"
+        val consumer = getAt.parentNode.orElse(null) as? MethodCallExpr
+            ?: return "reads getAt(BlockPos) outside a proven null/EMPTY-insensitive consumer"
+        if (consumer.arguments.singleOrNull() !== getAt) {
+            return "reads getAt(BlockPos) outside a proven null/EMPTY-insensitive consumer"
+        }
+        val target = index.staticMethod(source, consumer)
+            ?: return "passes getAt(BlockPos) to a consumer that is not one source-owned static method"
+        val (targetSource, method) = target
+        val parameter = method.parameters.single()
+        if (index.resolve(targetSource, parameter.typeAsString, parameter) !in
+            setOf(OLD_MODEL_DATA, TARGET_MODEL_DATA)
+        ) {
+            return "passes getAt(BlockPos) to ${method.nameAsString} without a ModelData parameter"
+        }
+        return if (nullAndEmptyAgree(method, parameter.nameAsString)) null else
+            "passes getAt(BlockPos) to ${method.nameAsString}, which can tell null from ModelData.EMPTY"
+    }
+
+    /**
+     * Whether every read of [name] is `name == null ? null : name.get(P)` (or the `!=` form), so a
+     * null value and ModelData.EMPTY (whose `get` returns null for every property) agree.
+     */
+    private fun nullAndEmptyAgree(method: MethodDeclaration, name: String): Boolean {
+        val body = method.body.orElse(null) ?: return false
+        if (body.findAll(AssignExpr::class.java).any { (it.target as? NameExpr)?.nameAsString == name } ||
+            body.findAll(VariableDeclarator::class.java).any { it.nameAsString == name } ||
+            body.findAll(LambdaExpr::class.java).any { lambda ->
+                lambda.parameters.any { it.nameAsString == name }
+            }
+        ) return false
+        val uses = body.findAll(NameExpr::class.java).filter { it.nameAsString == name }
+        return uses.isNotEmpty() && uses.all { use ->
+            val conditional = use.findAncestor(ConditionalExpr::class.java).orElse(null)
+                ?: return@all false
+            val condition = conditional.condition as? BinaryExpr ?: return@all false
+            if (!isNullComparison(condition, null, name)) return@all false
+            val (nullBranch, valueBranch) = if (condition.operator == BinaryExpr.Operator.EQUALS) {
+                conditional.thenExpr to conditional.elseExpr
+            } else {
+                conditional.elseExpr to conditional.thenExpr
+            }
+            val get = valueBranch as? MethodCallExpr ?: return@all false
+            nullBranch is NullLiteralExpr &&
+                get.nameAsString == "get" &&
+                get.arguments.size == 1 &&
+                (get.arguments.single() is NameExpr || get.arguments.single() is FieldAccessExpr) &&
+                (get.scope.orElse(null) as? NameExpr)?.nameAsString == name &&
+                (use === get.scope.orElse(null) || condition.left === use || condition.right === use)
+        }
+    }
+
+    private fun isNullComparison(
+        expression: BinaryExpr,
+        operand: com.github.javaparser.ast.expr.Expression?,
+        name: String? = null
+    ): Boolean {
+        if (expression.operator != BinaryExpr.Operator.EQUALS &&
+            expression.operator != BinaryExpr.Operator.NOT_EQUALS
+        ) return false
+        fun matches(side: com.github.javaparser.ast.expr.Expression): Boolean =
+            if (name != null) (side as? NameExpr)?.nameAsString == name else side === operand
+        return (matches(expression.left) && expression.right is NullLiteralExpr) ||
+            (matches(expression.right) && expression.left is NullLiteralExpr)
+    }
+
+    private fun migrateGenericSources(
         parser: JavaParser,
-        admitted: AdmittedSources,
+        plan: GenericPlan,
         generatedPackage: String
     ): Map<SourceUnit, String> {
-        val result = linkedMapOf<SourceUnit, String>()
-
-        LexicalPreservingPrinter.setup(admitted.filtered.unit)
-        if (!admitted.alreadyMigrated) {
-            if (admitted.filteredLegacyCall != null) {
-                admitted.filteredType.addImplementedType(
-                    "$generatedPackage.LegacyModelDataManagerProvider"
-                )
-                admitted.filteredMethod.setName(PROVIDER_GETTER)
-                admitted.filteredMethod.setBody(
-                    StaticJavaParser.parseBlock(
-                        "{ return $generatedPackage.LegacyModelDataManagers" +
-                            ".resolve(wrapped); }"
-                    )
+        val touched = (plan.providers.map { it.source } + plan.calls.map { it.source })
+            .distinctBy { it.file }
+        touched.forEach { LexicalPreservingPrinter.setup(it.unit) }
+        val resolver = "$generatedPackage.LegacyModelDataManagers"
+        plan.calls.forEach { call ->
+            val provider = plan.providers.singleOrNull { provider ->
+                provider.method.body.orElse(null)?.statements?.singleOrNull()
+                    ?.let { it as? ReturnStmt }?.expression?.orElse(null) === call.call
+            }
+            if (provider != null) return@forEach
+            call.call.replace(
+                StaticJavaParser.parseExpression("$resolver.resolve(${call.receiver})")
+            )
+        }
+        plan.providers.forEach { provider ->
+            if (provider.addInterface) {
+                provider.type.addImplementedType("$generatedPackage.LegacyModelDataManagerProvider")
+            }
+            provider.method.setName(PROVIDER_GETTER)
+            val single = provider.method.body.orElse(null)?.statements?.singleOrNull()
+                ?.let { it as? ReturnStmt }?.expression?.orElse(null)
+            val returned = plan.calls.singleOrNull { it.call === single }
+            if (returned != null) {
+                provider.method.setBody(
+                    StaticJavaParser.parseBlock("{ return $resolver.resolve(${returned.receiver}); }")
                 )
             }
         }
-        val filteredText = LexicalPreservingPrinter.print(admitted.filtered.unit)
-            .let { if (it.endsWith('\n')) it else "$it\n" }
-        check(parser.parse(filteredText).isSuccessful) {
-            "Filtered model-data migration emitted invalid Java; no files changed"
+        return touched.associateWith { source ->
+            val text = LexicalPreservingPrinter.print(source.unit)
+                .let { if (it.endsWith('\n')) it else "$it\n" }
+            check(parser.parse(text).isSuccessful) {
+                "Model-data migration emitted invalid Java for ${source.file}; no files changed"
+            }
+            text
         }
-        result[admitted.filtered] = filteredText
-
-        LexicalPreservingPrinter.setup(admitted.copycat.unit)
-        if (admitted.copycatLegacyCall != null) {
-            admitted.managerVariable.setInitializer(
-                StaticJavaParser.parseExpression(
-                    "$generatedPackage.LegacyModelDataManagers.resolve(" +
-                        admitted.copycatLegacyCall.scope.orElseThrow() +
-                        ")"
-                )
-            )
-        }
-        val copycatText = LexicalPreservingPrinter.print(admitted.copycat.unit)
-            .let { if (it.endsWith('\n')) it else "$it\n" }
-        check(parser.parse(copycatText).isSuccessful) {
-            "Copycat model-data migration emitted invalid Java; no files changed"
-        }
-        result[admitted.copycat] = copycatText
-
-        return result
     }
 
-    private fun verifyCopycatModelConsumer(
-        source: SourceUnit,
-        owner: ClassOrInterfaceDeclaration
-    ) {
-        val method = owner.methods.singleOrNull {
-            it.nameAsString == "getMaterial" &&
-                it.isPublic &&
-                it.isStatic &&
-                it.parameters.size == 1 &&
-                canonicalType(source.unit, it.typeAsString) == BLOCK_STATE
-        } ?: error("$COPYCAT_MODEL has no exact static getMaterial consumer; no files changed")
-        require(
-            canonicalType(source.unit, method.parameters.single().typeAsString) in
-                setOf(
-                    "net.minecraftforge.client.model.data.ModelData",
-                    TARGET_MODEL_DATA
-                )
-        ) {
-            "$COPYCAT_MODEL#getMaterial parameter changed; no files changed"
+    /** Whether project source has a use this migration owns (shared with the inventory prepass). */
+    internal fun hasLegacySurface(units: List<CompilationUnit>): Boolean {
+        val sources = units.map { SourceUnit(Path.of(""), "", it, canonicalTypes(it)) }
+        val index = TypeIndex(sources)
+        return sources.any { source ->
+            source.unit.findAll(MethodDeclaration::class.java).any { method ->
+                method.nameAsString == MANAGER_GETTER && method.parameters.isEmpty() &&
+                    (method.parentNode.orElse(null) as? ClassOrInterfaceDeclaration)?.let { owner ->
+                        !owner.isInterface &&
+                            source.canonicalTypes[owner]?.let(index::classify) == GetterKind.GETTER
+                    } == true
+            } || source.unit.findAll(MethodCallExpr::class.java).any { call ->
+                call.nameAsString == MANAGER_GETTER && call.arguments.isEmpty() &&
+                    (
+                        call.scope.orElse(null)?.let { index.receiverType(source, it) }
+                            ?: index.enclosingType(source, call)
+                        )?.let(index::classify) == GetterKind.GETTER
+            }
         }
-        val dataName = method.parameters.single().nameAsString
-        val statements = method.body.orElseThrow().statements
-        require(statements.size == 2) {
-            "$COPYCAT_MODEL#getMaterial no longer has the exact null/property consumer; " +
-                "no files changed"
+    }
+
+    private enum class GetterKind { GETTER, LEVEL, OTHER, UNKNOWN }
+
+    /** Source-declared and 1.21.1 platform types, resolved conservatively. */
+    private class TypeIndex(private val units: List<SourceUnit>) {
+        private val declarations: Map<String, Pair<SourceUnit, ClassOrInterfaceDeclaration>> =
+            units.flatMap { source ->
+                source.canonicalTypes.map { (declaration, name) -> name to (source to declaration) }
+            }.groupBy({ it.first }, { it.second })
+                .filterValues { it.size == 1 }
+                .mapValues { it.value.single() }
+
+        fun classify(type: String): GetterKind {
+            val pending = ArrayDeque(listOf(type))
+            val seen = mutableSetOf<String>()
+            var getter = false
+            var level = false
+            while (pending.isNotEmpty()) {
+                val current = pending.removeFirst()
+                if (!seen.add(current) || current == "java.lang.Object") continue
+                // The generated provider contract is not a block getter and declares no getter.
+                if (current.startsWith("com.modporter.generated.")) continue
+                val declared = declarations[current]
+                if (declared != null) {
+                    val (source, declaration) = declared
+                    (declaration.extendedTypes + declaration.implementedTypes).forEach { supertype ->
+                        pending += resolve(source, supertype.nameWithScope, declaration)
+                            ?: return GetterKind.UNKNOWN
+                    }
+                    continue
+                }
+                if (!TargetMembers.hasClass(current)) return GetterKind.UNKNOWN
+                if (TargetMembers.declaresInHierarchy(current, MANAGER_GETTER, 0)) level = true
+                if (current == BLOCK_AND_TINT_GETTER ||
+                    TargetMembers.inheritsFrom(current, BLOCK_AND_TINT_GETTER)
+                ) getter = true
+            }
+            return when {
+                level -> GetterKind.LEVEL
+                getter -> GetterKind.GETTER
+                else -> GetterKind.OTHER
+            }
         }
-        val material = statements[0].asExpressionStmt().expression
-            .asVariableDeclarationExpr().variables.single()
-        require(
-            canonicalType(source.unit, material.typeAsString) == BLOCK_STATE
-        ) {
-            "$COPYCAT_MODEL#getMaterial material local changed; no files changed"
+
+        fun resolve(source: SourceUnit, raw: String, context: Node): String? {
+            val cleaned = raw
+                .replace(Regex("""@[\w.]+(?:\([^)]*\))?\s*"""), "")
+                .substringBefore('<')
+                .replace(" ", "")
+                .removeSuffix("[]")
+                .trim()
+            if (cleaned.isEmpty() || cleaned == "var") return null
+            val first = cleaned.substringBefore('.')
+            val rest = cleaned.removePrefix(first)
+            if (first.first().isLowerCase()) return cleaned
+            var current: Node? = context
+            while (current != null) {
+                val parameters = when (current) {
+                    is ClassOrInterfaceDeclaration -> current.typeParameters
+                    is MethodDeclaration -> current.typeParameters
+                    is com.github.javaparser.ast.body.ConstructorDeclaration -> current.typeParameters
+                    else -> null
+                }
+                if (parameters?.any { it.nameAsString == first } == true) return null
+                current = current.parentNode.orElse(null)
+            }
+            val local = source.canonicalTypes.entries.filter { it.key.nameAsString == first }
+            if (local.isNotEmpty()) return local.singleOrNull()?.value?.plus(rest)
+            val explicit = source.unit.imports.filter {
+                !it.isStatic && !it.isAsterisk && it.name.identifier == first
+            }.map { it.nameAsString }.distinct()
+            if (explicit.isNotEmpty()) return explicit.singleOrNull()?.plus(rest)
+            val packageName = source.unit.packageDeclaration.map { it.nameAsString }.orElse("")
+            val samePackage = if (packageName.isBlank()) first else "$packageName.$first"
+            if (samePackage in declarations) return samePackage + rest
+            val onDemand = source.unit.imports.filter { !it.isStatic && it.isAsterisk }
+                .map { "${it.nameAsString}.$first" }
+                .filter { it in declarations || TargetMembers.hasClass(it) }
+                .distinct()
+            if (onDemand.isNotEmpty()) return onDemand.singleOrNull()?.plus(rest)
+            if (first in setOf("Object", "String")) return "java.lang.$first$rest"
+            return null
         }
-        val conditional = material.initializer.orElse(null) as? ConditionalExpr
-            ?: error("$COPYCAT_MODEL#getMaterial null lookup changed; no files changed")
-        require(
-            isNameComparedToNull(conditional.condition, dataName) &&
-                conditional.thenExpr is NullLiteralExpr &&
-                (conditional.elseExpr as? MethodCallExpr)?.let {
-                    it.nameAsString == "get" &&
-                        (it.scope.orElse(null) as? NameExpr)?.nameAsString == dataName &&
-                        it.arguments.singleOrNull()?.toString() == "MATERIAL_PROPERTY"
-                } == true
-        ) {
-            "$COPYCAT_MODEL#getMaterial no longer maps null data to null material; " +
-                "no files changed"
+
+        /** The declared type of a name, `this`, or `this.field` receiver; null when unproven. */
+        fun receiverType(source: SourceUnit, expression: com.github.javaparser.ast.expr.Expression): String? =
+            when (expression) {
+                is ThisExpr -> if (expression.typeName.isPresent) null else enclosingType(source, expression)
+                is FieldAccessExpr -> if (expression.scope is ThisExpr) {
+                    fieldType(source, expression, expression.nameAsString)
+                } else {
+                    null
+                }
+                is NameExpr -> nameType(source, expression)
+                is com.github.javaparser.ast.expr.EnclosedExpr -> receiverType(source, expression.inner)
+                else -> null
+            }
+
+        /** The class whose instance an unqualified call or `this` denotes, unless anonymous. */
+        fun enclosingType(source: SourceUnit, node: Node): String? {
+            var current = node.parentNode.orElse(null)
+            while (current != null) {
+                when (current) {
+                    is com.github.javaparser.ast.expr.ObjectCreationExpr ->
+                        if (current.anonymousClassBody.isPresent) return null
+                    is ClassOrInterfaceDeclaration -> return source.canonicalTypes[current]
+                    is com.github.javaparser.ast.body.TypeDeclaration<*> -> return null
+                }
+                current = current.parentNode.orElse(null)
+            }
+            return null
         }
-        val returned = statements[1].asReturnStmt().expression.orElse(null)
-            as? ConditionalExpr
-            ?: error("$COPYCAT_MODEL#getMaterial fallback changed; no files changed")
-        require(
-            isNameComparedToNull(returned.condition, material.nameAsString) &&
-                returned.thenExpr.toString() ==
-                "AllBlocks.COPYCAT_BASE.getDefaultState()" &&
-                returned.elseExpr.toString() == material.nameAsString
-        ) {
-            "$COPYCAT_MODEL#getMaterial no longer gives null and ModelData.EMPTY the " +
-                "same property-absent fallback; no files changed"
+
+        private fun nameType(source: SourceUnit, name: NameExpr): String? {
+            val identifier = name.nameAsString
+            var current = name.parentNode.orElse(null)
+            while (current != null) {
+                when (current) {
+                    is LambdaExpr -> current.parameters.firstOrNull { it.nameAsString == identifier }
+                        ?.let { parameter ->
+                            return if (parameter.type.isUnknownType) null else
+                                resolve(source, parameter.typeAsString, parameter)
+                        }
+                    is com.github.javaparser.ast.stmt.CatchClause ->
+                        if (current.parameter.nameAsString == identifier) return null
+                    is com.github.javaparser.ast.stmt.ForEachStmt ->
+                        if (current.variable.variables.any { it.nameAsString == identifier }) return null
+                    is MethodDeclaration, is com.github.javaparser.ast.body.ConstructorDeclaration -> {
+                        val callable = current as com.github.javaparser.ast.body.CallableDeclaration<*>
+                        if (current.findAll(com.github.javaparser.ast.expr.TypePatternExpr::class.java)
+                                .any { it.nameAsString == identifier }
+                        ) return null
+                        val locals = current.findAll(VariableDeclarator::class.java)
+                            .filter { it.nameAsString == identifier }
+                        val parameters = callable.parameters.filter { it.nameAsString == identifier }
+                        if (locals.size + parameters.size > 1) return null
+                        locals.singleOrNull()?.let { return resolve(source, it.typeAsString, it) }
+                        parameters.singleOrNull()?.let { return resolve(source, it.typeAsString, it) }
+                        return fieldType(source, name, identifier)
+                    }
+                    is com.github.javaparser.ast.body.TypeDeclaration<*> -> return null
+                }
+                current = current.parentNode.orElse(null)
+            }
+            return null
+        }
+
+        private fun fieldType(source: SourceUnit, use: Node, field: String): String? {
+            var owner = enclosingType(source, use)
+            val seen = mutableSetOf<String>()
+            while (owner != null && seen.add(owner)) {
+                val (ownerSource, declaration) = declarations[owner] ?: return null
+                declaration.fields.flatMap { it.variables }.singleOrNull { it.nameAsString == field }
+                    ?.let { return resolve(ownerSource, it.typeAsString, it) }
+                val parent = declaration.extendedTypes.singleOrNull() ?: return null
+                owner = resolve(ownerSource, parent.nameWithScope, declaration)
+            }
+            return null
+        }
+
+        /** The one source-owned static method a single-argument [call] binds to. */
+        fun staticMethod(
+            source: SourceUnit,
+            call: MethodCallExpr
+        ): Pair<SourceUnit, MethodDeclaration>? {
+            val scope = call.scope.orElse(null)
+            val owner = when {
+                scope == null -> enclosingType(source, call)
+                scope is NameExpr && scope.nameAsString.first().isUpperCase() &&
+                    nameType(source, scope) == null -> resolve(source, scope.nameAsString, call)
+                else -> null
+            } ?: return null
+            val (ownerSource, declaration) = declarations[owner] ?: return null
+            val candidates = declaration.methods.filter {
+                it.nameAsString == call.nameAsString && it.parameters.size == call.arguments.size
+            }
+            val method = candidates.singleOrNull() ?: return null
+            if (!method.isStatic || declaration.extendedTypes.isNotEmpty() && scope == null) return null
+            return ownerSource to method
         }
     }
 
@@ -879,6 +1015,44 @@ internal object LegacyModelDataManagerCompatMigration {
         ) {
             "NeoForge RenderChunkRegion source no longer matches the client-only " +
                 "backing-Level accessor plan; no files changed"
+        }
+
+        // getAt(BlockPos) answers ModelData.EMPTY where Forge answered null; consumers are
+        // admitted only when they read properties through `get`, which EMPTY never holds.
+        val modelData = parseJarSource(
+            artifact,
+            "net/neoforged/neoforge/client/model/data/ModelData.java",
+            parser
+        )
+        val modelDataType = modelData.findAll(ClassOrInterfaceDeclaration::class.java).single {
+            it.nameAsString == "ModelData"
+        }
+        val empty = modelDataType.fields.flatMap { it.variables }.singleOrNull {
+            it.nameAsString == "EMPTY"
+        }?.initializer?.orElse(null)?.toString()?.replace(" ", "")
+        val get = modelDataType.methods.singleOrNull {
+            it.nameAsString == "get" && it.parameters.size == 1
+        }
+        val getReturn = get?.body?.orElse(null)?.statements?.singleOrNull()
+            ?.let { it as? ReturnStmt }?.expression?.orElse(null)
+            ?.let { if (it is com.github.javaparser.ast.expr.CastExpr) it.expression else it }
+            as? MethodCallExpr
+        val builder = modelDataType.methods.singleOrNull {
+            it.nameAsString == "builder" && it.parameters.isEmpty() && it.isStatic
+        }?.body?.orElse(null)?.statements?.singleOrNull()
+            ?.let { it as? ReturnStmt }?.expression?.orElse(null)?.toString()?.replace(" ", "")
+        require(
+            empty in setOf("ModelData.builder().build()", "builder().build()") &&
+                builder == "newBuilder(null)" &&
+                getReturn != null &&
+                getReturn.nameAsString == "get" &&
+                getReturn.scope.map { it.toString() }.orElse("") in
+                setOf("properties", "this.properties") &&
+                getReturn.arguments.singleOrNull()?.toString() ==
+                get.parameters.singleOrNull()?.nameAsString
+        ) {
+            "NeoForge ModelData no longer answers absent properties of an empty builder with " +
+                "null; no files changed"
         }
     }
 
@@ -1175,97 +1349,6 @@ internal object LegacyModelDataManagerCompatMigration {
         val packageName = unit.packageDeclaration.map { it.nameAsString }.orElse("")
         return if (packageName.isBlank()) cleaned else "$packageName.$cleaned"
     }
-
-    private fun isResolverCall(
-        expression: com.github.javaparser.ast.expr.Expression,
-        generatedPackage: String,
-        expectedArgument: String
-    ): Boolean {
-        val call = expression as? MethodCallExpr ?: return false
-        return call.nameAsString == "resolve" &&
-            call.arguments.singleOrNull()?.toString() == expectedArgument &&
-            call.scope.orElse(null)?.toString() ==
-            "$generatedPackage.LegacyModelDataManagers"
-    }
-
-    private fun isIgnoredConnectivityReturn(
-        statement: Statement,
-        level: String,
-        state: String,
-        side: String,
-        pos: String,
-        queryPos: String
-    ): Boolean {
-        val branch = statement as? IfStmt ?: return false
-        if (branch.elseStmt.isPresent) return false
-        val condition = branch.condition as? MethodCallExpr ?: return false
-        val returned = singleReturn(branch.thenStmt)?.expression?.orElse(null)
-            as? NameExpr ?: return false
-        return condition.scope.isEmpty &&
-            condition.nameAsString == "isIgnoredConnectivitySide" &&
-            condition.arguments.map(Node::toString) ==
-            listOf(level, state, side, pos, queryPos) &&
-            returned.nameAsString == state
-    }
-
-    private fun isNullFallback(
-        statement: Statement,
-        manager: String,
-        level: String,
-        pos: String
-    ): Boolean {
-        val branch = statement as? IfStmt ?: return false
-        if (branch.elseStmt.isPresent ||
-            !isNameComparedToNull(branch.condition, manager)
-        ) return false
-        val returned = singleReturn(branch.thenStmt)?.expression?.orElse(null)
-            as? MethodCallExpr ?: return false
-        return returned.scope.isEmpty &&
-            returned.nameAsString == "getMaterial" &&
-            returned.arguments.map(Node::toString) == listOf(level, pos)
-    }
-
-    private fun isCopycatManagerConsumer(
-        statement: Statement,
-        manager: String,
-        pos: String
-    ): Boolean {
-        val returned = statement as? ReturnStmt ?: return false
-        val outer = returned.expression.orElse(null) as? MethodCallExpr ?: return false
-        val inner = outer.arguments.singleOrNull() as? MethodCallExpr ?: return false
-        return outer.nameAsString == "getMaterial" &&
-            outer.scope.orElse(null)?.toString() == "CopycatModel" &&
-            inner.nameAsString == "getAt" &&
-            (inner.scope.orElse(null) as? NameExpr)?.nameAsString == manager &&
-            inner.arguments.singleOrNull()?.toString() == pos
-    }
-
-    private fun isNameComparedToNull(
-        expression: com.github.javaparser.ast.expr.Expression,
-        name: String
-    ): Boolean {
-        val binary = expression as? BinaryExpr ?: return false
-        if (binary.operator != BinaryExpr.Operator.EQUALS) return false
-        return (
-            binary.left is NameExpr &&
-                binary.left.asNameExpr().nameAsString == name &&
-                binary.right is NullLiteralExpr
-            ) || (
-            binary.right is NameExpr &&
-                binary.right.asNameExpr().nameAsString == name &&
-                binary.left is NullLiteralExpr
-            )
-    }
-
-    private fun singleReturn(statement: Statement): ReturnStmt? =
-        when {
-            statement.isReturnStmt -> statement.asReturnStmt()
-            statement.isBlockStmt &&
-                statement.asBlockStmt().statements.size == 1 &&
-                statement.asBlockStmt().statements.single().isReturnStmt ->
-                statement.asBlockStmt().statements.single().asReturnStmt()
-            else -> null
-        }
 
     private fun isDirectManagerForwarder(
         statement: Statement?,

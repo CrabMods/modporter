@@ -12,7 +12,6 @@ import kotlin.io.path.*
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
-import com.modporter.core.transforms.build.BuildSystemPass
 
 /**
  * Additional tests for StructuralRefactorPass edge cases and error handling.

@@ -317,14 +317,14 @@ class LegacyCompilerSourceBoundariesTest {
             """
             package example;
 
-            import com.simibubi.create.infrastructure.gametest.CreateGameTestHelper;
+            import example.gametest.ModGameTestHelper;
             import net.minecraft.core.registries.Registries;
             import net.minecraft.world.item.enchantment.EnchantmentInstance;
             import net.minecraft.world.item.enchantment.Enchantments;
 
             final class TestItems {
                 static Object attributeFilters(
-                    CreateGameTestHelper helper) {
+                    ModGameTestHelper helper) {
                     return new EnchantmentInstance(
                         parameters.holders()
                             .lookupOrThrow(Registries.ENCHANTMENT)
@@ -334,8 +334,8 @@ class LegacyCompilerSourceBoundariesTest {
             }
             """.trimIndent() + "\n"
 
-        val migrated = StructuralRefactorPass()
-            .migrateLegacyCompilerSourceBoundaries(source)
+        val pass = gameTestPass()
+        val migrated = pass.migrateLegacyCompilerSourceBoundaries(source)
         assertTrue(
             compact(migrated).contains(
                 "new EnchantmentInstance(" +
@@ -346,10 +346,62 @@ class LegacyCompilerSourceBoundariesTest {
             migrated
         )
         assertFalse(migrated.contains("parameters.holders()"), migrated)
+        assertEquals(migrated, pass.migrateLegacyCompilerSourceBoundaries(migrated))
+    }
+
+    @Test
+    fun `platform GameTest helper roots the enchantment lookup without project declarations`() {
+        val source =
+            """
+            package example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.gametest.framework.GameTestHelper;
+            import net.minecraft.world.item.enchantment.EnchantmentInstance;
+            import net.minecraft.world.item.enchantment.Enchantments;
+
+            final class TestItems {
+                static Object platform(GameTestHelper helper) {
+                    return new EnchantmentInstance(Enchantments.SHARPNESS, 2);
+                }
+            }
+            """.trimIndent() + "\n"
+
+        val migrated = StructuralRefactorPass().migrateLegacyCompilerSourceBoundaries(source)
+        assertTrue(
+            compact(migrated).contains(
+                "new EnchantmentInstance(helper.getLevel().registryAccess()" +
+                    ".registryOrThrow(Registries.ENCHANTMENT)" +
+                    ".getHolderOrThrow(Enchantments.SHARPNESS), 2)"
+            ),
+            migrated
+        )
+    }
+
+    @Test
+    fun `helpers outside the GameTestHelper hierarchy are not provider roots`() {
+        val source =
+            """
+            package example;
+
+            import example.gametest.UnrelatedHelper;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.enchantment.EnchantmentInstance;
+            import net.minecraft.world.item.enchantment.Enchantments;
+
+            final class TestItems {
+                static Object unrelated(UnrelatedHelper helper) {
+                    return new EnchantmentInstance(Enchantments.SHARPNESS, 2);
+                }
+            }
+            """.trimIndent() + "\n"
+
+        assertEquals(source, gameTestPass().migrateLegacyCompilerSourceBoundaries(source))
         assertEquals(
-            migrated,
-            StructuralRefactorPass()
-                .migrateLegacyCompilerSourceBoundaries(migrated)
+            source.replace("UnrelatedHelper", "ModGameTestHelper"),
+            StructuralRefactorPass().migrateLegacyCompilerSourceBoundaries(
+                source.replace("UnrelatedHelper", "ModGameTestHelper")
+            )
         )
     }
 
@@ -359,14 +411,14 @@ class LegacyCompilerSourceBoundariesTest {
             """
             package example;
 
-            import com.simibubi.create.infrastructure.gametest.CreateGameTestHelper;
+            import example.gametest.ModGameTestHelper;
             import net.minecraft.core.registries.Registries;
             import net.minecraft.world.item.enchantment.EnchantmentInstance;
             import net.minecraft.world.item.enchantment.Enchantments;
 
             final class TestItems {
                 static Object retained(
-                    CreateGameTestHelper helper,
+                    ModGameTestHelper helper,
                     Parameters parameters) {
                     return new EnchantmentInstance(
                         parameters.holders()
@@ -379,8 +431,34 @@ class LegacyCompilerSourceBoundariesTest {
 
         assertEquals(
             source,
-            StructuralRefactorPass()
-                .migrateLegacyCompilerSourceBoundaries(source)
+            gameTestPass().migrateLegacyCompilerSourceBoundaries(source)
+        )
+    }
+
+    private fun gameTestPass(): StructuralRefactorPass = StructuralRefactorPass().also {
+        it.projectSourceDeclarations = ProjectSourceDeclarations.of(
+            listOf(
+                """
+                package example.gametest;
+
+                import net.minecraft.gametest.framework.GameTestHelper;
+
+                public class ModGameTestHelper extends GameTestHelper {
+                    protected ModGameTestHelper(Object info) {
+                        super(null);
+                    }
+                }
+                """.trimIndent(),
+                """
+                package example.gametest;
+
+                public class UnrelatedHelper {
+                    public Object getLevel() {
+                        return null;
+                    }
+                }
+                """.trimIndent()
+            )
         )
     }
 

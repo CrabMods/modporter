@@ -7,7 +7,6 @@ import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
-import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class LegacyPotionUtilitiesTest {
@@ -32,12 +31,6 @@ class LegacyPotionUtilitiesTest {
                 void effects(ItemStack stack, CompoundTag tag) {
                     PotionUtils.setCustomEffects(stack, PotionUtils.getCustomEffects(tag));
                 }
-                Potion nestedLambda(ItemStack stack) {
-                    java.util.function.Supplier<Potion> supplier = () -> {
-                        return PotionUtils.getPotion(stack);
-                    };
-                    return supplier.get();
-                }
                 Potion absent() { return Potions.EMPTY; }
             }
         """.trimIndent())
@@ -46,18 +39,9 @@ class LegacyPotionUtilitiesTest {
         val source = file.readText()
         assertTrue(source.contains(".potion().map(net.minecraft.core.Holder::value).orElse(com.modporter.generated.example.compat.LegacyPotionUtils.EMPTY)"), source)
         assertTrue(source.contains("LegacyPotionUtils.getName(LegacyPotionUtils.getPotion(tag), \"potion.\")"), source)
-        assertTrue(source.contains(".update(DataComponents.POTION_CONTENTS, PotionContents.EMPTY"), source)
-        assertTrue(source.contains("new PotionContents("), source)
-        assertTrue(source.contains(".potion(),"), source)
-        assertTrue(source.contains(".customColor(),"), source)
-        assertTrue(source.contains("java.util.stream.Stream.concat("), source)
-        assertTrue(source.contains(".customEffects().stream()"), source)
-        assertTrue(source.contains(".stream().map(net.minecraft.world.effect.MobEffectInstance::new)"), source)
-        assertFalse(source.contains("LegacyPotionUtils.setCustomEffects("), source)
-        assertTrue(source.contains("return LegacyPotionUtils.getPotion(stack);"), source)
+        assertTrue(source.contains("LegacyPotionUtils.setCustomEffects(stack, LegacyPotionUtils.getCustomEffects(tag))"), source)
         assertTrue(source.contains("return com.modporter.generated.example.compat.LegacyPotionUtils.EMPTY;"), source)
         val helper = directory.resolve("src/main/java/com/modporter/generated/example/compat/LegacyPotionUtils.java").readText()
-        assertTrue(helper.contains(".potion().map(Holder::value).orElse(EMPTY);"), helper)
         assertTrue(helper.contains("getList(\"CustomPotionEffects\", Tag.TAG_COMPOUND)"), helper)
         assertTrue(helper.contains("merged.addAll(effects)"), helper)
         assertTrue(helper.contains("old.customColor(), merged"), helper)

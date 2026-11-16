@@ -148,12 +148,10 @@
             import net.minecraft.core.BlockPos;
             import net.minecraft.nbt.CompoundTag;
             import net.minecraft.world.item.ItemStack;
-            import net.minecraft.world.entity.player.Player;
             import net.minecraft.world.level.LevelReader;
             import net.minecraft.world.level.block.Block;
             import net.minecraft.world.level.block.entity.BlockEntity;
             import net.minecraft.world.level.block.state.BlockState;
-            import net.minecraft.world.phys.HitResult;
 
             public class ExampleBlock extends Block {
                 public ExampleBlock(Properties properties) {
@@ -169,11 +167,6 @@
                         stack.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.of(new CompoundTag()));
                     }
                     return stack;
-                }
-
-                @Override
-                public ItemStack getCloneItemStack(BlockState state, HitResult target, LevelReader level, BlockPos pos, Player player) {
-                    return new ItemStack(this);
                 }
             }
         """.trimIndent())
@@ -302,16 +295,12 @@
         assertTrue(effects.contains(".toList();"), effects)
         assertFalse(effects.contains("WeightedEntry.Wrapper[]::new"), effects)
         assertTrue(block.contains("public ItemStack getCloneItemStack(LevelReader level, BlockPos pos, BlockState state)"), block)
-        val legacyCloneSignature = Regex(
-            """getCloneItemStack\(\s*BlockState state_?,\s*HitResult target,\s*LevelReader level_?,\s*BlockPos pos_?,\s*Player player\s*\)"""
-        ).find(block)
-        assertTrue(legacyCloneSignature != null, block)
+        assertTrue(Regex("""getCloneItemStack\(\s*BlockState state_,\s*HitResult target,\s*LevelReader level_,\s*BlockPos pos_,\s*Player player\s*\)""").containsMatchIn(block), block)
         assertTrue(block.contains("if(true) return super.getCloneItemStack(level, pos, state);"), block)
         assertTrue(block.contains("ItemStack stack = super.getCloneItemStack(level, pos, state);"), block)
-        assertTrue(block.contains("return new ItemStack(this);"), block)
+        assertTrue(block.contains("return getCloneItemStack(level_, pos_, state_);"), block)
         assertTrue(block.contains("BlockEntity blockEntity = level.getBlockEntity(pos);"), block)
-        assertEquals(1, Regex("getCloneItemStack\\(LevelReader level, BlockPos pos, BlockState state\\)").findAll(block).count(), block)
-        assertEquals(1, Regex("getCloneItemStack\\(BlockState state_?, HitResult target, LevelReader level_?, BlockPos pos_?, Player player\\)").findAll(block).count(), block)
+        assertFalse(block.contains("ItemStack stack = new ItemStack(this);"), block)
         assertFalse(block.contains("@SuppressWarnings"), block)
         assertTrue(renderEvents.contains("import com.example.client.render.entity.DeepOneRenderer;"), renderEvents)
         assertTrue(renderEvents.contains("DeepOneRenderer deepOneRenderer = (DeepOneRenderer) Minecraft.getInstance().getEntityRenderDispatcher().renderers.get(ExampleEntities.DEEP_ONE.get());"), renderEvents)
@@ -539,14 +528,8 @@
         StructuralRefactorPass().apply(projectDir)
         val source = tempDir.resolve("src/main/java/com/example/PotionFactory.java").readText()
 
-        for (potion in listOf("AWKWARD", "WATER")) {
-            val factory = Regex(
-                """net\.minecraft\.Util\.make\(new ItemStack\(Items\.POTION\),\s*modPorterPotionStack\d*\s*->\s*""" +
-                    """modPorterPotionStack\d*\.update\(DataComponents\.POTION_CONTENTS,\s*PotionContents\.EMPTY,\s*""" +
-                    """Potions\.$potion,\s*PotionContents::withPotion\)\)"""
-            )
-            assertTrue(factory.containsMatchIn(source), source)
-        }
+        assertTrue(source.contains("net.minecraft.Util.make(new ItemStack(Items.POTION), modporterStack -> modporterStack.set(DataComponents.POTION_CONTENTS, new PotionContents(Potions.AWKWARD)))"), source)
+        assertTrue(source.contains("net.minecraft.Util.make(new ItemStack(Items.POTION), modporterStack -> modporterStack.set(DataComponents.POTION_CONTENTS, new PotionContents(Potions.WATER)))"), source)
     }
 
     @Test

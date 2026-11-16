@@ -4875,6 +4875,24 @@ internal fun StructuralRefactorPass.migrateDeferredHolderGenericsSource(
             Regex("""DeferredHolder\s*<\s*${Regex.escape(itemSubtype)}\s*,\s*${Regex.escape(itemSubtype)}\s*>""")
         ) { "DeferredHolder<Item, $itemSubtype>" }
     }
+    // the registry slot of a holder of a type variable comes from its bound where the holder is
+    // written (another method's `T` may be bounded by something else): a Block bound holds a block,
+    // a type-variable bound (`<R, T extends R>`) is the registry type itself
+    if (Regex("""\bextends\s+[A-Za-z_$][\w$.]*\s*[>,&]""").containsMatchIn(maskJavaCommentsAndLiterals(result))) {
+        val scopes = JavaTypeParameterScopes(result)
+        replaceExecutable(
+            Regex("""DeferredHolder\s*<\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*>""")
+        ) { match ->
+            val (first, typeParameter) = match.destructured
+            val bound = scopes.boundOf(typeParameter, match.range.first)?.substringBefore('<')?.trim()
+            when {
+                bound == null -> match.value
+                bound.substringAfterLast('.') == "Block" && (first == "Item" || first == typeParameter) -> "DeferredHolder<Block, $typeParameter>"
+                first == typeParameter && scopes.isTypeVariable(bound, match.range.first) -> "DeferredHolder<$bound, $typeParameter>"
+                else -> match.value
+            }
+        }
+    }
     if (maskJavaCommentsAndLiterals(result).contains("DeferredRegister<Item>")) {
         replaceExecutable(Regex(
             """(?m)^([ \t]*)(?!@SuppressWarnings\("unchecked"\)\s*\r?\n)\s*private\s+static\s+<V\s+extends\s+Item>\s+DeferredHolder\s*<\s*V\s*,\s*V\s*>\s+register\("""
@@ -5609,7 +5627,7 @@ internal fun StructuralRefactorPass.makeSubscribeEventMethodsStatic(body: String
 /**
  * Clean up @EventBusSubscriber annotations:
  * 1. Remove @EventBusSubscriber from classes without any @SubscribeEvent methods
- * 2. Remove the deprecated explicit game-bus parameter from @EventBusSubscriber
+ * 2. Remove deprecated bus= parameter from @EventBusSubscriber
  */
 internal fun StructuralRefactorPass.cleanupEventBusSubscriber(projectDir: Path, dryRun: Boolean): List<Change> {
     val changes = mutableListOf<Change>()
@@ -5635,11 +5653,7 @@ internal fun StructuralRefactorPass.cleanupEventBusSubscriber(projectDir: Path, 
                 text = removeExecutableImport(text, "net.neoforged.fml.common.EventBusSubscriber")
                 text = removeExecutableImport(text, "net.neoforged.fml.common.Mod.EventBusSubscriber")
             } else {
-                text = removeExecutableEventBusSubscriberForgeBusParameter(text)
-                if (!Regex("""\bBus\s*\.""").containsMatchIn(maskJavaCommentsAndLiterals(text))) {
-                    text = removeExecutableImport(text, "net.neoforged.fml.common.EventBusSubscriber.Bus")
-                    text = removeExecutableImport(text, "net.neoforged.fml.common.Mod.EventBusSubscriber.Bus")
-                }
+                text = removeExecutableEventBusSubscriberModBusParameter(text)
             }
 
             if (text != original) {
@@ -5653,7 +5667,7 @@ internal fun StructuralRefactorPass.cleanupEventBusSubscriber(projectDir: Path, 
                         "Remove @EventBusSubscriber from class without @SubscribeEvent methods"
                     else
                         "Remove deprecated bus= parameter from @EventBusSubscriber",
-                    before = "@EventBusSubscriber(..., bus = Bus.FORGE)",
+                    before = "@EventBusSubscriber(..., bus = Bus.MOD)",
                     after = if (!hasSubscribeEvent) "(removed)" else "@EventBusSubscriber(...)",
                     confidence = Confidence.HIGH,
                     ruleId = "struct-cleanup-eventbus-subscriber"
@@ -5664,28 +5678,20 @@ internal fun StructuralRefactorPass.cleanupEventBusSubscriber(projectDir: Path, 
     return changes
 }
 
-internal fun StructuralRefactorPass.removeExecutableEventBusSubscriberForgeBusParameter(source: String): String {
-    var result = source
-    executableEventBusSubscriberAnnotationRanges(source).asReversed().forEach { range ->
-        val annotation = result.substring(range.first, range.last + 1)
-        val busExpression = """(?:(?:Mod\.)?EventBusSubscriber\.)?Bus\.(?:FORGE|GAME)"""
-        var migrated = replaceExecutableRegex(
-            annotation,
-            Regex("""bus\s*=\s*$busExpression\s*,\s*""")
-        ) { "" }
-        migrated = replaceExecutableRegex(
-            migrated,
-            Regex(""",\s*bus\s*=\s*$busExpression""")
-        ) { "" }
-        migrated = replaceExecutableRegex(
-            migrated,
-            Regex("""\(\s*bus\s*=\s*$busExpression\s*\)""")
-        ) { "" }
-        if (migrated != annotation) {
-            result = result.replaceRange(range, migrated)
-        }
-    }
-    return result
+internal fun StructuralRefactorPass.removeExecutableEventBusSubscriberModBusParameter(source: String): String {
+    val busExpression = """(?:EventBusSubscriber|Mod\.EventBusSubscriber)\.Bus\.MOD"""
+    var result = replaceExecutableRegex(
+        source,
+        Regex("""bus\s*=\s*$busExpression\s*,\s*""")
+    ) { "" }
+    result = replaceExecutableRegex(
+        result,
+        Regex(""",\s*bus\s*=\s*$busExpression""")
+    ) { "" }
+    return replaceExecutableRegex(
+        result,
+        Regex("""\(\s*bus\s*=\s*$busExpression\s*\)""")
+    ) { "" }
 }
 
 /**

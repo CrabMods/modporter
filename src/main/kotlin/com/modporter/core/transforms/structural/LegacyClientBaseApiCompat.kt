@@ -4,6 +4,7 @@ import com.github.javaparser.JavaParser
 import com.github.javaparser.ParserConfiguration
 import com.github.javaparser.ast.CompilationUnit
 import com.github.javaparser.ast.Node
+import com.github.javaparser.ast.body.CallableDeclaration
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
 import com.github.javaparser.ast.body.ConstructorDeclaration
 import com.github.javaparser.ast.body.MethodDeclaration
@@ -36,8 +37,8 @@ internal fun StructuralRefactorPass.migrateLegacyClientBaseApiCompat(
     var result = source
     result = migrateAbstractSimiWidgetScrollOverride(result)
     result = migrateInheritedMinecraftTooltipContext(result)
-    result = migrateShoppingListTooltipLevel(result)
-    result = migrateDeployerConnectionCookie(result)
+    result = migrateTooltipContextLevelArguments(result)
+    result = migrateLegacyGamePacketListenerConstructors(result)
     result = migrateDelegatingRegistryConstructor(result)
     result = migrateProviderExtendedOverlayCall(result)
     result = migrateMinecraftBlueprintRecipeProvider(result)
@@ -72,21 +73,13 @@ private const val MOD_CONTAINER = "net.neoforged.fml.ModContainer"
 private const val MOD_LOADING_CONTEXT = "net.neoforged.fml.ModLoadingContext"
 private const val ITEM_TOOLTIP_CONTEXT =
     "net.minecraft.world.item.Item.TooltipContext"
-private const val LEVEL_ACCESSOR = "net.minecraft.world.level.LevelAccessor"
-private const val BLOCK_POS = "net.minecraft.core.BlockPos"
-private const val FAKE_PLAYER =
-    "net.neoforged.neoforge.common.util.FakePlayer"
+private const val TOOLTIP_CONTEXT_BINARY = "net.minecraft.world.item.Item\$TooltipContext"
+private const val LEVEL_BINARY = "net.minecraft.world.level.Level"
 private const val SERVER_GAME_PACKET_LISTENER =
     "net.minecraft.server.network.ServerGamePacketListenerImpl"
-private const val MINECRAFT_SERVER = "net.minecraft.server.MinecraftServer"
 private const val SERVER_PLAYER = "net.minecraft.server.level.ServerPlayer"
-private const val CONNECTION = "net.minecraft.network.Connection"
 private const val COMMON_LISTENER_COOKIE =
     "net.minecraft.server.network.CommonListenerCookie"
-private const val SHOPPING_LIST_PACKAGE =
-    "com.simibubi.create.content.logistics.tableCloth"
-private const val DEPLOYER_PACKAGE =
-    "com.simibubi.create.content.kinetics.deployer"
 
 private data class ParsedClientBaseSource(
     val parser: JavaParser,
@@ -196,168 +189,160 @@ private fun StructuralRefactorPass.migrateInheritedMinecraftTooltipContext(
     }
 }
 
-private fun StructuralRefactorPass.migrateShoppingListTooltipLevel(
+/**
+ * 1.21.1 replaced the nullable `Level` that item tooltip hooks received with `Item.TooltipContext`,
+ * whose `level()` is that nullable level. A tooltip-context parameter that the source still passes
+ * to a project method whose only applicable overload takes a `Level` (or a platform supertype of
+ * it) is passed as `context.level()`. The receiver type and every overload come from the project's
+ * declarations; an overload that could accept the context itself leaves the call unchanged.
+ */
+private fun StructuralRefactorPass.migrateTooltipContextLevelArguments(
     source: String
 ): String {
-    if (!source.contains("class ShoppingListItem") ||
-        !source.contains("bakeEntries(") ||
-        !source.contains("Item.TooltipContext")
-    ) {
-        return source
-    }
+    if (!source.contains("TooltipContext")) return source
     val parsed = parseClientBaseSource(source) ?: return source
-    if (parsed.unit.packageDeclaration.map { it.nameAsString }.orElse("") !=
-        SHOPPING_LIST_PACKAGE
-    ) {
-        return source
-    }
     val typing = SourceValueTypes(this, source)
-    val owner = parsed.unit.findAll(ClassOrInterfaceDeclaration::class.java)
-        .singleOrNull {
-            it.nameAsString == "ShoppingListItem" &&
-                it.parentNode.orElse(null) === parsed.unit
-        } ?: return source
-    val listType = parsed.unit.findAll(RecordDeclaration::class.java)
-        .singleOrNull {
-            it.nameAsString == "ShoppingList" &&
-                it.findAncestor(ClassOrInterfaceDeclaration::class.java)
-                    .orElse(null) === owner
-        } ?: return source
-    val bakeEntries = listType.getMethodsByName("bakeEntries")
-        .singleOrNull {
-            it.parameters.size == 2 &&
-                typing.isTypeName(
-                    it.parameters[0].typeAsString,
-                    LEVEL_ACCESSOR
-                ) &&
-                typing.isTypeName(
-                    it.parameters[1].typeAsString,
-                    BLOCK_POS
-                )
-        } ?: return source
-    if (bakeEntries.type.isVoidType) return source
-    val append = owner.getMethodsByName("appendHoverText")
-        .singleOrNull {
-            it.annotations.any { annotation ->
-                annotation.nameAsString == "Override"
-            } &&
-                it.parameters.size == 4 &&
-                typing.isTypeName(
-                    it.parameters[1].typeAsString,
-                    ITEM_TOOLTIP_CONTEXT
-                )
-        } ?: return source
-    val contextName = append.parameters[1].nameAsString
-    LexicalPreservingPrinter.setup(parsed.unit)
-    var changed = false
-    for (call in append.findAll(MethodCallExpr::class.java)) {
-        if (call.nameAsString != "bakeEntries" ||
-            call.arguments.size != 2 ||
-            call.arguments[0] !is NameExpr ||
-            call.arguments[0].asNameExpr().nameAsString != contextName ||
-            call.arguments[1] !is NullLiteralExpr
-        ) {
-            continue
+    val declarations = projectSourceDeclarations
+    val edits = mutableListOf<Pair<IntRange, String>>()
+    for (callable in parsed.unit.findAll(CallableDeclaration::class.java)) {
+        val contexts = callable.parameters
+            .filter { typing.isTypeName(it.typeAsString, ITEM_TOOLTIP_CONTEXT) }
+            .map { it.nameAsString }
+            .toSet()
+        if (contexts.isEmpty()) continue
+        for (call in callable.findAll(MethodCallExpr::class.java)) {
+            val positions = call.arguments.indices.filter { index ->
+                val argument = call.arguments[index] as? NameExpr ?: return@filter false
+                argument.nameAsString in contexts &&
+                    !tooltipContextShadowed(argument, callable)
+            }
+            val index = positions.singleOrNull() ?: continue
+            if (!projectCallTakesLevelAt(call, index, declarations)) continue
+            val argument = call.arguments[index]
+            edits += (parsed.range(argument) ?: continue) to "${argument}.level()"
         }
-        val receiver = call.scope.orElse(null) as? NameExpr ?: continue
-        val declaredList = append.findAll(VariableDeclarator::class.java)
-            .singleOrNull {
-                it.nameAsString == receiver.nameAsString &&
-                    typing.isTypeName(
-                        it.typeAsString,
-                        "$SHOPPING_LIST_PACKAGE.ShoppingListItem.ShoppingList"
-                    )
-            } ?: continue
-        if (!declaredList.initializer.isPresent) continue
-        call.setArgument(
-            0,
-            MethodCallExpr(NameExpr(contextName), "level")
-        )
-        changed = true
     }
-    return if (changed) LexicalPreservingPrinter.print(parsed.unit) else source
+    return applyStringEdits(source, edits.distinctBy { it.first })
 }
 
-private fun StructuralRefactorPass.migrateDeployerConnectionCookie(
+/** A lambda parameter or local between [use] and [callable] that re-declares the name. */
+private fun tooltipContextShadowed(use: NameExpr, callable: CallableDeclaration<*>): Boolean {
+    var current: Node? = use.parentNode.orElse(null)
+    while (current != null && current !== callable) {
+        if (current is LambdaExpr && current.parameters.any { it.nameAsString == use.nameAsString }) {
+            return true
+        }
+        current = current.parentNode.orElse(null)
+    }
+    return callable.findAll(VariableDeclarator::class.java).any { it.nameAsString == use.nameAsString }
+}
+
+private fun projectCallTakesLevelAt(
+    call: MethodCallExpr,
+    index: Int,
+    declarations: ProjectSourceDeclarations
+): Boolean {
+    val receiver = runCatching { declarations.receiverType(call) }.getOrNull() ?: return false
+    if (!declarations.declares(receiver)) return false
+    val candidates = runCatching {
+        declarations.methods(receiver, call.nameAsString, call.arguments.size)
+    }.getOrNull()?.takeIf { it.isNotEmpty() } ?: return false
+    var levelOverloads = 0
+    for (candidate in candidates) {
+        val parameters = candidate.declaration.parameters.map { declarations.resolve(it.type, it) }
+        // only a null literal is decided here: it fits every reference parameter and no primitive
+        val others = call.arguments.indices.filter { it != index }.map { position ->
+            when {
+                call.arguments[position] !is NullLiteralExpr -> null
+                parameters[position] is ProjectSourceDeclarations.TypeRef.Primitive -> false
+                parameters[position] == null -> null
+                else -> true
+            }
+        }
+        if (others.any { it == false }) continue
+        val parameter = parameters[index] as? ProjectSourceDeclarations.TypeRef.Named ?: return false
+        if (acceptsPlatformValue(TOOLTIP_CONTEXT_BINARY, parameter.name, declarations) != false) return false
+        when (acceptsPlatformValue(LEVEL_BINARY, parameter.name, declarations)) {
+            true -> if (others.all { it == true }) levelOverloads++ else return false
+            false -> continue
+            null -> return false
+        }
+    }
+    return levelOverloads == 1
+}
+
+/** Whether a platform value of [binary] is assignable to [parameter]; null when it cannot be decided. */
+private fun acceptsPlatformValue(
+    binary: String,
+    parameter: String,
+    declarations: ProjectSourceDeclarations
+): Boolean? {
+    if (parameter == "java.lang.Object") return true
+    if (declarations.declares(parameter)) return false
+    val target = ProjectSourceDeclarations.platformBinary(parameter) ?: return null
+    return target == binary || com.modporter.mapping.TargetMembers.inheritsFrom(binary, target)
+}
+
+/**
+ * A `ServerGamePacketListenerImpl` subclass constructor that still calls the 1.20.1
+ * `(MinecraftServer, Connection, ServerPlayer)` super constructor gains the 1.21.1
+ * `CommonListenerCookie` argument. The 1.21.1 member table lists only the four-argument
+ * constructor, and NeoForge's own `FakePlayer.FakePlayerNetHandler` builds the cookie for a
+ * listener created outside the configuration phase as
+ * `CommonListenerCookie.createInitial(player.getGameProfile(), false)`; the player is the
+ * constructor's own `ServerPlayer` parameter passed in the player slot.
+ */
+private fun StructuralRefactorPass.migrateLegacyGamePacketListenerConstructors(
     source: String
 ): String {
-    if (!source.contains("class DeployerFakePlayer") ||
-        !source.contains("class FakePlayNetHandler") ||
-        !source.contains("ServerGamePacketListenerImpl")
-    ) {
+    if (!source.contains("ServerGamePacketListenerImpl") || !source.contains("super(")) {
         return source
     }
+    if (!gamePacketListenerTakesCookie()) return source
     val parsed = parseClientBaseSource(source) ?: return source
-    if (parsed.unit.packageDeclaration.map { it.nameAsString }.orElse("") !=
-        DEPLOYER_PACKAGE
-    ) {
-        return source
-    }
     val typing = SourceValueTypes(this, source)
-    val owner = parsed.unit.findAll(ClassOrInterfaceDeclaration::class.java)
-        .singleOrNull {
-            it.nameAsString == "DeployerFakePlayer" &&
-                it.parentNode.orElse(null) === parsed.unit &&
-                it.extendedTypes.singleOrNull()?.let { parent ->
-                    typing.isTypeName(parent.nameWithScope, FAKE_PLAYER)
-                } == true
-        } ?: return source
-    val networkManager = owner.fields
-        .flatMap { it.variables }
-        .singleOrNull {
-            it.nameAsString == "NETWORK_MANAGER" &&
-                typing.isTypeName(it.typeAsString, CONNECTION)
-        } ?: return source
-    val handler = owner.members
-        .filterIsInstance<ClassOrInterfaceDeclaration>()
-        .singleOrNull {
-            it.nameAsString == "FakePlayNetHandler" &&
-                it.extendedTypes.singleOrNull()?.let { parent ->
-                    typing.isTypeName(
-                        parent.nameWithScope,
-                        SERVER_GAME_PACKET_LISTENER
-                    )
-                } == true
-        } ?: return source
-    val constructor = handler.constructors.singleOrNull {
-        it.parameters.size == 2 &&
-            typing.isTypeName(
-                it.parameters[0].typeAsString,
-                MINECRAFT_SERVER
-            ) &&
-            typing.isTypeName(
-                it.parameters[1].typeAsString,
-                SERVER_PLAYER
-            )
-    } ?: return source
-    val invocation = constructor.body.statements.firstOrNull()
-        as? ExplicitConstructorInvocationStmt ?: return source
-    if (invocation.isThis ||
-        invocation.expression.isPresent ||
-        invocation.arguments.size != 3
-    ) {
-        return source
+    val edits = mutableListOf<Pair<IntRange, String>>()
+    for (listener in parsed.unit.findAll(ClassOrInterfaceDeclaration::class.java)) {
+        val parent = listener.extendedTypes.singleOrNull() ?: continue
+        if (!typing.isTypeName(parent.nameWithScope, SERVER_GAME_PACKET_LISTENER)) continue
+        for (constructor in listener.constructors) {
+            val invocation = constructor.body.statements.firstOrNull()
+                as? ExplicitConstructorInvocationStmt ?: continue
+            if (invocation.isThis ||
+                invocation.expression.isPresent ||
+                invocation.arguments.size != 3
+            ) {
+                continue
+            }
+            val player = invocation.arguments[2] as? NameExpr ?: continue
+            val playerParameter = constructor.parameters.singleOrNull {
+                it.nameAsString == player.nameAsString
+            } ?: continue
+            if (!typing.isTypeName(playerParameter.typeAsString, SERVER_PLAYER)) continue
+            val last = parsed.range(invocation.arguments.last()) ?: continue
+            edits += (last.last + 1..last.last) to
+                ", CommonListenerCookie.createInitial(${player.nameAsString}.getGameProfile(), false)"
+        }
     }
-    val serverName = constructor.parameters[0].nameAsString
-    val playerName = constructor.parameters[1].nameAsString
-    val arguments = invocation.arguments
-    if ((arguments[0] as? NameExpr)?.nameAsString != serverName ||
-        (arguments[1] as? NameExpr)?.nameAsString !=
-        networkManager.nameAsString ||
-        (arguments[2] as? NameExpr)?.nameAsString != playerName
-    ) {
-        return source
-    }
-    val cookie = parsed.parser.parseExpression<Expression>(
-        "CommonListenerCookie.createInitial(" +
-            "$playerName.getGameProfile(), false)"
-    ).result.orElse(null) ?: return source
-    LexicalPreservingPrinter.setup(parsed.unit)
-    invocation.arguments.add(cookie)
-    return addExecutableImportIfMissing(
-        LexicalPreservingPrinter.print(parsed.unit),
-        COMMON_LISTENER_COOKIE
+    if (edits.isEmpty()) return source
+    return addExecutableImportIfMissing(applyStringEdits(source, edits), COMMON_LISTENER_COOKIE)
+}
+
+private fun gamePacketListenerTakesCookie(): Boolean {
+    val constructors = com.modporter.mapping.TargetMembers.methodDescriptors(
+        SERVER_GAME_PACKET_LISTENER,
+        "<init>"
     )
+    return constructors.isNotEmpty() && constructors.all {
+        com.modporter.mapping.TargetMembers.parameterTypes(it) == listOf(
+            "Lnet/minecraft/server/MinecraftServer;",
+            "Lnet/minecraft/network/Connection;",
+            "Lnet/minecraft/server/level/ServerPlayer;",
+            "Lnet/minecraft/server/network/CommonListenerCookie;"
+        )
+    } && com.modporter.mapping.TargetMembers.methodDescriptors(COMMON_LISTENER_COOKIE, "createInitial").any {
+        com.modporter.mapping.TargetMembers.parameterTypes(it) == listOf("Lcom/mojang/authlib/GameProfile;", "Z")
+    }
 }
 
 private fun StructuralRefactorPass.migrateDelegatingRegistryConstructor(

@@ -52,16 +52,16 @@ class FlywheelJarJarRuntimeEvidenceTest {
         )
         assertEquals(
             mapOf("neoforge-21.1.230.jar" to
-                "1c40cad92daf78fff5896c2a7b45032ae05782dc2c211e41e4194be0494c5a4e"),
+                "c82bc3684dc087b56b0df94236fb0389918cb73aaebfec48747263e46b86ba97"),
             pins.rootEntryPayloadSha256
         )
         assertEquals(
             listOf(
-                "neoforge-21.1.230.jar|111b1b3136a1fdee48654cbf8d1e5062ffe75875e83b4d7f69e0a1366a85d062|" +
+                "neoforge-21.1.230.jar|e0dddb0f5b5aa37afca84d03b45abe4926699e87e6e916c0edf645cfa774888c|" +
                     "io.github.llamalad7:mixinextras-neoforge|[0.5.3,)|0.5.3|" +
                     "META-INF/jarjar/mixinextras-neoforge-0.5.3.jar|" +
                     "9822e773bd9f42d36ed53ea3d67486207291747a7bfacc29beeb92040721bc9b|false",
-                "neoforge-21.1.230.jar|111b1b3136a1fdee48654cbf8d1e5062ffe75875e83b4d7f69e0a1366a85d062|" +
+                "neoforge-21.1.230.jar|e0dddb0f5b5aa37afca84d03b45abe4926699e87e6e916c0edf645cfa774888c|" +
                     "net.neoforged:neoforge-coremods|[21.1.230,)|21.1.230|" +
                     "META-INF/jarjar/net.neoforged.neoforge-coremods-21.1.230.jar|" +
                     "43bff7bef65a31ee634f9c112fc67e75a1fa0c19763db6b584d71a14ec1f77d9|false",

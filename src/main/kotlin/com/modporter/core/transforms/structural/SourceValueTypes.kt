@@ -375,6 +375,10 @@ internal class SourceValueTypes(private val pass: StructuralRefactorPass, privat
                                 receiver.arguments.singleOrNull()?.readable()
                             receiver?.name == "java.util.Map" && name == "get" && expr.arguments.size == 1 ->
                                 receiver.arguments.getOrNull(1)?.readable()
+                            // A registry holder's get() returns its entry type: the last type argument
+                            // (DeferredHolder<R, T>, ItemEntry<T>, RegistryObject<T>, Supplier<T>, ...).
+                            receiver?.name in registryHolderTypes && name == "get" && expr.arguments.isEmpty() ->
+                                receiver?.arguments?.lastOrNull()?.readable()
                             receiver?.name in iterableTypes && name == "get" && expr.arguments.size == 1 ->
                                 receiver?.arguments?.singleOrNull()?.readable()
                             receiver?.name in iterableTypes && name == "stream" && expr.arguments.isEmpty() -> receiver?.let { Type("java.util.stream.Stream", it.arguments) }
@@ -484,6 +488,18 @@ internal class SourceValueTypes(private val pass: StructuralRefactorPass, privat
         )
         private val iterableTypes = setOf("java.util.List", "java.util.Set", "java.util.Collection", "java.util.ArrayList",
             "java.lang.Iterable", "java.util.stream.Stream", "com.google.common.collect.ImmutableList", "net.minecraft.core.NonNullList")
+        private val registryHolderTypes = setOf(
+            "com.tterrag.registrate.util.entry.ItemEntry",
+            "com.tterrag.registrate.util.entry.BlockEntry",
+            "com.tterrag.registrate.util.entry.ItemProviderEntry",
+            "com.tterrag.registrate.util.entry.RegistryEntry",
+            "net.neoforged.neoforge.registries.DeferredHolder",
+            "net.neoforged.neoforge.registries.DeferredItem",
+            "net.neoforged.neoforge.registries.DeferredBlock",
+            "net.minecraftforge.registries.RegistryObject",
+            "java.util.function.Supplier",
+            "com.tterrag.registrate.util.nullness.NonNullSupplier"
+        )
         private val primitiveTypes = setOf("boolean", "byte", "char", "double", "float", "int", "long", "short", "void")
         private val boxedTypes = mapOf(
             "boolean" to "java.lang.Boolean",

@@ -30,6 +30,7 @@
             import net.minecraft.world.level.storage.loot.functions.ApplyBonusCount;
             import net.minecraft.world.level.storage.loot.predicates.BonusLevelTableCondition;
             import net.minecraft.world.level.storage.loot.predicates.MatchTool;
+
             import java.util.Set;
 
             public class BlockLootSurface extends BlockLootSubProvider {
@@ -987,9 +988,8 @@
         assertTrue(container.contains("public void setCustomName(net.minecraft.network.chat.Component name)"))
         assertTrue(container.contains("DataComponents.CUSTOM_NAME"))
         assertTrue(plainFurnace.contains("public void setCustomName(net.minecraft.network.chat.Component name)"))
-        assertTrue(capability.contains("import net.minecraft.core.HolderLookup;"), capability)
-        assertTrue(capability.contains("CompoundTag serializeNBT(HolderLookup.Provider registries)"), capability)
-        assertTrue(capability.contains("void deserializeNBT(HolderLookup.Provider registries, CompoundTag tag)"), capability)
+        assertTrue(capability.contains("CompoundTag serializeNBT(net.minecraft.core.HolderLookup.Provider provider)"))
+        assertTrue(capability.contains("void deserializeNBT(net.minecraft.core.HolderLookup.Provider provider, CompoundTag tag)"))
         assertTrue(mushroom.contains("super(ModFeatures.BIG_MUSHROOM, properties);"))
         assertTrue(sign.contains("private final WoodType type;"))
         assertTrue(sign.contains("public com.mojang.serialization.MapCodec<WallSignBlock> codec()"), sign)
@@ -1170,8 +1170,8 @@
         assertTrue(!legacySpriteSourceProviderSurface.contains("addSources()"), legacySpriteSourceProviderSurface)
         assertTrue(legacyDataGeneratorSurface.contains("new LegacySpriteSourceProviderSurface(output, provider, helper)"), legacyDataGeneratorSurface)
         assertTrue(!legacyDataGeneratorSurface.contains("new LegacySpriteSourceProviderSurface(output, helper)"), legacyDataGeneratorSurface)
-        assertTrue(legacyDataGeneratorSurface.contains("new LegacyRecipeGenerator(output, lookupProvider)"), legacyDataGeneratorSurface)
-        assertTrue(legacyDataGeneratorSurface.contains("(DataProvider.Factory<LegacyRecipeGenerator>) modporterOutput -> new LegacyRecipeGenerator(modporterOutput, lookupProvider)"), legacyDataGeneratorSurface)
+        assertTrue(legacyDataGeneratorSurface.contains("new LegacyRecipeGenerator(output, provider)"), legacyDataGeneratorSurface)
+        assertTrue(legacyDataGeneratorSurface.contains("(DataProvider.Factory<LegacyRecipeGenerator>) output -> new LegacyRecipeGenerator(output, provider)"), legacyDataGeneratorSurface)
         assertTrue(legacyRecipeBase.contains("public LegacyRecipeBase(PackOutput output, CompletableFuture<HolderLookup.Provider> lookupProvider)"), legacyRecipeBase)
         assertTrue(legacyRecipeBase.contains("super(output, lookupProvider);"), legacyRecipeBase)
         assertTrue(legacyRecipeBase.contains("return item.getDefaultInstance().getMaxDamage();"), legacyRecipeBase)

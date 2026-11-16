@@ -1,0 +1,122 @@
+{
+  "description": "Curated vanilla member moves between Minecraft 1.20.1 and 1.21.1 that Mixin selectors and invokers follow. Every claim is checked against the real 1.21.1 and 1.20.1 game jars by scripts/mixin_target_facts.py verify.",
+  "enclosingMoves": [
+    {
+      "description": "Structure-block test lookups moved from TestCommand.runTest (GameTestRegistry.getTestFunction, throwing when absent) to TestCommand.createGameTestInfo (GameTestRegistry.findTestFunction, an Optional of the same TestFunction).",
+      "owner": "net.minecraft.gametest.framework.TestCommand",
+      "legacyMethod": "runTest(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;Lnet/minecraft/gametest/framework/MultipleTestTracker;)V",
+      "nativeMethod": "createGameTestInfo(Lnet/minecraft/core/BlockPos;Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/gametest/framework/RetryOptions;)Ljava/util/Optional;",
+      "legacyInvoke": "Lnet/minecraft/gametest/framework/GameTestRegistry;getTestFunction(Ljava/lang/String;)Lnet/minecraft/gametest/framework/TestFunction;",
+      "nativeInvoke": "Lnet/minecraft/gametest/framework/GameTestRegistry;findTestFunction(Ljava/lang/String;)Ljava/util/Optional;",
+      "nativeInvokeOptionalOf": "net.minecraft.gametest.framework.TestFunction",
+      "invokeStatic": true
+    }
+  ],
+  "parameterInsertions": [
+    {
+      "description": "DispenserBlock.getDispenseMethod gained a leading Level that its code only reads through Level.enabledFeatures(); ServerLevel answers that from the server's WorldData, so every level of the running server supplies the same argument.",
+      "owner": "net.minecraft.world.level.block.DispenserBlock",
+      "name": "getDispenseMethod",
+      "legacyDescriptor": "(Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/core/dispenser/DispenseItemBehavior;",
+      "nativeDescriptor": "(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/core/dispenser/DispenseItemBehavior;",
+      "insertedIndex": 0,
+      "insertedName": "level",
+      "parameterReads": [
+        "Lnet/minecraft/world/level/Level;enabledFeatures()Lnet/minecraft/world/flag/FeatureFlagSet;"
+      ],
+      "serverImplementations": [
+        {
+          "owner": "net.minecraft.server.level.ServerLevel",
+          "method": "enabledFeatures()Lnet/minecraft/world/flag/FeatureFlagSet;",
+          "invokes": [
+            "Lnet/minecraft/server/MinecraftServer;getWorldData()Lnet/minecraft/world/level/storage/WorldData;",
+            "Lnet/minecraft/world/level/storage/WorldData;enabledFeatures()Lnet/minecraft/world/flag/FeatureFlagSet;"
+          ]
+        }
+      ],
+      "anyServerLevel": true
+    }
+  ],
+  "injectorMoves": [
+    {
+      "description": "Entity.canEnterPose(Pose) is gone; its pose-fit check (Level.noCollision on the pose's box) is Player.canPlayerFitWithinBlocksAndEntitiesWhen(Pose). Every 1.20.1 call of canEnterPose came from Player code (Player.updatePlayerPose, LocalPlayer.aiStep), so an injector into it only ever ran for players.",
+      "legacyOwner": "net.minecraft.world.entity.Entity",
+      "legacyMethod": "canEnterPose(Lnet/minecraft/world/entity/Pose;)Z",
+      "nativeOwner": "net.minecraft.world.entity.player.Player",
+      "nativeMethod": "canPlayerFitWithinBlocksAndEntitiesWhen(Lnet/minecraft/world/entity/Pose;)Z",
+      "sharedInvokes": [
+        "Lnet/minecraft/world/level/Level;noCollision(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/phys/AABB;)Z"
+      ]
+    }
+  ],
+  "staticFieldMethods": [
+    {
+      "description": "The static HAS_SILK_TOUCH condition became the instance method hasSilkTouch(), which builds the same MatchTool predicate (Silk Touch, level at least 1) through the provider's enchantment registry.",
+      "owner": "net.minecraft.data.loot.BlockLootSubProvider",
+      "legacyField": "HAS_SILK_TOUCH",
+      "fieldDescriptor": "Lnet/minecraft/world/level/storage/loot/predicates/LootItemCondition$Builder;",
+      "nativeMethod": "hasSilkTouch()Lnet/minecraft/world/level/storage/loot/predicates/LootItemCondition$Builder;",
+      "sharedInvokes": [
+        "Lnet/minecraft/advancements/critereon/ItemPredicate$Builder;item()Lnet/minecraft/advancements/critereon/ItemPredicate$Builder;",
+        "Lnet/minecraft/advancements/critereon/MinMaxBounds$Ints;atLeast(I)Lnet/minecraft/advancements/critereon/MinMaxBounds$Ints;",
+        "Lnet/minecraft/world/level/storage/loot/predicates/MatchTool;toolMatches(Lnet/minecraft/advancements/critereon/ItemPredicate$Builder;)Lnet/minecraft/world/level/storage/loot/predicates/LootItemCondition$Builder;"
+      ],
+      "sharedFieldReads": [
+        "Lnet/minecraft/world/item/enchantment/Enchantments;SILK_TOUCH"
+      ]
+    }
+  ],
+  "invokerFieldMoves": [
+    {
+      "description": "AbstractProjectileDispenseBehavior.getPower() became the power of the ProjectileDispenseBehavior's captured DispenseConfig (the value its execute shoots with).",
+      "legacyOwner": "net.minecraft.core.dispenser.AbstractProjectileDispenseBehavior",
+      "nativeOwner": "net.minecraft.core.dispenser.ProjectileDispenseBehavior",
+      "legacyMethod": "getPower()F",
+      "nativeField": "dispenseConfig",
+      "nativeFieldDescriptor": "Lnet/minecraft/world/item/ProjectileItem$DispenseConfig;",
+      "nativeCall": "power()F",
+      "legacyWitness": "execute(Lnet/minecraft/core/BlockSource;Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/item/ItemStack;",
+      "nativeWitness": "execute(Lnet/minecraft/core/dispenser/BlockSource;Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/item/ItemStack;"
+    },
+    {
+      "description": "AbstractProjectileDispenseBehavior.getUncertainty() became the uncertainty of the captured DispenseConfig.",
+      "legacyOwner": "net.minecraft.core.dispenser.AbstractProjectileDispenseBehavior",
+      "nativeOwner": "net.minecraft.core.dispenser.ProjectileDispenseBehavior",
+      "legacyMethod": "getUncertainty()F",
+      "nativeField": "dispenseConfig",
+      "nativeFieldDescriptor": "Lnet/minecraft/world/item/ProjectileItem$DispenseConfig;",
+      "nativeCall": "uncertainty()F",
+      "legacyWitness": "execute(Lnet/minecraft/core/BlockSource;Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/item/ItemStack;",
+      "nativeWitness": "execute(Lnet/minecraft/core/dispenser/BlockSource;Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/item/ItemStack;"
+    },
+    {
+      "description": "AbstractProjectileDispenseBehavior.getProjectile(Level, Position, ItemStack) became the captured ProjectileItem's asProjectile, which also takes the dispensing Direction (fire and wind charges aim with it), so a caller must supply a Direction it already has.",
+      "legacyOwner": "net.minecraft.core.dispenser.AbstractProjectileDispenseBehavior",
+      "nativeOwner": "net.minecraft.core.dispenser.ProjectileDispenseBehavior",
+      "legacyMethod": "getProjectile(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/Position;Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/entity/projectile/Projectile;",
+      "nativeField": "projectileItem",
+      "nativeFieldDescriptor": "Lnet/minecraft/world/item/ProjectileItem;",
+      "nativeCall": "asProjectile(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/Position;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/core/Direction;)Lnet/minecraft/world/entity/projectile/Projectile;",
+      "legacyWitness": "execute(Lnet/minecraft/core/BlockSource;Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/item/ItemStack;",
+      "nativeWitness": "execute(Lnet/minecraft/core/dispenser/BlockSource;Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/item/ItemStack;"
+    }
+  ],
+  "removedStaticHelpers": [
+    {
+      "description": "SuspiciousStewItem.listPotionEffects(stack, consumer) read the stew's effects from NBT; 1.21.1 reads them from the SUSPICIOUS_STEW_EFFECTS component, in list order, as entries creating the same MobEffectInstance (effect, duration).",
+      "owner": "net.minecraft.world.item.SuspiciousStewItem",
+      "legacyMethod": "listPotionEffects(Lnet/minecraft/world/item/ItemStack;Ljava/util/function/Consumer;)V",
+      "witness": "finishUsingItem(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/LivingEntity;)Lnet/minecraft/world/item/ItemStack;",
+      "nativeWitnessInvokes": [
+        "Lnet/minecraft/world/item/ItemStack;getOrDefault(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Ljava/lang/Object;",
+        "Lnet/minecraft/world/item/component/SuspiciousStewEffects;effects()Ljava/util/List;",
+        "Lnet/minecraft/world/item/component/SuspiciousStewEffects$Entry;createEffectInstance()Lnet/minecraft/world/effect/MobEffectInstance;"
+      ],
+      "component": "net.minecraft.core.component.DataComponents.SUSPICIOUS_STEW_EFFECTS",
+      "componentDefault": "net.minecraft.world.item.component.SuspiciousStewEffects.EMPTY",
+      "listMethod": "effects",
+      "elementType": "net.minecraft.world.item.component.SuspiciousStewEffects.Entry",
+      "elementValue": "createEffectInstance"
+    }
+  ]
+}

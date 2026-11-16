@@ -1,0 +1,464 @@
+{
+  "source": "sourcesAndCompiledWithNeoForge_761b0b1d71a1d6a735311ca0c21329ca399fa78c_output.jar",
+  "generator": "scripts/mixin_target_facts.py generate",
+  "forwarders": [
+    {
+      "owner": "net.minecraft.client.Camera",
+      "name": "setRotation",
+      "legacyDescriptor": "(FF)V",
+      "extendedDescriptor": "(FFF)V",
+      "extendedParameterNames": [
+        "p_90573_",
+        "p_90574_",
+        "roll"
+      ],
+      "extendedInvokes": [
+        "Lorg/joml/Quaternionf;rotationYXZ(FFF)Lorg/joml/Quaternionf;",
+        "Lorg/joml/Vector3f;rotate(Lorg/joml/Quaternionfc;Lorg/joml/Vector3f;)Lorg/joml/Vector3f;"
+      ]
+    },
+    {
+      "owner": "net.minecraft.client.Minecraft",
+      "name": "reloadResourcePacks",
+      "legacyDescriptor": "()Ljava/util/concurrent/CompletableFuture;",
+      "extendedDescriptor": "(ZLnet/minecraft/client/Minecraft$GameLoadCookie;)Ljava/util/concurrent/CompletableFuture;",
+      "extendedParameterNames": [
+        "p_168020_",
+        "p_299856_"
+      ],
+      "extendedInvokes": [
+        "Ljava/util/concurrent/CompletableFuture;<init>()V",
+        "Lnet/minecraft/Util;backgroundExecutor()Ljava/util/concurrent/ExecutorService;",
+        "Lnet/minecraft/client/Minecraft;setOverlay(Lnet/minecraft/client/gui/screens/Overlay;)V",
+        "Lnet/minecraft/client/ResourceLoadStateTracker;startReload(Lnet/minecraft/client/ResourceLoadStateTracker$ReloadReason;Ljava/util/List;)V",
+        "Lnet/minecraft/client/gui/screens/LoadingOverlay;<init>(Lnet/minecraft/client/Minecraft;Lnet/minecraft/server/packs/resources/ReloadInstance;Ljava/util/function/Consumer;Z)V",
+        "Lnet/minecraft/server/packs/repository/PackRepository;openAllSelected()Ljava/util/List;",
+        "Lnet/minecraft/server/packs/repository/PackRepository;reload()V",
+        "Lnet/minecraft/server/packs/resources/ReloadableResourceManager;createReload(Ljava/util/concurrent/Executor;Ljava/util/concurrent/Executor;Ljava/util/concurrent/CompletableFuture;Ljava/util/List;)Lnet/minecraft/server/packs/resources/ReloadInstance;"
+      ]
+    },
+    {
+      "owner": "net.minecraft.client.Options",
+      "name": "load",
+      "legacyDescriptor": "()V",
+      "extendedDescriptor": "(Z)V",
+      "extendedParameterNames": [
+        "limited"
+      ],
+      "extendedInvokes": [
+        "Lcom/google/common/io/Files;newReader(Ljava/io/File;Ljava/nio/charset/Charset;)Ljava/io/BufferedReader;",
+        "Lcom/mojang/blaze3d/platform/Window;setFramerateLimit(I)V",
+        "Ljava/io/BufferedReader;close()V",
+        "Ljava/io/BufferedReader;lines()Ljava/util/stream/Stream;",
+        "Ljava/io/File;exists()Z",
+        "Ljava/lang/Integer;intValue()I",
+        "Ljava/lang/Throwable;addSuppressed(Ljava/lang/Throwable;)V",
+        "Ljava/util/function/Consumer;accept(Ljava/lang/Object;)V",
+        "Ljava/util/stream/Stream;forEach(Ljava/util/function/Consumer;)V",
+        "Lnet/minecraft/client/KeyMapping;resetMapping()V",
+        "Lnet/minecraft/client/Minecraft;getWindow()Lcom/mojang/blaze3d/platform/Window;",
+        "Lnet/minecraft/client/OptionInstance;get()Ljava/lang/Object;",
+        "Lnet/minecraft/client/OptionInstance;set(Ljava/lang/Object;)V",
+        "Lnet/minecraft/client/Options$2;<init>(Lnet/minecraft/client/Options;Lnet/minecraft/nbt/CompoundTag;)V",
+        "Lnet/minecraft/client/Options;dataFix(Lnet/minecraft/nbt/CompoundTag;)Lnet/minecraft/nbt/CompoundTag;",
+        "Lnet/minecraft/client/Options;isTrue(Ljava/lang/String;)Z",
+        "Lnet/minecraft/nbt/CompoundTag;<init>()V",
+        "Lnet/minecraft/nbt/CompoundTag;contains(Ljava/lang/String;)Z",
+        "Lnet/minecraft/nbt/CompoundTag;getString(Ljava/lang/String;)Ljava/lang/String;",
+        "Lorg/slf4j/Logger;error(Ljava/lang/String;Ljava/lang/Throwable;)V"
+      ]
+    },
+    {
+      "owner": "net.minecraft.client.gui.Gui",
+      "name": "renderSelectedItemName",
+      "legacyDescriptor": "(Lnet/minecraft/client/gui/GuiGraphics;)V",
+      "extendedDescriptor": "(Lnet/minecraft/client/gui/GuiGraphics;I)V",
+      "extendedParameterNames": [
+        "p_283501_",
+        "yShift"
+      ],
+      "extendedInvokes": [
+        "Ljava/lang/Math;max(II)I",
+        "Lnet/minecraft/client/Minecraft;getProfiler()Lnet/minecraft/util/profiling/ProfilerFiller;",
+        "Lnet/minecraft/client/gui/Font;width(Lnet/minecraft/network/chat/FormattedText;)I",
+        "Lnet/minecraft/client/gui/Gui;getFont()Lnet/minecraft/client/gui/Font;",
+        "Lnet/minecraft/client/gui/GuiGraphics;drawStringWithBackdrop(Lnet/minecraft/client/gui/Font;Lnet/minecraft/network/chat/Component;IIII)I",
+        "Lnet/minecraft/client/gui/GuiGraphics;guiHeight()I",
+        "Lnet/minecraft/client/gui/GuiGraphics;guiWidth()I",
+        "Lnet/minecraft/client/multiplayer/MultiPlayerGameMode;canHurtPlayer()Z",
+        "Lnet/minecraft/network/chat/Component;empty()Lnet/minecraft/network/chat/MutableComponent;",
+        "Lnet/minecraft/network/chat/MutableComponent;append(Lnet/minecraft/network/chat/Component;)Lnet/minecraft/network/chat/MutableComponent;",
+        "Lnet/minecraft/network/chat/MutableComponent;withStyle(Ljava/util/function/UnaryOperator;)Lnet/minecraft/network/chat/MutableComponent;",
+        "Lnet/minecraft/network/chat/MutableComponent;withStyle(Lnet/minecraft/ChatFormatting;)Lnet/minecraft/network/chat/MutableComponent;",
+        "Lnet/minecraft/util/FastColor$ARGB32;color(II)I",
+        "Lnet/minecraft/util/profiling/ProfilerFiller;pop()V",
+        "Lnet/minecraft/util/profiling/ProfilerFiller;push(Ljava/lang/String;)V",
+        "Lnet/minecraft/world/item/ItemStack;getHighlightTip(Lnet/minecraft/network/chat/Component;)Lnet/minecraft/network/chat/Component;",
+        "Lnet/minecraft/world/item/ItemStack;getHoverName()Lnet/minecraft/network/chat/Component;",
+        "Lnet/minecraft/world/item/ItemStack;getRarity()Lnet/minecraft/world/item/Rarity;",
+        "Lnet/minecraft/world/item/ItemStack;has(Lnet/minecraft/core/component/DataComponentType;)Z",
+        "Lnet/minecraft/world/item/ItemStack;isEmpty()Z",
+        "Lnet/minecraft/world/item/Rarity;getStyleModifier()Ljava/util/function/UnaryOperator;",
+        "Lnet/neoforged/neoforge/client/extensions/common/IClientItemExtensions;getFont(Lnet/minecraft/world/item/ItemStack;Lnet/neoforged/neoforge/client/extensions/common/IClientItemExtensions$FontContext;)Lnet/minecraft/client/gui/Font;",
+        "Lnet/neoforged/neoforge/client/extensions/common/IClientItemExtensions;of(Lnet/minecraft/world/item/ItemStack;)Lnet/neoforged/neoforge/client/extensions/common/IClientItemExtensions;"
+      ]
+    },
+    {
+      "owner": "net.minecraft.client.gui.GuiGraphics",
+      "name": "renderFakeItem",
+      "legacyDescriptor": "(Lnet/minecraft/world/item/ItemStack;II)V",
+      "extendedDescriptor": "(Lnet/minecraft/world/item/ItemStack;III)V",
+      "extendedParameterNames": [
+        "p_312904_",
+        "p_312257_",
+        "p_312674_",
+        "p_312138_"
+      ],
+      "extendedInvokes": [
+        "Lnet/minecraft/client/gui/GuiGraphics;renderItem(Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/level/Level;Lnet/minecraft/world/item/ItemStack;III)V"
+      ]
+    },
+    {
+      "owner": "net.minecraft.client.gui.screens.inventory.AbstractContainerScreen",
+      "name": "renderSlotHighlight",
+      "legacyDescriptor": "(Lnet/minecraft/client/gui/GuiGraphics;III)V",
+      "extendedDescriptor": "(Lnet/minecraft/client/gui/GuiGraphics;IIII)V",
+      "extendedParameterNames": [
+        "p_283692_",
+        "p_281453_",
+        "p_281915_",
+        "p_283504_",
+        "color"
+      ],
+      "extendedInvokes": [
+        "Lnet/minecraft/client/gui/GuiGraphics;fillGradient(Lnet/minecraft/client/renderer/RenderType;IIIIIII)V",
+        "Lnet/minecraft/client/renderer/RenderType;guiOverlay()Lnet/minecraft/client/renderer/RenderType;"
+      ]
+    },
+    {
+      "owner": "net.minecraft.client.gui.screens.inventory.tooltip.TooltipRenderUtil",
+      "name": "renderTooltipBackground",
+      "legacyDescriptor": "(Lnet/minecraft/client/gui/GuiGraphics;IIIII)V",
+      "extendedDescriptor": "(Lnet/minecraft/client/gui/GuiGraphics;IIIIIIIII)V",
+      "extendedParameterNames": [
+        "p_282666_",
+        "p_281901_",
+        "p_281846_",
+        "p_281559_",
+        "p_283336_",
+        "p_283422_",
+        "backgroundTop",
+        "backgroundBottom",
+        "borderTop",
+        "borderBottom"
+      ],
+      "extendedInvokes": [
+        "Lnet/minecraft/client/gui/screens/inventory/tooltip/TooltipRenderUtil;renderFrameGradient(Lnet/minecraft/client/gui/GuiGraphics;IIIIIII)V",
+        "Lnet/minecraft/client/gui/screens/inventory/tooltip/TooltipRenderUtil;renderHorizontalLine(Lnet/minecraft/client/gui/GuiGraphics;IIIII)V",
+        "Lnet/minecraft/client/gui/screens/inventory/tooltip/TooltipRenderUtil;renderRectangle(Lnet/minecraft/client/gui/GuiGraphics;IIIIIII)V",
+        "Lnet/minecraft/client/gui/screens/inventory/tooltip/TooltipRenderUtil;renderVerticalLineGradient(Lnet/minecraft/client/gui/GuiGraphics;IIIIII)V"
+      ]
+    },
+    {
+      "owner": "net.minecraft.client.model.geom.ModelPart",
+      "name": "render",
+      "legacyDescriptor": "(Lcom/mojang/blaze3d/vertex/PoseStack;Lcom/mojang/blaze3d/vertex/VertexConsumer;II)V",
+      "extendedDescriptor": "(Lcom/mojang/blaze3d/vertex/PoseStack;Lcom/mojang/blaze3d/vertex/VertexConsumer;III)V",
+      "extendedParameterNames": [
+        "p_104307_",
+        "p_104308_",
+        "p_104309_",
+        "p_104310_",
+        "p_350978_"
+      ],
+      "extendedInvokes": [
+        "Lcom/mojang/blaze3d/vertex/PoseStack;last()Lcom/mojang/blaze3d/vertex/PoseStack$Pose;",
+        "Lcom/mojang/blaze3d/vertex/PoseStack;popPose()V",
+        "Lcom/mojang/blaze3d/vertex/PoseStack;pushPose()V",
+        "Ljava/util/Collection;iterator()Ljava/util/Iterator;",
+        "Ljava/util/Iterator;hasNext()Z",
+        "Ljava/util/Iterator;next()Ljava/lang/Object;",
+        "Ljava/util/List;isEmpty()Z",
+        "Ljava/util/Map;isEmpty()Z",
+        "Ljava/util/Map;values()Ljava/util/Collection;",
+        "Lnet/minecraft/client/model/geom/ModelPart;compile(Lcom/mojang/blaze3d/vertex/PoseStack$Pose;Lcom/mojang/blaze3d/vertex/VertexConsumer;III)V",
+        "Lnet/minecraft/client/model/geom/ModelPart;render(Lcom/mojang/blaze3d/vertex/PoseStack;Lcom/mojang/blaze3d/vertex/VertexConsumer;III)V",
+        "Lnet/minecraft/client/model/geom/ModelPart;translateAndRotate(Lcom/mojang/blaze3d/vertex/PoseStack;)V"
+      ]
+    },
+    {
+      "owner": "net.minecraft.client.renderer.entity.layers.HumanoidArmorLayer",
+      "name": "renderArmorPiece",
+      "legacyDescriptor": "(Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/entity/EquipmentSlot;ILnet/minecraft/client/model/HumanoidModel;)V",
+      "extendedDescriptor": "(Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/entity/EquipmentSlot;ILnet/minecraft/client/model/HumanoidModel;FFFFFF)V",
+      "extendedParameterNames": [
+        "p_117119_",
+        "p_117120_",
+        "p_117121_",
+        "p_117122_",
+        "p_117123_",
+        "p_117124_",
+        "limbSwing",
+        "limbSwingAmount",
+        "partialTick",
+        "ageInTicks",
+        "netHeadYaw",
+        "headPitch"
+      ],
+      "extendedInvokes": [
+        "Ljava/util/List;get(I)Ljava/lang/Object;",
+        "Ljava/util/List;size()I",
+        "Lnet/minecraft/client/model/HumanoidModel;copyPropertiesTo(Lnet/minecraft/client/model/HumanoidModel;)V",
+        "Lnet/minecraft/client/renderer/entity/layers/HumanoidArmorLayer;getArmorModelHook(Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/entity/EquipmentSlot;Lnet/minecraft/client/model/HumanoidModel;)Lnet/minecraft/client/model/Model;",
+        "Lnet/minecraft/client/renderer/entity/layers/HumanoidArmorLayer;getParentModel()Lnet/minecraft/client/model/EntityModel;",
+        "Lnet/minecraft/client/renderer/entity/layers/HumanoidArmorLayer;renderGlint(Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;ILnet/minecraft/client/model/Model;)V",
+        "Lnet/minecraft/client/renderer/entity/layers/HumanoidArmorLayer;renderModel(Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;ILnet/minecraft/client/model/Model;ILnet/minecraft/resources/ResourceLocation;)V",
+        "Lnet/minecraft/client/renderer/entity/layers/HumanoidArmorLayer;renderTrim(Lnet/minecraft/core/Holder;Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;ILnet/minecraft/world/item/armortrim/ArmorTrim;Lnet/minecraft/client/model/Model;Z)V",
+        "Lnet/minecraft/client/renderer/entity/layers/HumanoidArmorLayer;setPartVisibility(Lnet/minecraft/client/model/HumanoidModel;Lnet/minecraft/world/entity/EquipmentSlot;)V",
+        "Lnet/minecraft/client/renderer/entity/layers/HumanoidArmorLayer;usesInnerModel(Lnet/minecraft/world/entity/EquipmentSlot;)Z",
+        "Lnet/minecraft/core/Holder;value()Ljava/lang/Object;",
+        "Lnet/minecraft/world/entity/LivingEntity;getItemBySlot(Lnet/minecraft/world/entity/EquipmentSlot;)Lnet/minecraft/world/item/ItemStack;",
+        "Lnet/minecraft/world/item/ArmorItem;getEquipmentSlot()Lnet/minecraft/world/entity/EquipmentSlot;",
+        "Lnet/minecraft/world/item/ArmorItem;getMaterial()Lnet/minecraft/core/Holder;",
+        "Lnet/minecraft/world/item/ArmorMaterial;layers()Ljava/util/List;",
+        "Lnet/minecraft/world/item/ItemStack;get(Lnet/minecraft/core/component/DataComponentType;)Ljava/lang/Object;",
+        "Lnet/minecraft/world/item/ItemStack;getItem()Lnet/minecraft/world/item/Item;",
+        "Lnet/minecraft/world/item/ItemStack;hasFoil()Z",
+        "Lnet/neoforged/neoforge/client/ClientHooks;getArmorTexture(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/ArmorMaterial$Layer;ZLnet/minecraft/world/entity/EquipmentSlot;)Lnet/minecraft/resources/ResourceLocation;",
+        "Lnet/neoforged/neoforge/client/extensions/common/IClientItemExtensions;getArmorLayerTintColor(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/item/ArmorMaterial$Layer;II)I",
+        "Lnet/neoforged/neoforge/client/extensions/common/IClientItemExtensions;getDefaultDyeColor(Lnet/minecraft/world/item/ItemStack;)I",
+        "Lnet/neoforged/neoforge/client/extensions/common/IClientItemExtensions;of(Lnet/minecraft/world/item/ItemStack;)Lnet/neoforged/neoforge/client/extensions/common/IClientItemExtensions;",
+        "Lnet/neoforged/neoforge/client/extensions/common/IClientItemExtensions;setupModelAnimations(Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/entity/EquipmentSlot;Lnet/minecraft/client/model/Model;FFFFFF)V"
+      ]
+    },
+    {
+      "owner": "net.minecraft.data.worldgen.BiomeDefaultFeatures",
+      "name": "commonSpawns",
+      "legacyDescriptor": "(Lnet/minecraft/world/level/biome/MobSpawnSettings$Builder;)V",
+      "extendedDescriptor": "(Lnet/minecraft/world/level/biome/MobSpawnSettings$Builder;I)V",
+      "extendedParameterNames": [
+        "p_348684_",
+        "p_348638_"
+      ],
+      "extendedInvokes": [
+        "Lnet/minecraft/data/worldgen/BiomeDefaultFeatures;caveSpawns(Lnet/minecraft/world/level/biome/MobSpawnSettings$Builder;)V",
+        "Lnet/minecraft/data/worldgen/BiomeDefaultFeatures;monsters(Lnet/minecraft/world/level/biome/MobSpawnSettings$Builder;IIIZ)V"
+      ]
+    },
+    {
+      "owner": "net.minecraft.network.Connection",
+      "name": "send",
+      "legacyDescriptor": "(Lnet/minecraft/network/protocol/Packet;Lnet/minecraft/network/PacketSendListener;)V",
+      "extendedDescriptor": "(Lnet/minecraft/network/protocol/Packet;Lnet/minecraft/network/PacketSendListener;Z)V",
+      "extendedParameterNames": [
+        "p_295839_",
+        "p_294866_",
+        "p_294265_"
+      ],
+      "extendedInvokes": [
+        "Ljava/util/Queue;add(Ljava/lang/Object;)Z",
+        "Lnet/minecraft/network/Connection;flushQueue()V",
+        "Lnet/minecraft/network/Connection;isConnected()Z",
+        "Lnet/minecraft/network/Connection;sendPacket(Lnet/minecraft/network/protocol/Packet;Lnet/minecraft/network/PacketSendListener;Z)V"
+      ]
+    },
+    {
+      "owner": "net.minecraft.server.level.DistanceManager",
+      "name": "addRegionTicket",
+      "legacyDescriptor": "(Lnet/minecraft/server/level/TicketType;Lnet/minecraft/world/level/ChunkPos;ILjava/lang/Object;)V",
+      "extendedDescriptor": "(Lnet/minecraft/server/level/TicketType;Lnet/minecraft/world/level/ChunkPos;ILjava/lang/Object;Z)V",
+      "extendedParameterNames": [
+        "p_140841_",
+        "p_140842_",
+        "p_140843_",
+        "p_140844_",
+        "forceTicks"
+      ],
+      "extendedInvokes": [
+        "Lnet/minecraft/server/level/ChunkLevel;byStatus(Lnet/minecraft/server/level/FullChunkStatus;)I",
+        "Lnet/minecraft/server/level/DistanceManager;addTicket(JLnet/minecraft/server/level/Ticket;)V",
+        "Lnet/minecraft/server/level/Ticket;<init>(Lnet/minecraft/server/level/TicketType;ILjava/lang/Object;Z)V",
+        "Lnet/minecraft/server/level/TickingTracker;addTicket(JLnet/minecraft/server/level/Ticket;)V",
+        "Lnet/minecraft/world/level/ChunkPos;toLong()J"
+      ]
+    },
+    {
+      "owner": "net.minecraft.server.level.DistanceManager",
+      "name": "removeRegionTicket",
+      "legacyDescriptor": "(Lnet/minecraft/server/level/TicketType;Lnet/minecraft/world/level/ChunkPos;ILjava/lang/Object;)V",
+      "extendedDescriptor": "(Lnet/minecraft/server/level/TicketType;Lnet/minecraft/world/level/ChunkPos;ILjava/lang/Object;Z)V",
+      "extendedParameterNames": [
+        "p_140850_",
+        "p_140851_",
+        "p_140852_",
+        "p_140853_",
+        "forceTicks"
+      ],
+      "extendedInvokes": [
+        "Lnet/minecraft/server/level/ChunkLevel;byStatus(Lnet/minecraft/server/level/FullChunkStatus;)I",
+        "Lnet/minecraft/server/level/DistanceManager;removeTicket(JLnet/minecraft/server/level/Ticket;)V",
+        "Lnet/minecraft/server/level/Ticket;<init>(Lnet/minecraft/server/level/TicketType;ILjava/lang/Object;Z)V",
+        "Lnet/minecraft/server/level/TickingTracker;removeTicket(JLnet/minecraft/server/level/Ticket;)V",
+        "Lnet/minecraft/world/level/ChunkPos;toLong()J"
+      ]
+    },
+    {
+      "owner": "net.minecraft.server.level.ServerChunkCache",
+      "name": "addRegionTicket",
+      "legacyDescriptor": "(Lnet/minecraft/server/level/TicketType;Lnet/minecraft/world/level/ChunkPos;ILjava/lang/Object;)V",
+      "extendedDescriptor": "(Lnet/minecraft/server/level/TicketType;Lnet/minecraft/world/level/ChunkPos;ILjava/lang/Object;Z)V",
+      "extendedParameterNames": [
+        "p_8388_",
+        "p_8389_",
+        "p_8390_",
+        "p_8391_",
+        "forceTicks"
+      ],
+      "extendedInvokes": [
+        "Lnet/minecraft/server/level/DistanceManager;addRegionTicket(Lnet/minecraft/server/level/TicketType;Lnet/minecraft/world/level/ChunkPos;ILjava/lang/Object;Z)V"
+      ]
+    },
+    {
+      "owner": "net.minecraft.server.level.ServerChunkCache",
+      "name": "removeRegionTicket",
+      "legacyDescriptor": "(Lnet/minecraft/server/level/TicketType;Lnet/minecraft/world/level/ChunkPos;ILjava/lang/Object;)V",
+      "extendedDescriptor": "(Lnet/minecraft/server/level/TicketType;Lnet/minecraft/world/level/ChunkPos;ILjava/lang/Object;Z)V",
+      "extendedParameterNames": [
+        "p_8439_",
+        "p_8440_",
+        "p_8441_",
+        "p_8442_",
+        "forceTicks"
+      ],
+      "extendedInvokes": [
+        "Lnet/minecraft/server/level/DistanceManager;removeRegionTicket(Lnet/minecraft/server/level/TicketType;Lnet/minecraft/world/level/ChunkPos;ILjava/lang/Object;Z)V"
+      ]
+    },
+    {
+      "owner": "net.minecraft.world.Container",
+      "name": "stillValidBlockEntity",
+      "legacyDescriptor": "(Lnet/minecraft/world/level/block/entity/BlockEntity;Lnet/minecraft/world/entity/player/Player;)Z",
+      "extendedDescriptor": "(Lnet/minecraft/world/level/block/entity/BlockEntity;Lnet/minecraft/world/entity/player/Player;F)Z",
+      "extendedParameterNames": [
+        "p_272877_",
+        "p_272670_",
+        "p_320837_"
+      ],
+      "extendedInvokes": [
+        "Lnet/minecraft/world/entity/player/Player;canInteractWithBlock(Lnet/minecraft/core/BlockPos;D)Z",
+        "Lnet/minecraft/world/level/Level;getBlockEntity(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/entity/BlockEntity;",
+        "Lnet/minecraft/world/level/block/entity/BlockEntity;getBlockPos()Lnet/minecraft/core/BlockPos;",
+        "Lnet/minecraft/world/level/block/entity/BlockEntity;getLevel()Lnet/minecraft/world/level/Level;"
+      ]
+    },
+    {
+      "owner": "net.minecraft.world.entity.LivingEntity",
+      "name": "getJumpPower",
+      "legacyDescriptor": "()F",
+      "extendedDescriptor": "(F)F",
+      "extendedParameterNames": [
+        "p_326107_"
+      ],
+      "extendedInvokes": [
+        "Lnet/minecraft/world/entity/LivingEntity;getAttributeValue(Lnet/minecraft/core/Holder;)D",
+        "Lnet/minecraft/world/entity/LivingEntity;getBlockJumpFactor()F",
+        "Lnet/minecraft/world/entity/LivingEntity;getJumpBoostPower()F"
+      ]
+    },
+    {
+      "owner": "net.minecraft.world.flag.FeatureFlagRegistry$Builder",
+      "name": "create",
+      "legacyDescriptor": "(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/world/flag/FeatureFlag;",
+      "extendedDescriptor": "(Lnet/minecraft/resources/ResourceLocation;Z)Lnet/minecraft/world/flag/FeatureFlag;",
+      "extendedParameterNames": [
+        "p_250098_",
+        "modded"
+      ],
+      "extendedInvokes": [
+        "Ljava/lang/IllegalStateException;<init>(Ljava/lang/String;)V",
+        "Ljava/lang/String;valueOf(Ljava/lang/Object;)Ljava/lang/String;",
+        "Ljava/util/Map;put(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+        "Lnet/minecraft/world/flag/FeatureFlag;<init>(Lnet/minecraft/world/flag/FeatureFlagUniverse;IIZ)V"
+      ]
+    },
+    {
+      "owner": "net.minecraft.world.item.BucketItem",
+      "name": "emptyContents",
+      "legacyDescriptor": "(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/phys/BlockHitResult;)Z",
+      "extendedDescriptor": "(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/phys/BlockHitResult;Lnet/minecraft/world/item/ItemStack;)Z",
+      "extendedParameterNames": [
+        "p_150716_",
+        "p_150717_",
+        "p_150718_",
+        "p_150719_",
+        "container"
+      ],
+      "extendedInvokes": [
+        "Ljava/lang/Math;random()D",
+        "Ljava/util/Optional;flatMap(Ljava/util/function/Function;)Ljava/util/Optional;",
+        "Ljava/util/Optional;get()Ljava/lang/Object;",
+        "Ljava/util/Optional;isPresent()Z",
+        "Ljava/util/Optional;ofNullable(Ljava/lang/Object;)Ljava/util/Optional;",
+        "Lnet/minecraft/core/BlockPos;getX()I",
+        "Lnet/minecraft/core/BlockPos;getY()I",
+        "Lnet/minecraft/core/BlockPos;getZ()I",
+        "Lnet/minecraft/core/BlockPos;relative(Lnet/minecraft/core/Direction;)Lnet/minecraft/core/BlockPos;",
+        "Lnet/minecraft/util/RandomSource;nextFloat()F",
+        "Lnet/minecraft/world/item/BucketItem;emptyContents(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/phys/BlockHitResult;Lnet/minecraft/world/item/ItemStack;)Z",
+        "Lnet/minecraft/world/item/BucketItem;playEmptySound(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;)V",
+        "Lnet/minecraft/world/level/Level;addParticle(Lnet/minecraft/core/particles/ParticleOptions;DDDDDD)V",
+        "Lnet/minecraft/world/level/Level;destroyBlock(Lnet/minecraft/core/BlockPos;Z)Z",
+        "Lnet/minecraft/world/level/Level;dimensionType()Lnet/minecraft/world/level/dimension/DimensionType;",
+        "Lnet/minecraft/world/level/Level;getBlockState(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;",
+        "Lnet/minecraft/world/level/Level;playSound(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/core/BlockPos;Lnet/minecraft/sounds/SoundEvent;Lnet/minecraft/sounds/SoundSource;FF)V",
+        "Lnet/minecraft/world/level/Level;setBlock(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;I)Z",
+        "Lnet/minecraft/world/level/block/LiquidBlockContainer;canPlaceLiquid(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/material/Fluid;)Z",
+        "Lnet/minecraft/world/level/block/LiquidBlockContainer;placeLiquid(Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/material/FluidState;)Z",
+        "Lnet/minecraft/world/level/block/state/BlockState;canBeReplaced(Lnet/minecraft/world/level/material/Fluid;)Z",
+        "Lnet/minecraft/world/level/block/state/BlockState;getBlock()Lnet/minecraft/world/level/block/Block;",
+        "Lnet/minecraft/world/level/block/state/BlockState;getFluidState()Lnet/minecraft/world/level/material/FluidState;",
+        "Lnet/minecraft/world/level/block/state/BlockState;isAir()Z",
+        "Lnet/minecraft/world/level/block/state/BlockState;liquid()Z",
+        "Lnet/minecraft/world/level/dimension/DimensionType;ultraWarm()Z",
+        "Lnet/minecraft/world/level/material/FlowingFluid;getSource(Z)Lnet/minecraft/world/level/material/FluidState;",
+        "Lnet/minecraft/world/level/material/Fluid;defaultFluidState()Lnet/minecraft/world/level/material/FluidState;",
+        "Lnet/minecraft/world/level/material/Fluid;getFluidType()Lnet/neoforged/neoforge/fluids/FluidType;",
+        "Lnet/minecraft/world/level/material/Fluid;is(Lnet/minecraft/tags/TagKey;)Z",
+        "Lnet/minecraft/world/level/material/FluidState;createLegacyBlock()Lnet/minecraft/world/level/block/state/BlockState;",
+        "Lnet/minecraft/world/level/material/FluidState;isSource()Z",
+        "Lnet/minecraft/world/phys/BlockHitResult;getBlockPos()Lnet/minecraft/core/BlockPos;",
+        "Lnet/minecraft/world/phys/BlockHitResult;getDirection()Lnet/minecraft/core/Direction;",
+        "Lnet/neoforged/neoforge/fluids/FluidType;isVaporizedOnPlacement(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/neoforged/neoforge/fluids/FluidStack;)Z",
+        "Lnet/neoforged/neoforge/fluids/FluidType;onVaporize(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/neoforged/neoforge/fluids/FluidStack;)V"
+      ]
+    },
+    {
+      "owner": "net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplate",
+      "name": "processBlockInfos",
+      "legacyDescriptor": "(Lnet/minecraft/world/level/ServerLevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructurePlaceSettings;Ljava/util/List;)Ljava/util/List;",
+      "extendedDescriptor": "(Lnet/minecraft/world/level/ServerLevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructurePlaceSettings;Ljava/util/List;Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructureTemplate;)Ljava/util/List;",
+      "extendedParameterNames": [
+        "p_278297_",
+        "p_74519_",
+        "p_74520_",
+        "p_74521_",
+        "p_74522_",
+        "template"
+      ],
+      "extendedInvokes": [
+        "Ljava/util/ArrayList;<init>()V",
+        "Ljava/util/Iterator;hasNext()Z",
+        "Ljava/util/Iterator;next()Ljava/lang/Object;",
+        "Ljava/util/List;add(Ljava/lang/Object;)Z",
+        "Ljava/util/List;iterator()Ljava/util/Iterator;",
+        "Lnet/minecraft/core/BlockPos;offset(Lnet/minecraft/core/Vec3i;)Lnet/minecraft/core/BlockPos;",
+        "Lnet/minecraft/nbt/CompoundTag;copy()Lnet/minecraft/nbt/CompoundTag;",
+        "Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructurePlaceSettings;getProcessors()Ljava/util/List;",
+        "Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructureProcessor;finalizeProcessing(Lnet/minecraft/world/level/ServerLevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/BlockPos;Ljava/util/List;Ljava/util/List;Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructurePlaceSettings;)Ljava/util/List;",
+        "Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructureProcessor;process(Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructureTemplate$StructureBlockInfo;Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructureTemplate$StructureBlockInfo;Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructurePlaceSettings;Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructureTemplate;)Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructureTemplate$StructureBlockInfo;",
+        "Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructureTemplate$StructureBlockInfo;<init>(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/nbt/CompoundTag;)V",
+        "Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructureTemplate;calculateRelativePosition(Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructurePlaceSettings;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/BlockPos;"
+      ]
+    }
+  ]
+}

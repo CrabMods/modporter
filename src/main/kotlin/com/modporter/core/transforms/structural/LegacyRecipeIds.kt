@@ -32,7 +32,7 @@ import kotlin.io.path.readText
 import kotlin.io.path.writeText
 
 /**
- * Source-owned recipe identity support.
+ * Draft production module.
  *
  * Recipe#getId disappeared in 1.21. Loaded recipes recover their canonical IDs
  * from exact RecipeHolder value identity. A project recipe with a reachable

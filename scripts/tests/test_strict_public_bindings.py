@@ -113,12 +113,43 @@ class StrictPublicBindingsTest(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "evidence hash changed"):
                 verify_native_capability(row, reports)
 
-    def test_create_cannot_skip_native_capability_validation(self):
+    def test_output_with_the_retained_bridge_cannot_skip_native_validation(self):
+        shapes = {
+            "call-site": ("src/main/java/example/Machine.java",
+                          "class Machine { Object q() { return LegacyBlockEntityCapabilityQueries.getRetained(null); } }\n"),
+            "mixin": ("src/main/java/example/compat/mixin/LegacyCapabilityServerLevelMixin.java", "class X {}\n"),
+            "mixin-config": ("src/main/resources/modporter-legacy-capability-query.mixins.json", "{}\n"),
+        }
+        for name, (relative, content) in shapes.items():
+            with self.subTest(shape=name), tempfile.TemporaryDirectory() as directory:
+                reports = Path(directory) / "reports"
+                reports.mkdir()
+                output = Path(directory) / "output"
+                target = output / relative
+                target.parent.mkdir(parents=True)
+                target.write_text(content, encoding="utf-8")
+                for case_id in ("create", "othermod"):
+                    row = self.native_capability_row(reports, state="NOT_EVALUATED")
+                    row["id"] = case_id
+                    row["outputDir"] = str(output)
+                    with self.assertRaisesRegex(AssertionError, "was not natively validated"):
+                        verify_native_capability(row, reports)
+
+    def test_output_without_the_retained_bridge_exposes_no_native_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             reports = Path(directory) / "reports"
             reports.mkdir()
+            output = Path(directory) / "output"
+            helper = output / "src/main/java/example/compat/LegacyBlockEntityCapabilityQueries.java"
+            helper.parent.mkdir(parents=True)
+            # the helper's own declaration is not a retained call site
+            helper.write_text("class LegacyBlockEntityCapabilityQueries { static Object getRetained(Object o) { return o; } }\n",
+                              encoding="utf-8")
             row = self.native_capability_row(reports, state="NOT_EVALUATED")
-            with self.assertRaisesRegex(AssertionError, "was not evaluated"):
+            row["outputDir"] = str(output)
+            self.assertEqual(verify_native_capability(row, reports), [])
+            row["nativeCapabilityValidation"]["receiptPath"] = str(reports / "native-receipt.json")
+            with self.assertRaisesRegex(AssertionError, "exposes evidence"):
                 verify_native_capability(row, reports)
 
 

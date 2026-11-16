@@ -878,29 +878,12 @@
         val projectile = srcDir.resolve("ProjectileEntity.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
-        assertTrue(potion.contains("(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).potion().isPresent()"))
-        assertTrue(potion.contains("(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"))
-        assertTrue(
-            Regex(
-                """net\.minecraft\.Util\.make\(new java\.util\.ArrayList<""" +
-                    """net\.minecraft\.world\.effect\.MobEffectInstance>\(\),[\s\S]*?\)\.isEmpty\(\)"""
-            ).containsMatchIn(potion),
-            potion
-        )
-        assertTrue(
-            potion.contains(
-                "for (MobEffectInstance effect : net.minecraft.Util.make(" +
-                    "new java.util.ArrayList<net.minecraft.world.effect.MobEffectInstance>()"
-            ),
-            potion
-        )
-        assertTrue(potion.contains(".addAll(modPorterPotionContents"), potion)
-        assertTrue(potion.contains(".customEffects());"), potion)
-        assertFalse(potion.contains(".getAllEffects()"), potion)
-        assertTrue(potion.contains("(stack).update(DataComponents.POTION_CONTENTS, PotionContents.EMPTY"))
-        assertTrue(potion.contains("new PotionContents(java.util.Optional.empty()"))
-        assertTrue(!potion.contains("stack.set(DataComponents.POTION_CONTENTS, PotionContents.EMPTY)"))
-        assertTrue(potion.contains("(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).addPotionTooltip(tooltip::add, 1.0F, 20.0F)"))
+        assertTrue(potion.contains("stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).potion().isPresent()"))
+        assertTrue(potion.contains("stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"))
+        assertTrue(potion.contains("!stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getAllEffects().iterator().hasNext()"))
+        assertTrue(potion.contains("for (MobEffectInstance effect : stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getAllEffects())"))
+        assertTrue(potion.contains("stack.set(DataComponents.POTION_CONTENTS, PotionContents.EMPTY)"))
+        assertTrue(potion.contains("stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).addPotionTooltip(tooltip::add, 1.0F, 20.0F)"))
         assertTrue(!potion.contains("PotionUtils"))
         assertTrue(!potion.contains("TODO"))
         assertTrue(!potion.contains("[forge2neo]"))
@@ -960,7 +943,7 @@
                 .containsMatchIn(potion),
             potion
         )
-        assertTrue(potion.contains("return (stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).potion().isPresent()"), potion)
+        assertTrue(potion.contains("return stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).potion().isPresent()"), potion)
         assertTrue(potion.contains("""|| "minecraft:empty".equals(tag.getString("Potion"));"""), potion)
         assertTrue(!potion.contains("import net.minecraft.world.item.alchemy.PotionUtils;"), potion)
     }

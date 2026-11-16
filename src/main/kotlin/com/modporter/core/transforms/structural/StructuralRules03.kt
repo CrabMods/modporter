@@ -24,11 +24,7 @@ import kotlin.io.path.*
 // Rules are `internal fun StructuralRefactorPass.<name>` extensions; a rule is followed by the helpers it uses.
 // Entry points called from processFiles: migrateCommonNeoForge121Apis, migrateLegacyRarityEnumExtensions, migrateLegacyRecipeBookCategoryEnumExtensions, migrateLegacyRecipeBookTypeEnumExtensions, migrateCustomRecipeBookCategoryFinders, migrateLegacyMobCategoryEnumExtensions, migrateLegacyPathTypeCreateConstants, migrateLegacyImageButtonConstructors, migrateLegacyStateSwitchingButtonTextures, migrateCuriosClientApi, migrateLegacyGrassColorModifierEnumExtensions, migrateDeferredRegisterListenerReferences, registerMissingDeferredRegisterFields.
 
-internal fun StructuralRefactorPass.migrateCommonNeoForge121Apis(
-    projectDir: Path,
-    dryRun: Boolean,
-    errorSink: MutableCollection<String>? = null
-): List<Change> {
+internal fun StructuralRefactorPass.migrateCommonNeoForge121Apis(projectDir: Path, dryRun: Boolean): List<Change> {
     val changes = mutableListOf<Change>()
     val srcDir = projectDir.resolve("src/main/java")
     if (!srcDir.exists()) return changes
@@ -36,49 +32,6 @@ internal fun StructuralRefactorPass.migrateCommonNeoForge121Apis(
         .filter { it.toString().endsWith(".java") }
         .filter { !it.toString().replace('\\', '/').contains("/com/modporter/generated/") }
         .toList()
-    if (!dryRun) {
-        val initialInheritanceIndex = collectJavaInheritanceIndex(javaFiles)
-        javaFiles.forEach { javaFile ->
-            val source = javaFile.readText()
-            val migrated = migrateBlockEntitySerializationDeclarationSource(source, initialInheritanceIndex)
-            if (migrated != source) {
-                javaFile.writeText(migrated)
-                changes += Change(
-                    file = javaFile,
-                    line = 1,
-                    description = "Migrate BlockEntity serialization declarations before provider propagation",
-                    before = "legacy BlockEntity serialization declaration",
-                    after = "provider-aware NeoForge 1.21 declaration",
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-blockentity-provider-contract"
-                )
-            }
-            val providerInput = javaFile.readText()
-            val componentMigrated = migrateLegacyComponentSerializationSource(
-                providerInput,
-                initialInheritanceIndex
-            )
-            if (componentMigrated != providerInput) {
-                javaFile.writeText(componentMigrated)
-                changes += Change(
-                    file = javaFile,
-                    line = 1,
-                    description = "Migrate component JSON serialization before provider propagation",
-                    before = "Component.Serializer legacy serialization",
-                    after = "provider overload or ComponentSerialization codec",
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-component-serialization-pre-provider"
-                )
-            }
-        }
-        changes.addAll(
-            LegacyNbtProviderMethodMigration().migrate(
-                projectDir,
-                dryRun = false,
-                allowContextProviderExpressions = false
-            )
-        )
-    }
     val javaSourceTypes = collectJavaSourceTypes(javaFiles)
     val recordComponents = collectJavaRecordComponents(srcDir)
     val mapCodecConstantOwners = collectMapCodecConstantOwners(srcDir)
@@ -114,7 +67,6 @@ internal fun StructuralRefactorPass.migrateCommonNeoForge121Apis(
     val optionalCompoundRecipeTagOwners = collectLegacyOptionalCompoundRecipeTagOwners(javaFiles)
     val legacyCookingRecipeClasses = collectLegacyCookingRecipeClasses(javaFiles)
     val javaInheritanceIndex = collectJavaInheritanceIndex(javaFiles)
-    val javaProjectTypeIndex = JavaProjectTypeIndex.build(srcDir)
     val recipeImplementationClasses = collectJavaRecipeImplementationClasses(javaFiles, javaInheritanceIndex)
     val customRecipeInputTypes = collectCustomRecipeInputTypes(javaFiles)
     val inheritedRecipeStateAccessors = collectInheritedRecipeStateAccessors(javaFiles)
@@ -135,14 +87,6 @@ internal fun StructuralRefactorPass.migrateCommonNeoForge121Apis(
     val placementModifierTypeHolderFields = collectPlacementModifierTypeRegistryFields(javaFiles)
     val legacyLootTableResourceLocationReferences = collectLegacyLootTableResourceLocationReferences(javaFiles)
     val inbtSerializableTypeFqns = collectProjectINBTSerializableTypes(javaFiles)
-    val providerAwareNbtMethods = collectProviderAwareNbtMethodContracts(
-        javaFiles,
-        inbtSerializableTypeFqns,
-        javaInheritanceIndex
-    )
-    val providerAwareMethodShapes = providerAwareNbtMethods.mapTo(linkedSetOf()) { method ->
-        Triple(method.owner, method.methodName, method.parameterCount)
-    }
     projectNbtHandlerTypeNames = collectJavaClassNamesExtending(javaFiles, setOf("ItemStackHandler"), javaInheritanceIndex) +
         inbtSerializableTypeFqns.map { it.substringAfterLast('.') }
     projectLevelCarriers = ProjectLevelCarriers.collect(javaFiles)
@@ -154,6 +98,8 @@ internal fun StructuralRefactorPass.migrateCommonNeoForge121Apis(
     projectRecipeInputPositions = RecipeInputBounds.collect(javaFiles)
     projectEnumRecipeTypeInputs = EnumRecipeTypeInputs.collect(javaFiles)
     projectValueFacts = ProjectValueFacts.collect(this, javaFiles)
+    projectSourceDeclarations = ProjectSourceDeclarations.collect(javaFiles)
+    projectMixinFacts = MixinProjectFacts.collect(this, projectDir, javaFiles)
     changes.addAll(
         LegacyBlockStateUseCalls.migrate(
             this,
@@ -167,28 +113,16 @@ internal fun StructuralRefactorPass.migrateCommonNeoForge121Apis(
             dryRun
         )
     )
-    val itemStackNbtMethods = collectItemStackNbtMethodsNeedingHolderLookup(
-        javaFiles,
-        javaInheritanceIndex,
-        javaProjectTypeIndex
-    )
-        .filterNot { method ->
-            Triple(method.owner, method.methodName, method.parameterCount) in providerAwareMethodShapes
-        }
-        .toSet() + providerAwareNbtMethods
+    val savedDataHolderLookupMethods = collectSavedDataHolderLookupMethods(javaFiles, savedDataClassNames)
+    val itemStackNbtMethods = collectItemStackNbtMethodsNeedingHolderLookup(javaFiles, javaInheritanceIndex, savedDataHolderLookupMethods)
     val itemStackNbtConstructors = collectItemStackNbtConstructorsNeedingHolderLookup(javaFiles, itemStackNbtMethods, javaInheritanceIndex)
     val constructorFactoryMethods = collectHolderLookupConstructorFactoryMethods(javaFiles, itemStackNbtConstructors, javaInheritanceIndex)
-    val savedDataHolderLookupMethods = collectSavedDataHolderLookupMethods(javaFiles, savedDataClassNames)
     val existingHolderLookupNbtMethods = collectExistingHolderLookupNbtMethods(javaFiles)
     val effectiveItemStackNbtMethods = itemStackNbtMethods +
         constructorFactoryMethods +
         savedDataHolderLookupMethods +
         existingHolderLookupNbtMethods
     val entityCapabilityTypes = collectEntityCapabilityValueTypes(javaFiles)
-    val entityDataValueTypes = mergeEntityDataValueTypes(
-        entityCapabilityTypes,
-        collectEntityAttachmentValueTypes(javaFiles)
-    )
     val cachedRenderBoundsFamilies = javaFiles.mapNotNull { legacyCachedRenderBoundsType(it.readText()) }.distinct()
     require(cachedRenderBoundsFamilies.size <= 1) {
         "More than one cached BlockEntity render-bounds family requires an explicit renderer bridge"
@@ -196,8 +130,6 @@ internal fun StructuralRefactorPass.migrateCommonNeoForge121Apis(
     val cachedRenderBoundsType = cachedRenderBoundsFamilies.singleOrNull()
 
     javaFiles.forEach { javaFile ->
-        val fileChangeStart = changes.size
-        try {
             val original = javaFile.readText()
             var text = original
 
@@ -219,46 +151,6 @@ internal fun StructuralRefactorPass.migrateCommonNeoForge121Apis(
                 }
             }
 
-            val nbtSerializableMigrated = migrateINBTSerializableHolderLookupSource(text, inbtSerializableTypeFqns)
-            if (nbtSerializableMigrated != text) {
-                changes.add(Change(
-                    file = javaFile,
-                    line = 0,
-                    description = "Migrate INBTSerializable methods to HolderLookup.Provider signatures",
-                    before = "serializeNBT()/deserializeNBT(CompoundTag)",
-                    after = "serializeNBT(HolderLookup.Provider)/deserializeNBT(HolderLookup.Provider, CompoundTag)",
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-inbtserializable-holderlookup"
-                ))
-                text = nbtSerializableMigrated
-            }
-
-            val stagedProviderContracts = migrateProjectItemStackNbtMethods(
-                migrateProjectItemStackNbtMethods(
-                    text,
-                    effectiveItemStackNbtMethods,
-                    javaInheritanceIndex,
-                    entityDataValueTypes,
-                    javaMethodReturnTypes
-                ),
-                effectiveItemStackNbtMethods,
-                javaInheritanceIndex,
-                entityDataValueTypes,
-                javaMethodReturnTypes
-            )
-            if (stagedProviderContracts != text) {
-                changes.add(Change(
-                    file = javaFile,
-                    line = 0,
-                    description = "Stage provider-aware project NBT contracts before BlockEntity call migration",
-                    before = "legacy project NBT declaration or call",
-                    after = "provider-aware declaration and exact call",
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-project-nbt-provider-contract-stage"
-                ))
-                text = stagedProviderContracts
-            }
-
             val tickMigrated = migrateLegacyTickEventSource(text)
             if (tickMigrated != text) {
                 changes.add(Change(
@@ -266,7 +158,7 @@ internal fun StructuralRefactorPass.migrateCommonNeoForge121Apis(
                     line = 0,
                     description = "Migrate legacy Forge tick events to split NeoForge 1.21 tick events",
                     before = "(LivingTickEvent or TickEvent.Phase)",
-                    after = "(EntityTickEvent.Pre or typed Pre/Post wrappers without legacy phase fields)",
+                    after = "(EntityTickEvent.Post/PlayerTickEvent.Post without phase checks)",
                     confidence = Confidence.HIGH,
                     ruleId = "struct-legacy-tick-events"
                 ))
@@ -345,6 +237,20 @@ internal fun StructuralRefactorPass.migrateCommonNeoForge121Apis(
                     ruleId = "struct-blockentity-custom-name-component"
                 ))
                 text = customNameSetterMigrated
+            }
+
+            val nbtSerializableMigrated = migrateINBTSerializableHolderLookupSource(text, inbtSerializableTypeFqns)
+            if (nbtSerializableMigrated != text) {
+                changes.add(Change(
+                    file = javaFile,
+                    line = 0,
+                    description = "Migrate INBTSerializable methods to HolderLookup.Provider signatures",
+                    before = "serializeNBT()/deserializeNBT(CompoundTag)",
+                    after = "serializeNBT(HolderLookup.Provider)/deserializeNBT(HolderLookup.Provider, CompoundTag)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-inbtserializable-holderlookup"
+                ))
+                text = nbtSerializableMigrated
             }
 
             val transparentBlockMigrated = migrateTransparentBlockBeaconSource(text)
@@ -569,6 +475,20 @@ internal fun StructuralRefactorPass.migrateCommonNeoForge121Apis(
                     ruleId = "struct-dimension-effects-cloud-signature"
                 ))
                 text = dimensionEffectsMigrated
+            }
+
+            val displayNameMigrated = migrateLegacyItemDisplayNameWrites(text)
+            if (displayNameMigrated != text) {
+                changes.add(Change(
+                    file = javaFile,
+                    line = 0,
+                    description = "Migrate ItemStack display.Name tag writes of a serialized component to the CUSTOM_NAME component",
+                    before = "stack.getOrCreateTagElement(\"display\").putString(\"Name\", json(component))",
+                    after = "stack.set(DataComponents.CUSTOM_NAME, component)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-item-display-name-component"
+                ))
+                text = displayNameMigrated
             }
 
             val customDataMigrated = migrateCustomDataComponentsSource(text)
@@ -986,13 +906,6 @@ internal fun StructuralRefactorPass.migrateCommonNeoForge121Apis(
             if (text != original && !dryRun) {
                 javaFile.writeText(text)
             }
-        } catch (e: Exception) {
-            // The source write is deferred until every rewrite succeeds; discard its staged receipts too.
-            changes.subList(fileChangeStart, changes.size).clear()
-            if (errorSink == null) throw e
-            val relativeFile = projectDir.relativize(javaFile).toString().replace('\\', '/')
-            errorSink.add("Common NeoForge 1.21 API migration error in $relativeFile: ${e.message}")
-        }
     }
 
     if (!dryRun) {
@@ -1030,9 +943,6 @@ internal fun StructuralRefactorPass.migrateCommonNeoForge121Apis(
             }
         }
 
-    if (!dryRun) {
-        changes.addAll(LegacyNbtProviderMethodMigration().migrate(projectDir, dryRun = false))
-    }
     return changes
 }
 
@@ -4536,7 +4446,8 @@ internal data class RecipeProviderClassHints(
 internal data class RecipeSerializerFactoryHints(
     val fieldToFactory: Map<String, String>,
     val fieldToRecipeClass: Map<String, String>,
-    val fieldToFactoryInterface: Map<String, RecipeFactoryInterfaceHint> = emptyMap()
+    val fieldToFactoryInterface: Map<String, RecipeFactoryInterfaceHint> = emptyMap(),
+    val serializerAccessorFactories: Map<String, String> = emptyMap()
 )
 
 internal data class RecipeFactoryInterfaceHint(
@@ -4777,7 +4688,10 @@ internal fun StructuralRefactorPass.collectRecipeSerializerFactoryHints(srcDir: 
             }
         }
 
-    return RecipeSerializerFactoryHints(fieldToFactory, fieldToRecipeClass, fieldToFactoryInterface)
+    val serializerAccessorFactories = collectSimpleCraftingSerializerAccessors(
+        walkJavaSourceRoots(srcDir).filter { it.toString().endsWith(".java") }.toList()
+    )
+    return RecipeSerializerFactoryHints(fieldToFactory, fieldToRecipeClass, fieldToFactoryInterface, serializerAccessorFactories)
 }
 
 internal fun StructuralRefactorPass.collectRecipeSerializerFactoryInterface(
@@ -5226,6 +5140,9 @@ internal fun StructuralRefactorPass.migrateRecordComponentFieldAccessSource(
 ): String {
     val componentsByType = recordComponents.toMutableMap()
     componentsByType.putAll(collectJavaRecordComponentsFromSource(source))
+    // Dependency types that became records in the target artifact (the declared library API
+    // contracts) apply only where the file names that exact type, through its import owner or
+    // its qualified name.
     val executableSource = maskJavaCommentsAndLiterals(source)
     val imports = javaNonStaticImports(source)
     ExactExternalTypeContracts.recordComponentSurfaces.forEach { surface ->
@@ -5397,42 +5314,50 @@ internal fun StructuralRefactorPass.migrateRecordCodecBuilderWitnessSource(sourc
 }
 
 internal fun StructuralRefactorPass.migrateLegacyTickEventSource(source: String): String {
-    validateLegacyTickPhaseValueUses(source)
     var result = migrateUnsplitTickEventHandlers(source)
     var needsEntityTickImport = false
+    var needsPlayerTickImport = false
 
     val livingTickHandlerPattern = Regex(
-        """\b((?:(?:public|protected|private|static|final|synchronized)\s+)*void\s+([A-Za-z_$][\w$]*)\s*\(\s*)((?:net\.(?:minecraftforge|neoforged\.neoforge)\.event\.entity\.living\.)?(?:LivingEvent\.)?LivingTickEvent)(\s+([A-Za-z_$][\w$]*)\s*\))"""
+        """\b((?:(?:public|protected|private|static|final|synchronized)\s+)*void\s+([A-Za-z_$][\w$]*)\s*\(\s*)((?:net\.(?:minecraftforge|neoforged\.neoforge)\.event\.entity\.living\.)?)(?:LivingEvent\.)?LivingTickEvent(\s+([A-Za-z_$][\w$]*)\s*\))"""
     )
-    val livingTickTyping = SourceValueTypes(this, source)
     val migratedEntityTickHandlers = linkedSetOf<String>()
     var cursor = 0
     while (true) {
-        val executableResult = maskJavaCommentsAndLiterals(result)
-        val match = livingTickHandlerPattern.find(executableResult, cursor) ?: break
+        val match = livingTickHandlerPattern.find(result, cursor) ?: break
         val openBrace = result.indexOf('{', match.range.last + 1)
         val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
         if (openBrace < 0 || closeBrace < 0) {
             cursor = match.range.last + 1
             continue
         }
-        val originalType = match.groupValues[3]
-        val qualified = originalType.startsWith("net.")
-        val exactOwner = setOf(
-            "net.minecraftforge.event.entity.living.LivingEvent.LivingTickEvent",
-            "net.neoforged.neoforge.event.entity.living.LivingEvent.LivingTickEvent"
-        ).singleOrNull { livingTickTyping.isTypeName(originalType, it) }
-        if (exactOwner == null) {
-            cursor = match.range.last + 1
-            continue
-        }
+        val methodText = result.substring(match.range.first, closeBrace + 1)
         val methodName = match.groupValues[2]
-        val importsEntityBefore = needsEntityTickImport
-        needsEntityTickImport = true
-        val replacementType = "EntityTickEvent.Pre"
-        migratedEntityTickHandlers += methodName
+        val qualified = match.groupValues[3].isNotEmpty()
+        val eventName = match.groupValues[5]
+        val importsBefore = needsEntityTickImport to needsPlayerTickImport
+        val usesCancellation = Regex("""\b${Regex.escape(eventName)}\.(?:isCanceled\(\)|setCanceled\()""")
+            .containsMatchIn(methodText)
+        val replacementType = when {
+            usesCancellation -> {
+                needsEntityTickImport = true
+                "EntityTickEvent.Pre"
+            }
+            methodName.contains("PlayerTick") -> {
+                needsPlayerTickImport = true
+                "PlayerTickEvent.Post"
+            }
+            else -> {
+                needsEntityTickImport = true
+                "EntityTickEvent.Post"
+            }
+        }
+        if (replacementType.startsWith("EntityTickEvent.")) {
+            migratedEntityTickHandlers += methodName
+        }
         if (qualified) {
-            needsEntityTickImport = importsEntityBefore
+            needsEntityTickImport = importsBefore.first
+            needsPlayerTickImport = importsBefore.second
         }
         val qualifier = if (qualified) "net.neoforged.neoforge.event.tick." else ""
         val replacement = "${match.groupValues[1]}$qualifier$replacementType${match.groupValues[4]}"
@@ -5440,6 +5365,9 @@ internal fun StructuralRefactorPass.migrateLegacyTickEventSource(source: String)
         cursor = match.range.first + replacement.length
     }
 
+    if (needsPlayerTickImport) {
+        result = addImportIfMissing(result, "net.neoforged.neoforge.event.tick.PlayerTickEvent")
+    }
     if (needsEntityTickImport) {
         result = addImportIfMissing(result, "net.neoforged.neoforge.event.tick.EntityTickEvent")
     }
@@ -5810,98 +5738,6 @@ internal fun StructuralRefactorPass.removeInvalidTickEventImports(source: String
     return result
 }
 
-internal fun StructuralRefactorPass.migrateBlockEntitySerializationDeclarationSource(
-    source: String,
-    javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
-): String {
-    if (!source.contains("saveAdditional") &&
-        !source.contains("loadAdditional") &&
-        !source.contains("getUpdateTag") &&
-        !source.contains("handleUpdateTag") &&
-        !source.contains("onDataPacket") &&
-        !Regex("""public\s+(?:final\s+)?void\s+load\s*\(""").containsMatchIn(source)
-    ) {
-        return source
-    }
-    if (collectJavaClassDeclarations(source).none {
-            javaClassExtendsAny(it, javaBlockEntityBaseTypes(), javaInheritanceIndex)
-        }
-    ) {
-        return source
-    }
-
-    var result = source
-    result = replaceExecutableRegex(
-        result,
-        Regex("""((?:public|protected)\s+(?:final\s+)?)void\s+saveAdditional\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
-    ) { match ->
-        val params = match.groupValues[2]
-        if (params.contains("HolderLookup.Provider")) {
-            match.value
-        } else {
-            val providerName = uniqueHolderLookupProviderNameForMethodAt(result, match.range.first, "registries")
-            "${match.groupValues[1]}void saveAdditional($params, HolderLookup.Provider $providerName)"
-        }
-    }
-    result = replaceExecutableRegex(
-        result,
-        Regex("""(protected\s+(?:final\s+)?)void\s+loadAdditional\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
-    ) { match ->
-        val params = match.groupValues[2]
-        if (params.contains("HolderLookup.Provider")) {
-            match.value
-        } else {
-            val providerName = uniqueHolderLookupProviderNameForMethodAt(result, match.range.first, "registries")
-            "${match.groupValues[1]}void loadAdditional($params, HolderLookup.Provider $providerName)"
-        }
-    }
-    result = replaceExecutableRegex(
-        result,
-        Regex("""(public\s+(?:final\s+)?)void\s+load\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
-    ) { match ->
-        if (!javaClassExtendsAny(
-                enclosingJavaClassDeclaration(result, match.range.first),
-                javaBlockEntityBaseTypes(),
-                javaInheritanceIndex
-            )
-        ) {
-            match.value
-        } else {
-            val providerName = uniqueHolderLookupProviderNameForMethodAt(result, match.range.first, "registries")
-            "${match.groupValues[1].replace("public", "protected")}void loadAdditional(${match.groupValues[2]}, HolderLookup.Provider $providerName)"
-        }
-    }
-    result = replaceExecutableRegex(
-        result,
-        Regex("""public\s+((?:@[A-Za-z0-9_.]+\s+)*)(?:net\.minecraft\.nbt\.)?CompoundTag\s+getUpdateTag\s*\(\s*\)""")
-    ) { match ->
-        val providerName = uniqueHolderLookupProviderNameForMethodAt(result, match.range.first, "registries")
-        "public ${match.groupValues[1]}CompoundTag getUpdateTag(HolderLookup.Provider $providerName)"
-    }
-    result = replaceExecutableRegex(
-        result,
-        Regex("""public\s+void\s+handleUpdateTag\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
-    ) { match ->
-        val params = match.groupValues[1]
-        if (params.contains("HolderLookup.Provider")) {
-            match.value
-        } else {
-            val providerName = uniqueHolderLookupProviderNameForMethodAt(result, match.range.first, "lookupProvider")
-            "public void handleUpdateTag($params, HolderLookup.Provider $providerName)"
-        }
-    }
-    result = replaceExecutableRegex(
-        result,
-        Regex(
-            """public\s+void\s+onDataPacket\s*\(\s*([^,)]*(?:net\.minecraft\.network\.)?Connection\s+)(\w+)\s*,\s*([^,)]*(?:net\.minecraft\.network\.protocol\.game\.)?ClientboundBlockEntityDataPacket\s+)(\w+)\s*\)"""
-        )
-    ) { match ->
-        val providerName = uniqueHolderLookupProviderNameForMethodAt(result, match.range.first, "lookupProvider")
-        "public void onDataPacket(${match.groupValues[1]}${match.groupValues[2]}, ${match.groupValues[3]}${match.groupValues[4]}, HolderLookup.Provider $providerName)"
-    }
-    return if (result == source) result else addImportIfMissing(result, "net.minecraft.core.HolderLookup")
-}
-
 internal fun StructuralRefactorPass.migrateBlockEntitySerializationSource(
     source: String,
     javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
@@ -5910,7 +5746,8 @@ internal fun StructuralRefactorPass.migrateBlockEntitySerializationSource(
         !source.contains("onDataPacket") &&
         !source.contains("saveAdditional") &&
         !source.contains("loadAdditional") &&
-        !Regex("""public\s+(?:final\s+)?void\s+load\s*\(""").containsMatchIn(source)
+        !source.contains("public void load(") &&
+        !source.contains("public final void load(")
     ) {
         return source
     }
@@ -5923,37 +5760,34 @@ internal fun StructuralRefactorPass.migrateBlockEntitySerializationSource(
 
     result = replaceExecutableRegex(
         result,
-        Regex("""((?:public|protected)\s+(?:final\s+)?)void\s+saveAdditional\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
+        Regex("""((?:public|protected)(?:\s+final)?)\s+void\s+saveAdditional\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
     ) { match ->
-            val modifiers = match.groupValues[1]
+            val visibility = match.groupValues[1]
             val params = match.groupValues[2]
             if (params.contains("HolderLookup.Provider")) {
                 match.value
             } else {
                 needsHolderLookup = true
-                val providerName = uniqueHolderLookupProviderNameForMethodAt(result, match.range.first, "registries")
-                "${modifiers}void saveAdditional($params, HolderLookup.Provider $providerName)"
+                "$visibility void saveAdditional($params, HolderLookup.Provider registries)"
             }
         }
 
     result = replaceExecutableRegex(
         result,
-        Regex("""(protected\s+(?:final\s+)?)void\s+loadAdditional\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
+        Regex("""protected\s+void\s+loadAdditional\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
     ) { match ->
-            val modifiers = match.groupValues[1]
-            val params = match.groupValues[2]
+            val params = match.groupValues[1]
             if (params.contains("HolderLookup.Provider")) {
                 match.value
             } else {
                 needsHolderLookup = true
-                val providerName = uniqueHolderLookupProviderNameForMethodAt(result, match.range.first, "registries")
-                "${modifiers}void loadAdditional($params, HolderLookup.Provider $providerName)"
+                "protected void loadAdditional($params, HolderLookup.Provider registries)"
             }
         }
 
     result = replaceExecutableRegex(
         result,
-        Regex("""(public\s+(?:final\s+)?)void\s+load\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
+        Regex("""public\s+((?:final\s+)?)void\s+load\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
     ) { match ->
             if (!javaClassExtendsAny(
                     enclosingJavaClassDeclaration(result, match.range.first),
@@ -5963,11 +5797,9 @@ internal fun StructuralRefactorPass.migrateBlockEntitySerializationSource(
             ) {
                 return@replaceExecutableRegex match.value
             }
-            val modifiers = match.groupValues[1]
             val params = match.groupValues[2]
             needsHolderLookup = true
-            val providerName = uniqueHolderLookupProviderNameForMethodAt(result, match.range.first, "registries")
-            "${modifiers.replace("public", "protected")}void loadAdditional($params, HolderLookup.Provider $providerName)"
+            "protected ${match.groupValues[1]}void loadAdditional($params, HolderLookup.Provider registries)"
         }
 
     result = replaceExecutableRegex(
@@ -5983,12 +5815,7 @@ internal fun StructuralRefactorPass.migrateBlockEntitySerializationSource(
                 return@replaceExecutableRegex match.value
             }
             needsHolderLookup = true
-            val providerName = exactHolderLookupProviderNameAtOrNull(
-                result,
-                match.range.first,
-                "BlockEntity super.load migration"
-            ) ?: return@replaceExecutableRegex match.value
-            "super.loadAdditional(${match.groupValues[1]}, $providerName);"
+            "super.loadAdditional(${match.groupValues[1]}, registries);"
         }
 
     result = replaceExecutableRegex(
@@ -6004,12 +5831,7 @@ internal fun StructuralRefactorPass.migrateBlockEntitySerializationSource(
                 return@replaceExecutableRegex match.value
             }
             needsHolderLookup = true
-            val providerName = exactHolderLookupProviderNameAtOrNull(
-                result,
-                match.range.first,
-                "BlockEntity super.saveAdditional migration"
-            ) ?: return@replaceExecutableRegex match.value
-            "super.saveAdditional(${match.groupValues[1]}, $providerName);"
+            "super.saveAdditional(${match.groupValues[1]}, registries);"
         }
 
     result = replaceExecutableRegex(
@@ -6017,47 +5839,20 @@ internal fun StructuralRefactorPass.migrateBlockEntitySerializationSource(
         Regex("""public\s+((?:@[A-Za-z0-9_.]+\s+)*)(?:net\.minecraft\.nbt\.)?CompoundTag\s+getUpdateTag\s*\(\s*\)""")
     ) { match ->
             needsHolderLookup = true
-            val providerName = uniqueHolderLookupProviderNameForMethodAt(result, match.range.first, "registries")
-            "public ${match.groupValues[1]}CompoundTag getUpdateTag(HolderLookup.Provider $providerName)"
+            "public ${match.groupValues[1]}CompoundTag getUpdateTag(HolderLookup.Provider registries)"
         }
-    result = replaceExecutableRegex(result, Regex("""super\.getUpdateTag\(\)""")) { match ->
-        if (enclosingJavaMethodNameAt(result, match.range.first) != "getUpdateTag") {
-            return@replaceExecutableRegex match.value
-        }
-        val providerName = requiredHolderLookupProviderNameAt(
-            result,
-            match.range.first,
-            "BlockEntity getUpdateTag super call migration"
-        )
-        "super.getUpdateTag($providerName)"
+    result = replaceExecutableRegex(result, Regex("""super\.getUpdateTag\(\)""")) {
+        "super.getUpdateTag(registries)"
     }
-    result = replaceExecutableRegex(
-        result,
-        Regex("""saveAdditional\(\s*(\w+)\s*\)\s*;""")
-    ) { match ->
-        if (enclosingJavaMethodNameAt(result, match.range.first) != "getUpdateTag") {
-            return@replaceExecutableRegex match.value
-        }
-        val providerName = requiredHolderLookupProviderNameAt(
+    if (result.contains("getUpdateTag(HolderLookup.Provider registries)")) {
+        result = replaceExecutableRegex(
             result,
-            match.range.first,
-            "BlockEntity getUpdateTag saveAdditional migration"
-        )
-        "saveAdditional(${match.groupValues[1]}, $providerName);"
-    }
-    result = replaceExecutableRegex(
-        result,
-        Regex("""\.saveWithoutMetadata\(net\.minecraft\.core\.RegistryAccess\.EMPTY\)""")
-    ) { match ->
-        if (enclosingJavaMethodNameAt(result, match.range.first) != "getUpdateTag") {
-            return@replaceExecutableRegex match.value
-        }
-        val providerName = requiredHolderLookupProviderNameAt(
+            Regex("""saveAdditional\(\s*(\w+)\s*\)\s*;""")
+        ) { match -> "saveAdditional(${match.groupValues[1]}, registries);" }
+        result = replaceExecutableRegex(
             result,
-            match.range.first,
-            "BlockEntity getUpdateTag saveWithoutMetadata migration"
-        )
-        ".saveWithoutMetadata($providerName)"
+            Regex("""\.saveWithoutMetadata\(net\.minecraft\.core\.RegistryAccess\.EMPTY\)""")
+        ) { ".saveWithoutMetadata(registries)" }
     }
 
     result = replaceExecutableRegex(
@@ -6069,30 +5864,19 @@ internal fun StructuralRefactorPass.migrateBlockEntitySerializationSource(
                 match.value
             } else {
                 needsHolderLookup = true
-                val providerName = uniqueHolderLookupProviderNameForMethodAt(result, match.range.first, "lookupProvider")
-                "public void handleUpdateTag($params, HolderLookup.Provider $providerName)"
+                "public void handleUpdateTag($params, HolderLookup.Provider lookupProvider)"
             }
         }
     result = replaceExecutableRegex(
         result,
         Regex("""super\.handleUpdateTag\s*\(\s*(\w+)\s*\)\s*;""")
     ) { match ->
-            if (enclosingJavaMethodNameAt(result, match.range.first) != "handleUpdateTag") {
-                return@replaceExecutableRegex match.value
-            }
             needsHolderLookup = true
-            val providerName = requiredHolderLookupProviderNameAt(
-                result,
-                match.range.first,
-                "BlockEntity handleUpdateTag super call migration"
-            )
-            "super.handleUpdateTag(${match.groupValues[1]}, $providerName);"
+            "super.handleUpdateTag(${match.groupValues[1]}, lookupProvider);"
         }
     javaMethodText(result, "handleUpdateTag")?.let { method ->
         val providerName = holderLookupProviderFromParameters(currentMethodParametersBeforeOffset(method, method.indexOf('{')))
-            ?: throw IllegalStateException(
-                "BlockEntity handleUpdateTag migration requires exactly one HolderLookup.Provider parameter"
-            )
+            ?: "lookupProvider"
         val migratedMethod = replaceExecutableRegex(
             method,
             Regex("""\b(?:this\.)?load\s*\(\s*(\w+)\s*\)\s*;""")
@@ -6115,8 +5899,7 @@ internal fun StructuralRefactorPass.migrateBlockEntitySerializationSource(
         )
     ) { match ->
         needsHolderLookup = true
-        val providerName = uniqueHolderLookupProviderNameForMethodAt(result, match.range.first, "lookupProvider")
-        "public void onDataPacket(${match.groupValues[1]}${match.groupValues[2]}, ${match.groupValues[3]}${match.groupValues[4]}, HolderLookup.Provider $providerName)"
+        "public void onDataPacket(${match.groupValues[1]}connection, ${match.groupValues[3]}${match.groupValues[4]}, HolderLookup.Provider lookupProvider)"
     }
 
     val packetName = Regex("""onDataPacket\s*\([^)]*ClientboundBlockEntityDataPacket\s+(\w+)""")
@@ -6133,9 +5916,7 @@ internal fun StructuralRefactorPass.migrateBlockEntitySerializationSource(
     }
     javaMethodText(result, "onDataPacket")?.let { method ->
         val providerName = holderLookupProviderFromParameters(currentMethodParametersBeforeOffset(method, method.indexOf('{')))
-            ?: throw IllegalStateException(
-                "BlockEntity onDataPacket migration requires exactly one HolderLookup.Provider parameter"
-            )
+            ?: "lookupProvider"
         var migratedMethod = replaceExecutableRegex(
             method,
             Regex("""\b(?:this\.)?handleUpdateTag\s*\(\s*(\w+)\s*\)\s*;""")
@@ -6164,24 +5945,14 @@ internal fun StructuralRefactorPass.migrateBlockEntitySerializationSource(
         Regex("""if\s*\(\s*(\w+)\s*!=\s*null\s*\)\s*\{\s*\r?\n\s*(?:this\.)?load\s*\(\s*\1\s*\)\s*;""")
     ) { match ->
             val tagName = match.groupValues[1]
-            val providerName = requiredHolderLookupProviderNameAt(
-                result,
-                match.range.first,
-                "BlockEntity nullable packet tag migration"
-            )
-            "if (!$tagName.isEmpty()) {\n            loadWithComponents($tagName, $providerName);"
+            "if (!$tagName.isEmpty()) {\n            loadWithComponents($tagName, lookupProvider);"
         }
     result = replaceExecutableRegex(
         result,
         Regex("""if\s*\(\s*!(\w+)\.isEmpty\(\)\s*\)\s*\{\s*\r?\n\s*(?:this\.)?load\s*\(\s*\1\s*\)\s*;""")
     ) { match ->
             val tagName = match.groupValues[1]
-            val providerName = requiredHolderLookupProviderNameAt(
-                result,
-                match.range.first,
-                "BlockEntity non-empty packet tag migration"
-            )
-            "if (!$tagName.isEmpty()) {\n            loadWithComponents($tagName, $providerName);"
+            "if (!$tagName.isEmpty()) {\n            loadWithComponents($tagName, lookupProvider);"
         }
 
     if (needsHolderLookup || result != source) {
@@ -6391,67 +6162,25 @@ internal fun StructuralRefactorPass.migrateINBTSerializableHolderLookupSource(
         result,
         Regex("""\b(public|protected)\s+CompoundTag\s+serializeNBT\s*\(\s*\)""")
     ) { match ->
-        val providerName = uniqueHolderLookupProviderNameForMethodAt(
-            result,
-            match.range.first,
-            "registries"
-        )
-        "${match.groupValues[1]} CompoundTag serializeNBT(HolderLookup.Provider $providerName)"
+        "${match.groupValues[1]} CompoundTag serializeNBT(net.minecraft.core.HolderLookup.Provider provider)"
     }
     result = replaceInSerializableTypes(
         result,
         Regex("""\b(public|protected)\s+void\s+deserializeNBT\s*\(\s*CompoundTag\s+([A-Za-z_$][\w$]*)\s*\)""")
     ) { match ->
-        val providerName = uniqueHolderLookupProviderNameForMethodAt(
-            result,
-            match.range.first,
-            "registries"
-        )
-        "${match.groupValues[1]} void deserializeNBT(HolderLookup.Provider $providerName, CompoundTag ${match.groupValues[2]})"
+        "${match.groupValues[1]} void deserializeNBT(net.minecraft.core.HolderLookup.Provider provider, CompoundTag ${match.groupValues[2]})"
     }
     // the widened overrides pass their provider on to the library implementation they extend
-    fun widenedOverrideRanges(text: String): List<IntRange> =
-        javaMethodRangesIncludingDefault(text)
-            .filter {
-                (it.name == "serializeNBT" || it.name == "deserializeNBT") &&
-                    it.header.contains("HolderLookup.Provider")
-            }
-            .map { it.range }
+    fun widenedOverrideRanges(text: String): List<IntRange> = javaMethodRangesIncludingDefault(text)
+        .filter { (it.name == "serializeNBT" || it.name == "deserializeNBT") && it.header.contains("HolderLookup.Provider provider") }
+        .map { it.range }
     var overrides = widenedOverrideRanges(result)
     result = replaceExecutableRegex(result, Regex("""\bsuper\.serializeNBT\(\s*\)""")) { match ->
-        if (overrides.none { match.range.first in it }) {
-            match.value
-        } else {
-            val providerName = exactHolderLookupProviderNameAtOrNull(
-                result,
-                match.range.first,
-                "INBTSerializable super.serializeNBT forwarding"
-            ) ?: throw IllegalStateException(
-                "Cannot resolve HolderLookup.Provider for super.serializeNBT forwarding"
-            )
-            "super.serializeNBT($providerName)"
-        }
+        if (overrides.any { match.range.first in it }) "super.serializeNBT(provider)" else match.value
     }
     overrides = widenedOverrideRanges(result)
-    result = replaceExecutableRegex(
-        result,
-        Regex("""\bsuper\.deserializeNBT\(\s*([^(),]+)\)""")
-    ) { match ->
-        if (overrides.none { match.range.first in it }) {
-            match.value
-        } else {
-            val providerName = exactHolderLookupProviderNameAtOrNull(
-                result,
-                match.range.first,
-                "INBTSerializable super.deserializeNBT forwarding"
-            ) ?: throw IllegalStateException(
-                "Cannot resolve HolderLookup.Provider for super.deserializeNBT forwarding"
-            )
-            "super.deserializeNBT($providerName, ${match.groupValues[1].trim()})"
-        }
-    }
-    if (result != source && result.contains("HolderLookup.Provider")) {
-        result = addImportIfMissing(result, "net.minecraft.core.HolderLookup")
+    result = replaceExecutableRegex(result, Regex("""\bsuper\.deserializeNBT\(\s*(?!provider\b)([^(),]+)\)""")) { match ->
+        if (overrides.any { match.range.first in it }) "super.deserializeNBT(provider, ${match.groupValues[1].trim()})" else match.value
     }
     return result
 }
@@ -6481,10 +6210,7 @@ internal fun StructuralRefactorPass.collectProjectINBTSerializableTypes(javaFile
             if (type.fqn in serializableFqns) continue
             val inheritsSerializable = type.superTypeRefs.any { reference ->
                 val resolved = resolveJavaTypeReference(reference, type.source, type.packageName, knownFqns)
-                isCompoundTagINBTSerializableReference(reference, resolved, type.source) ||
-                    (resolved != null &&
-                        resolved != "net.neoforged.neoforge.common.util.INBTSerializable" &&
-                        resolved in libraryNbtSerializableRoots) ||
+                (resolved != null && resolved in libraryNbtSerializableRoots) ||
                     (resolved != null && resolved in serializableFqns) ||
                     (resolved != null && byFqn[resolved]?.fqn in serializableFqns)
             }
@@ -6495,26 +6221,6 @@ internal fun StructuralRefactorPass.collectProjectINBTSerializableTypes(javaFile
         }
     } while (changed)
     return serializableFqns
-}
-
-internal fun StructuralRefactorPass.isCompoundTagINBTSerializableReference(
-    reference: String,
-    resolvedReference: String?,
-    ownerSource: String
-): Boolean {
-    if (resolvedReference != "net.neoforged.neoforge.common.util.INBTSerializable") return false
-    val genericStart = reference.indexOf('<')
-    val genericEnd = reference.lastIndexOf('>')
-    if (genericStart < 0 || genericEnd <= genericStart) return false
-    val arguments = splitTopLevelJavaArgs(reference.substring(genericStart + 1, genericEnd))
-    if (arguments.size != 1) return false
-    val tagType = arguments.single().trim()
-    if (tagType == "net.minecraft.nbt.CompoundTag") return true
-    if (tagType != "CompoundTag") return false
-    return Regex("""(?m)^[ \t]*import\s+net\.minecraft\.nbt\.CompoundTag\s*;""")
-        .containsMatchIn(ownerSource) ||
-        Regex("""(?m)^[ \t]*import\s+net\.minecraft\.nbt\.\*\s*;""")
-            .containsMatchIn(ownerSource)
 }
 
 internal fun StructuralRefactorPass.javaTypeContracts(source: String): List<JavaTypeContract> {
@@ -7341,7 +7047,6 @@ internal fun StructuralRefactorPass.migrateAdvancementHolderIteration(source: St
 /** Expression that yields a RegistryAccess / HolderLookup.Provider from the enclosing method's parameters, if any. */
 internal fun StructuralRefactorPass.registryAccessExpressionInScope(methodHeader: String, methodBody: String, beforeOffset: Int = methodBody.length): String? {
     val parameters = javaMethodParameterText(methodHeader)?.let(::splitTopLevelJavaArgs).orEmpty()
-    holderLookupProviderFromParameters(parameters)?.let { return it }
     val locals = Regex("""(?m)^\s*(?:final\s+)?([A-Z][\w.<>]*)\s+([A-Za-z_$][\w$]*)\s*=""").findAll(methodBody)
         .filter { it.range.first < beforeOffset }
         .map { "${it.groupValues[1]} ${it.groupValues[2]}" }.toList()

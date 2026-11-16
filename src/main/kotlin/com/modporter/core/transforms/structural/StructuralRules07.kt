@@ -8,12 +8,9 @@ import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
 import com.github.javaparser.ast.body.FieldDeclaration
 import com.github.javaparser.ast.body.MethodDeclaration
 import com.github.javaparser.ast.body.Parameter
-import com.github.javaparser.ast.body.TypeDeclaration
 import com.github.javaparser.ast.body.VariableDeclarator
 import com.github.javaparser.ast.expr.*
-import com.github.javaparser.ast.stmt.ExplicitConstructorInvocationStmt
 import com.github.javaparser.ast.type.ClassOrInterfaceType
-import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.*
 import mu.KotlinLogging
@@ -478,11 +475,7 @@ internal fun StructuralRefactorPass.migrateLegacyNbtUtilsBlockPosCompoundSource(
     // 1.20.5 changed NbtUtils.readBlockPos/writeBlockPos from an {X,Y,Z} compound to an int
     // array under a key; the mod's saved data keeps the compound layout through private helpers,
     // whether the pair is called directly or passed as a method reference.
-    val executable = maskJavaCommentsAndLiterals(source)
-    if (!Regex("""(?m)^[ \t]*import\s+net\.minecraft\.nbt\.NbtUtils\s*;[ \t]*$""").containsMatchIn(executable)) {
-        return source
-    }
-    if (!Regex("""\bNbtUtils(?:\.|::)(?:read|write)BlockPos\b""").containsMatchIn(executable)) return source
+    if (!Regex("""\bNbtUtils(?:\.|::)(?:read|write)BlockPos\b""").containsMatchIn(maskJavaCommentsAndLiterals(source))) return source
 
     var migrated = replaceNbtUtilsBlockPosCall(source, "readBlockPos", "modporterReadLegacyBlockPos")
     migrated = replaceNbtUtilsBlockPosCall(migrated, "writeBlockPos", "modporterWriteLegacyBlockPos")
@@ -502,7 +495,7 @@ internal fun StructuralRefactorPass.migrateLegacyNbtUtilsBlockPosCompoundSource(
         result = addImportIfMissing(result, "net.minecraft.nbt.CompoundTag")
     }
     val withoutNbtUtilsImport = removeImport(result, "net.minecraft.nbt.NbtUtils")
-    if (!Regex("""\bNbtUtils\b""").containsMatchIn(maskJavaCommentsAndLiterals(withoutNbtUtilsImport))) {
+    if (!Regex("""\bNbtUtils\b""").containsMatchIn(withoutNbtUtilsImport)) {
         result = withoutNbtUtilsImport
     }
     return result
@@ -510,15 +503,14 @@ internal fun StructuralRefactorPass.migrateLegacyNbtUtilsBlockPosCompoundSource(
 
 internal fun StructuralRefactorPass.replaceNbtUtilsBlockPosCall(source: String, methodName: String, replacementName: String): String {
     val token = "NbtUtils.$methodName("
-    val executable = maskJavaCommentsAndLiterals(source)
     val migrated = StringBuilder()
     var cursor = 0
     var changed = false
     while (cursor < source.length) {
-        val tokenIndex = executable.indexOf(token, cursor)
+        val tokenIndex = source.indexOf(token, cursor)
         if (tokenIndex < 0) break
         val openParen = tokenIndex + "NbtUtils.$methodName".length
-        val closeParen = findMatchingParen(executable, openParen)
+        val closeParen = findMatchingParen(source, openParen)
         if (closeParen < 0) {
             break
         }
@@ -1998,77 +1990,36 @@ internal fun StructuralRefactorPass.migrateLegacySpawnEggItemTypeCalls(source: S
 }
 
 internal fun StructuralRefactorPass.migrateLegacyTriStateEventResults(source: String): String {
-    val target = "net.neoforged.neoforge.common.util.TriState"
-    val resultImport = Regex(
-        """(?m)^import\s+net\.(?:minecraftforge\.eventbus|neoforged\.bus)\.api\.Event\.Result;[ \t]*\r?\n"""
-    )
-    val hasResultImport = resultImport.containsMatchIn(source)
-    val triStateImports = Regex("""(?m)^import\s+([A-Za-z_$][\w$.]*\.TriState);[ \t]*\r?$""")
-        .findAll(maskJavaCommentsAndLiterals(source))
-        .map { it.groupValues[1] }
-        .toSet()
-    val targetRef = if (triStateImports.any { it != target }) target else "TriState"
-    val targetConstants = mapOf(
-        "DENY" to "FALSE",
-        "ALLOW" to "TRUE",
-        "DEFAULT" to "DEFAULT"
-    )
-
-    var result = resultImport.replace(source, "")
-    val staticResultImport = Regex(
-        """(?m)^import\s+static\s+net\.(?:minecraftforge\.eventbus|neoforged\.bus)\.api\.Event\.Result\.(DENY|ALLOW|DEFAULT);[ \t]*\r?\n"""
-    )
-    val staticallyImported = staticResultImport.findAll(result)
-        .map { it.groupValues[1] }
-        .toSet()
-    result = staticResultImport.replace(result) { match ->
-        val replacement = targetConstants.getValue(match.groupValues[1])
-        "import static $target.$replacement;\n"
-    }
-    staticallyImported.forEach { legacy ->
-        val replacement = targetConstants.getValue(legacy)
-        result = replaceExecutableRegex(
-            result,
-            Regex("""(?<![\w$.])${Regex.escape(legacy)}(?![\w$])""")
-        ) { replacement }
-    }
-    targetConstants.forEach { (legacy, replacement) ->
-        result = replaceExecutableRegex(
-            result,
-            Regex("""(?<![\w$.])Event\.Result\.${Regex.escape(legacy)}(?![\w$])""")
-        ) { "$targetRef.$replacement" }
-        if (hasResultImport) {
-            result = replaceExecutableRegex(
-                result,
-                Regex("""(?<![\w$.])Result\.${Regex.escape(legacy)}(?![\w$])""")
-            ) { "$targetRef.$replacement" }
+    var spelled = source
+    val resultImport = Regex("""(?m)^import\s+net\.(?:minecraftforge\.eventbus|neoforged\.bus)\.api\.Event\.Result;[ \t]*\r?\n""")
+    if (resultImport.containsMatchIn(spelled)) {
+        spelled = resultImport.replace(spelled, "")
+        spelled = replaceExecutableRegex(spelled, Regex("""(?<![\w$.])Result\.(DENY|ALLOW|DEFAULT)(?![\w$])""")) { match ->
+            "Event.Result.${match.groupValues[1]}"
         }
     }
-    result = replaceExecutableRegex(
-        result,
-        Regex("""(?<![\w$.])Event\.Result(?=\s+[A-Za-z_$])""")
-    ) { targetRef }
-    if (hasResultImport) {
-        result = replaceExecutableRegex(
-            result,
-            Regex("""(?<![\w$.])Result(?=\s+[A-Za-z_$])""")
-        ) { targetRef }
+    val staticResultImport = Regex("""(?m)^import\s+static\s+net\.(?:minecraftforge\.eventbus|neoforged\.bus)\.api\.Event\.Result\.(DENY|ALLOW|DEFAULT);[ \t]*\r?\n""")
+    staticResultImport.findAll(spelled).map { it.groupValues[1] }.toSet().forEach { constant ->
+        spelled = replaceExecutableRegex(spelled, Regex("""(?<![\w$.])$constant(?![\w$])""")) { "Event.Result.$constant" }
     }
-    if (result == source) return source
+    spelled = staticResultImport.replace(spelled, "")
+    if (!spelled.contains("Event.Result.")) return source
+    var result = spelled
+        .replace("Event.Result.DENY", "TriState.FALSE")
+        .replace("Event.Result.ALLOW", "TriState.TRUE")
+        .replace("Event.Result.DEFAULT", "TriState.DEFAULT")
     // the bus has no Event.Result (bus 8 jar): values held in that type are the TriStates above
     // and the TriState getters of the 1.21.1 events (getUseBlock/getUseItem)
+    result = replaceExecutableRegex(result, Regex("""(?<![\w$.])Event\.Result(?=\s+[A-Za-z_$])""")) { "TriState" }
     // NeoForge events have no setResult; a DENY right after setCanceled(true) said the same thing.
-    result = Regex(
-        """(?m)^([ \t]*([A-Za-z_$][\w$]*)\.setCanceled\(\s*true\s*\);[ \t]*\r?\n)""" +
-            """[ \t]*\2\.setResult\(\s*${Regex.escape(targetRef)}\.FALSE\s*\);[ \t]*\r?\n"""
-    )
+    result = Regex("""(?m)^([ \t]*([A-Za-z_$][\w$]*)\.setCanceled\(\s*true\s*\);[ \t]*\r?\n)[ \t]*\2\.setResult\(\s*TriState\.FALSE\s*\);[ \t]*\r?\n""")
         .replace(result) { match -> match.groupValues[1] }
-    if (targetRef == "TriState") {
+    if (result != source) {
         result = addImportIfMissing(result, "net.neoforged.neoforge.common.util.TriState")
-    }
-    val withoutEventImport = removeImport(result, "net.neoforged.bus.api.Event")
-    if (!Regex("""\bEvent\b""").containsMatchIn(maskJavaCommentsAndLiterals(withoutEventImport))) {
-        result = withoutEventImport
+        val withoutEventImport = removeImport(result, "net.neoforged.bus.api.Event")
+        if (!Regex("""\bEvent\b""").containsMatchIn(withoutEventImport)) {
+            result = withoutEventImport
+        }
     }
     return result
 }
@@ -2814,76 +2765,36 @@ internal fun StructuralRefactorPass.migrateLegacyItemConstructorsAndProperties(s
         }
         result = addImportIfMissing(result, "net.minecraft.world.item.Item")
     }
-    if (Regex("""(?m)^\s*import\s+net\.minecraft\.world\.item\.SwordItem\s*;""")
-            .containsMatchIn(maskJavaCommentsAndLiterals(result))) {
-        result = rewriteExecutableJavaNew(result, "SwordItem") { args ->
-            if (args.size != 4) return@rewriteExecutableJavaNew null
+    result = rewriteExecutableJavaNew(result, "SwordItem") { args ->
+        if (args.size != 4) return@rewriteExecutableJavaNew null
+        val tier = args[0].trim()
+        val damage = args[1].trim()
+        val speed = args[2].trim()
+        val properties = args[3].trim()
+        "new SwordItem($tier, $properties.attributes(SwordItem.createAttributes($tier, $damage, $speed)))"
+    }
+    result = migrateLegacyRecordItemRegistrations(result)
+    if (Regex("""\bextends\s+SwordItem\b""").containsMatchIn(maskJavaCommentsAndLiterals(result))) {
+        result = rewriteExecutableSuperConstructorCalls(result) { args ->
+            if (args.size != 4) return@rewriteExecutableSuperConstructorCalls null
             val tier = args[0].trim()
             val damage = args[1].trim()
             val speed = args[2].trim()
             val properties = args[3].trim()
-            "new SwordItem($tier, $properties.attributes(SwordItem.createAttributes($tier, $damage, $speed)))"
+            "super($tier, $properties.attributes(SwordItem.createAttributes($tier, $damage, $speed)))"
         }
     }
-    result = migrateLegacyRecordItemRegistrations(result)
-    return migrateLegacyToolItemSuperConstructors(result)
-}
-
-private fun StructuralRefactorPass.migrateLegacyToolItemSuperConstructors(source: String): String {
-    val parser = JavaParser(
-        ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
-    )
-    val parsed = parser.parse(source)
-    val cu = parsed.result.orElseThrow {
-        IllegalStateException(
-            "Cannot parse legacy tool item constructors: ${parsed.problems.joinToString()}"
-        )
-    }
-    val importedOwners = cu.imports
-        .filter { !it.isStatic && !it.isAsterisk }
-        .associateBy { it.nameAsString }
-    val toolOwners = linkedMapOf(
-        "SwordItem" to "net.minecraft.world.item.SwordItem",
-        "PickaxeItem" to "net.minecraft.world.item.PickaxeItem",
-        "AxeItem" to "net.minecraft.world.item.AxeItem",
-        "HoeItem" to "net.minecraft.world.item.HoeItem",
-        "ShovelItem" to "net.minecraft.world.item.ShovelItem"
-    )
-    LexicalPreservingPrinter.setup(cu)
-    var changed = false
-    cu.findAll(ClassOrInterfaceDeclaration::class.java).forEach typeLoop@{ type ->
-        val extended = type.extendedTypes.singleOrNull()?.nameWithScope ?: return@typeLoop
-        val simpleOwner = toolOwners.entries.singleOrNull { (simple, qualified) ->
-            extended == qualified || extended == simple && qualified in importedOwners
-        }?.key ?: return@typeLoop
-        type.constructors.forEach constructorLoop@{ constructor ->
-            val superCall = constructor.body.statements.firstOrNull() as? ExplicitConstructorInvocationStmt
-                ?: return@constructorLoop
-            if (superCall.isThis || superCall.arguments.size != 4) return@constructorLoop
-            val tier = superCall.arguments[0].clone()
-            val damage = superCall.arguments[1].clone()
-            val speed = superCall.arguments[2].clone()
-            val properties = superCall.arguments[3].clone()
-            val attributeOwner = if (simpleOwner == "SwordItem") {
-                NameExpr("SwordItem")
-            } else {
-                "net.minecraft.world.item.DiggerItem".split('.').drop(1)
-                    .fold(NameExpr("net") as Expression) { scope, part ->
-                        FieldAccessExpr(scope, part)
-                    }
-            }
-            val attributes = MethodCallExpr(attributeOwner, "createAttributes")
-                .addArgument(tier.clone())
-                .addArgument(damage)
-                .addArgument(speed)
-            val propertiesWithAttributes = MethodCallExpr(properties, "attributes").addArgument(attributes)
-            superCall.arguments.clear()
-            superCall.addArgument(tier)
-            superCall.addArgument(propertiesWithAttributes)
-            changed = true
+    if (Regex("""\bextends\s+(?:PickaxeItem|AxeItem|HoeItem|ShovelItem)\b""").containsMatchIn(maskJavaCommentsAndLiterals(result))) {
+        result = rewriteExecutableSuperConstructorCalls(result) { args ->
+            if (args.size != 4) return@rewriteExecutableSuperConstructorCalls null
+            val tier = args[0].trim()
+            val damage = args[1].trim()
+            val speed = args[2].trim()
+            val properties = args[3].trim()
+            "super($tier, $properties.attributes(net.minecraft.world.item.DiggerItem.createAttributes($tier, $damage, $speed)))"
         }
     }
-    return if (changed) LexicalPreservingPrinter.print(cu) else source
+    return result
 }
 
 internal fun StructuralRefactorPass.migrateLegacyBowlFoodItemSubclasses(projectDir: Path, dryRun: Boolean): List<Change> {
@@ -3429,8 +3340,7 @@ internal fun StructuralRefactorPass.migrateFmlClientSetupMenuRegistrationMethods
 }
 
 internal fun StructuralRefactorPass.migrateLegacyEnchantmentIterationSource(source: String): String {
-    if (collectEnchantmentHolderVariables(source).isEmpty() &&
-        !source.contains("EnchantmentHelper.getEnchantments(") &&
+    if (!source.contains("EnchantmentHelper.getEnchantments(") &&
         !source.contains("EnchantmentHelper.enchantItem(") &&
         !source.contains(".canApplyAtEnchantingTable(") &&
         !source.contains(".getAllEnchantments()") &&
@@ -3476,28 +3386,10 @@ internal fun StructuralRefactorPass.migrateLegacyEnchantmentIterationSource(sour
             "\t\t\tnet.minecraft.core.Holder<net.minecraft.world.item.enchantment.Enchantment> ${match.groupValues[2]} = entry.getKey();\n" +
             "\t\t\tint ${match.groupValues[3]} = entry.getIntValue();"
     }
-    val enchantmentParser = JavaParser(
-        ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
-    )
-    val enchantmentUnit = enchantmentParser.parse(result).result.orElse(null)
-    val exactEnchantment = enchantmentUnit?.let(::ExactJavaSemantics)
-    result = replaceExecutableRegex(
-        result,
-        Regex(
-            """EnchantmentHelper\.getEnchantmentsForCrafting\(([^)]+)\)\.containsKey\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)\s*\)"""
-        )
-    ) { match ->
-        val key = enchantmentParser.parseExpression<Expression>(match.groupValues[2]).result.orElse(null) as? FieldAccessExpr
-        if (key == null || exactEnchantment?.exactStaticScope(
-                key.scope,
-                "Enchantments",
-                "net.minecraft.world.item.enchantment.Enchantments"
-            ) != true
-        ) {
-            match.value
-        } else {
-            "EnchantmentHelper.getEnchantmentsForCrafting(${match.groupValues[1]}).keySet().stream().anyMatch(holder -> holder.is(${match.groupValues[2]}))"
-        }
+    result = Regex(
+        """EnchantmentHelper\.getEnchantmentsForCrafting\(([^)]+)\)\.containsKey\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)\s*\)"""
+    ).replace(result) { match ->
+        "EnchantmentHelper.getEnchantmentsForCrafting(${match.groupValues[1]}).keySet().stream().anyMatch(holder -> holder.is(${match.groupValues[2]}))"
     }
     val holderVariables = collectEnchantmentHolderVariables(result)
     result = Regex("""([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)\.get\(\)\.equals\(\s*([A-Za-z_$][\w$]*)\s*\)""")
@@ -3631,30 +3523,15 @@ internal fun StructuralRefactorPass.migrateLambdaCapturedMutableItemStackLocals(
     if (!source.contains("->") || !source.contains("ItemStack")) return source
     var result = source
     var changed = false
-    // Each migration retires one mutable-local/lambda-statement capture pair. One local can be
-    // captured by many lambdas, so declarations alone are not a sufficient convergence bound.
-    val executable = maskJavaCommentsAndLiterals(source)
-    val declarationCount = Regex("""\bItemStack\s+[A-Za-z_$][\w$]*\b""")
-        .findAll(executable)
-        .count()
-        .coerceAtLeast(1)
-    val lambdaCount = Regex("""->""")
-        .findAll(executable)
-        .count()
-        .coerceAtLeast(1)
-    val migrationBudget = minOf(
-        source.length.coerceAtLeast(1).toLong(),
-        declarationCount.toLong() * lambdaCount.toLong()
-    ).toInt()
+    // Each migration retires one captured local; a source cannot need more than it has
+    // ItemStack declarations, so anything beyond that is a rule bug, not more work.
+    val declarationBudget = Regex("""\bItemStack\s+[A-Za-z_$][\w$]*\s*=""").findAll(source).count() + 1
     var migrations = 0
-    while (migrations < migrationBudget) {
+    while (migrations < declarationBudget) {
         val migration = mutableItemStackLambdaCaptureMigration(result) ?: break
         result = result.replaceRange(migration.methodRange, migration.replacementMethod)
         changed = true
         migrations++
-    }
-    check(mutableItemStackLambdaCaptureMigration(result) == null) {
-        "Mutable ItemStack lambda-capture migration did not converge within $migrationBudget capture pairs"
     }
     return if (changed) result else source
 }
@@ -4095,6 +3972,7 @@ internal fun StructuralRefactorPass.rewriteLegacyHolderEnchantmentSupportChecks(
 }
 
 internal fun StructuralRefactorPass.rewriteLegacyEnchantmentHolderComparisons(source: String): String {
+    if (!source.contains("Enchantments.")) return source
     val holderVariables = collectEnchantmentHolderVariables(source)
     if (holderVariables.isEmpty()) return source
     var result = source
@@ -4520,14 +4398,6 @@ internal fun StructuralRefactorPass.inferHolderLookupProviderExpression(source: 
     return null
 }
 
-internal fun StructuralRefactorPass.inferEnrichedRecipeProviderExpression(source: String): String? =
-    Regex(
-        """(?:java\.util\.concurrent\.)?CompletableFuture\s*<\s*HolderLookup\.Provider\s*>\s+([A-Za-z_$][\w$]*)\s*=\s*[^;]*getRegistryProvider\s*\("""
-    ).findAll(source)
-        .lastOrNull()
-        ?.groupValues
-        ?.get(1)
-
 internal fun StructuralRefactorPass.migrateLegacyRecipeProviderSource(
     source: String,
     recipeProviderClasses: RecipeProviderClassHints,
@@ -4609,8 +4479,7 @@ internal fun StructuralRefactorPass.migrateLegacyRecipeProviderSource(
         result = removeLegacyRecipeProviderStaticHasOverride(result)
     }
 
-    val providerExpression = inferEnrichedRecipeProviderExpression(result)
-        ?: inferHolderLookupProviderExpression(result)
+    val providerExpression = inferHolderLookupProviderExpression(result)
     if (providerExpression != null && (result.contains("DataGenerator") || result.contains("GatherDataEvent"))) {
         for (className in recipeProviderClasses.concrete) {
             val token = "new $className("
@@ -4633,12 +4502,11 @@ internal fun StructuralRefactorPass.migrateLegacyRecipeProviderSource(
                     cursor = closeParen + 1
                 }
             }
-            val factoryOutputName = uniqueJavaLocalName(result, "modporterOutput")
             result = Regex(
                 """\(\s*DataProvider\.Factory\s*<\s*${Regex.escape(className)}\s*>\s*\)\s*${Regex.escape(className)}::new"""
             ).replace(result) {
                 changed = true
-                "(DataProvider.Factory<$className>) $factoryOutputName -> new $className($factoryOutputName, $providerExpression)"
+                "(DataProvider.Factory<$className>) output -> new $className(output, $providerExpression)"
             }
         }
     }
@@ -4707,7 +4575,7 @@ internal fun StructuralRefactorPass.migrateLegacyRecipeBuilderSource(
     // Aliases such as `private final RecipeSerializer<? extends AbstractCookingRecipe> FURNACE =
     // RecipeSerializer.SMELTING_RECIPE, SMOKER = ...;` cannot carry a factory: their wildcard type
     // never binds the factory's T, so they are inlined at their call sites and the declaration
-    // goes, as Create 6 inlines them.
+    // goes.
     val serializerAliases = linkedMapOf<String, String>()
     val aliasDeclaration = Regex(
         """(?m)^[ \t]*(?:private|protected|public)?\s*(?:static\s+)?(?:final\s+)?RecipeSerializer\s*<\s*\?\s+extends\s+AbstractCookingRecipe\s*>\s+((?:[A-Za-z_$][\w$]*\s*=\s*RecipeSerializer\.[A-Z_]+\s*,\s*)*[A-Za-z_$][\w$]*\s*=\s*RecipeSerializer\.[A-Z_]+)\s*;[ \t]*\r?\n?"""
@@ -5698,77 +5566,6 @@ internal fun StructuralRefactorPass.migrateLegacyLootFunctionSource(source: Stri
         }
     }
     return result
-}
-
-private fun StructuralRefactorPass.migrateExactLootingMixinTarget(source: String): String {
-    if (!source.contains("LootingEnchantFunction") || !source.contains("@Mixin")) return source
-    val parser = JavaParser(
-        ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
-    )
-    val parsed = parser.parse(source)
-    val unit = parsed.result.orElse(null) ?: return source
-    val legacyFunction = "net.minecraft.world.level.storage.loot.functions.LootingEnchantFunction"
-    val targetFunction = "net.minecraft.world.level.storage.loot.functions.EnchantedCountIncreaseFunction"
-    fun hasExactImport(qualified: String): Boolean = unit.imports.any {
-        !it.isStatic && !it.isAsterisk && it.nameAsString == qualified
-    }
-    if (!hasExactImport(legacyFunction) ||
-        !hasExactImport("org.spongepowered.asm.mixin.Mixin") ||
-        unit.findAll(TypeDeclaration::class.java).any { it.nameAsString == "LootingEnchantFunction" }
-    ) {
-        return source
-    }
-
-    val targets = unit.findAll(ClassOrInterfaceDeclaration::class.java)
-        .flatMap { declaration ->
-            declaration.annotations.filterIsInstance<SingleMemberAnnotationExpr>()
-        }
-        .mapNotNull { annotation ->
-            if (annotation.nameAsString != "Mixin") return@mapNotNull null
-            val target = annotation.memberValue as? ClassExpr ?: return@mapNotNull null
-            target.takeIf { it.typeAsString == "LootingEnchantFunction" }
-        }
-    if (targets.isEmpty()) return source
-
-    LexicalPreservingPrinter.setup(unit)
-    targets.forEach { it.setType("EnchantedCountIncreaseFunction") }
-    unit.imports.filter {
-        !it.isStatic && !it.isAsterisk && it.nameAsString == legacyFunction
-    }.forEach { it.remove() }
-    if (!hasExactImport(targetFunction)) {
-        unit.addImport(targetFunction)
-    }
-    return LexicalPreservingPrinter.print(unit)
-}
-
-internal fun StructuralRefactorPass.migrateExactLootingMixinTargets(
-    projectDir: Path,
-    dryRun: Boolean
-): List<Change> {
-    val srcDir = projectDir.resolve("src/main/java")
-    if (!srcDir.exists()) return emptyList()
-
-    val changes = mutableListOf<Change>()
-    walkJavaSourceRoots(srcDir)
-        .filter { it.toString().endsWith(".java") }
-        .forEach { javaFile ->
-            val source = javaFile.readText()
-            val migrated = migrateExactLootingMixinTarget(source)
-            if (migrated == source) return@forEach
-            if (!dryRun) {
-                javaFile.writeText(migrated)
-            }
-            changes += Change(
-                file = javaFile,
-                line = 0,
-                description = "Migrate exact LootingEnchantFunction mixin target in ${javaFile.fileName}",
-                before = "@Mixin(LootingEnchantFunction.class)",
-                after = "@Mixin(EnchantedCountIncreaseFunction.class)",
-                confidence = Confidence.HIGH,
-                ruleId = "struct-looting-function-mixin-target"
-            )
-        }
-    return changes
 }
 
 internal fun StructuralRefactorPass.migrateLegacySetNbtContainerContentsSource(source: String): String? {

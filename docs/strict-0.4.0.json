@@ -1,0 +1,132 @@
+{
+  "schemaVersion": 1,
+  "version": "0.4.0",
+  "recordedOn": "2026-11-16",
+  "runId": "g16fa",
+  "precedingCreateRun": "g16ch",
+  "profile": "public",
+  "scope": "Strict source-project benchmark; separately distributed mod JARs have their own packaged-artifact validation.",
+  "targets": [
+    "constructionwand",
+    "instantworldmirror",
+    "hotbath",
+    "showercore",
+    "sakura",
+    "twilightforest",
+    "aether",
+    "beyondtheveil",
+    "starmeowcraft",
+    "create",
+    "worldedit"
+  ],
+  "totals": {
+    "targets": 11,
+    "passed": 11,
+    "failed": 0,
+    "skipped": 0,
+    "changes": 38706,
+    "high": 38705,
+    "medium": 1,
+    "low": 0,
+    "skippedTransforms": 0,
+    "errors": 0,
+    "reviewSignalCount": 1,
+    "rawReviewSignalCount": 1,
+    "validatedReviewSignalCount": 1,
+    "unresolvedReviewSignalCount": 0
+  },
+  "gameTests": [
+    {
+      "target": "constructionwand",
+      "requiredPassed": 1,
+      "total": 1
+    },
+    {
+      "target": "instantworldmirror",
+      "requiredPassed": 51,
+      "total": 51
+    },
+    {
+      "target": "hotbath",
+      "requiredPassed": 1,
+      "total": 1
+    },
+    {
+      "target": "showercore",
+      "requiredPassed": 155,
+      "total": 155
+    },
+    {
+      "target": "sakura",
+      "requiredPassed": 1,
+      "total": 1
+    },
+    {
+      "target": "twilightforest",
+      "requiredPassed": 1,
+      "total": 1
+    },
+    {
+      "target": "aether",
+      "requiredPassed": 1,
+      "total": 1
+    },
+    {
+      "target": "beyondtheveil",
+      "requiredPassed": 1,
+      "total": 1
+    },
+    {
+      "target": "starmeowcraft",
+      "requiredPassed": 1,
+      "total": 1
+    },
+    {
+      "target": "create",
+      "requiredPassed": 60,
+      "total": 60
+    },
+    {
+      "target": "worldedit",
+      "requiredPassed": 1,
+      "total": 1
+    }
+  ],
+  "requiredGameTestsPassed": 274,
+  "toolInventory": {
+    "file": "modporter-0.4.0-all.jar",
+    "sha256": "1134fa8ae04d50d904396fc2b59b77d7e668464f8dd63cfcf4c2eb521d37a9f4",
+    "sourceSetMainEntriesMatched": 5508,
+    "compiledMainTreeSha256": "51fa6ed85f5320d01f4d86e6c99f8ff1d974005cd51eba5acc2108b4c2de573a"
+  },
+  "sourceSnapshot": {
+    "files": 724,
+    "sha256": "e83914777c6db26f8ceab63af55e1508566595b7f0af48e14d7864b91a42cfb1",
+    "trees": {
+      "src": {
+        "files": 697,
+        "sha256": "db60db2433ad248d8b78a56df803859cbb7d2b401ec8caf4a61a5fb288a5ec1e"
+      },
+      "scripts": {
+        "files": 17,
+        "sha256": "90bd7e446ddabc3c6bde9b40f0154618b8a04a66ee4899497cbca71bd4bad083"
+      },
+      "gradle": {
+        "files": 3,
+        "sha256": "fbce253413607f4609de9eaecf03da11058df4da56d0fdbceaf65d6abe981976"
+      }
+    }
+  },
+  "acceptanceReceiptSha256": "299db3bd2a4ca239da216bd07802f332574e7411afe5861baf216852342f714a",
+  "canonicalBuild": {
+    "passed": true,
+    "tests": 2727,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 5,
+    "testKitRequired": 2,
+    "testKitPassed": 2,
+    "optInCompileTestsPassed": 4,
+    "publicPythonTestsPassed": 41
+  }
+}

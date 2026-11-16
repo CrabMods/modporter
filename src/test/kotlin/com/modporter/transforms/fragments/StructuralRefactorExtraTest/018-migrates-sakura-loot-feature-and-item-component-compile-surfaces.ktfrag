@@ -167,7 +167,7 @@
         assertTrue(feature.contains("DeferredHolder<StructurePoolElementType<?>, StructurePoolElementType<JapaneseHouseElement>> JAPANESE_HOUSE"))
         assertTrue(sheath.contains("super(properties.durability(Tiers.WOOD.getUses()));"))
         assertTrue(sheath.contains("ItemStack sheathStack = player.getItemInHand(hand);"))
-        assertTrue(sheath.contains("otherStack.copy().save(level.registryAccess(), new net.minecraft.nbt.CompoundTag())"), sheath)
+        assertTrue(sheath.contains("otherStack.copy().save(player.registryAccess(), new net.minecraft.nbt.CompoundTag())"))
         assertTrue(sheath.contains("InteractionResultHolder.success(player.getItemInHand(hand))"))
         assertTrue(riceSeeds.contains("return result;"))
         assertTrue(!riceSeeds.contains("this.has(net.minecraft.core.component.DataComponents.FOOD)"))

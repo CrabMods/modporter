@@ -491,8 +491,8 @@ class StrictReviewValidationTest {
                     add(
                         Change(
                             file = output.resolve(
-                                "src/main/java/com/simibubi/create/foundation/map/" +
-                                    "StationMapDecorationRenderer.java"
+                                "src/main/java/com/simibubi/create/" +
+                                    "ModPorterMapDecorationRenderers.java"
                             ),
                             line = 1,
                             description = "Generate the native Create station map decoration family",
@@ -601,11 +601,10 @@ class StrictReviewValidationTest {
 
         fun stageStationFamily() {
             writeStationSource(
-                "src/main/java/com/simibubi/create/AllMapDecorationTypes.java",
+                "src/main/java/com/simibubi/create/ModPorterMapDecorationTypes.java",
                 """
-                final class AllMapDecorationTypes {
-                    static final Object STATION_MAP_DECORATION = null;
-                    Object value = DeferredRegister.create(Registries.MAP_DECORATION_TYPE, "create");
+                final class ModPorterMapDecorationTypes {
+                    Object types = DeferredRegister.create(Registries.MAP_DECORATION_TYPE, "create");
                 }
                 """.trimIndent()
             )
@@ -614,27 +613,18 @@ class StrictReviewValidationTest {
                 "interface StationMapData { void addStationMarker(Object marker); }\n"
             )
             writeStationSource(
-                "src/main/java/com/simibubi/create/foundation/map/StationMapDecorationRenderer.java",
+                "src/main/java/com/simibubi/create/ModPorterMapDecorationRenderers.java",
                 """
-                final class StationMapDecorationRenderer implements IMapDecorationRenderer {
-                    public boolean render(Object decoration) { return true; }
+                final class ModPorterMapDecorationRenderers {
+                    static void register(RegisterMapDecorationRenderersEvent event) {
+                        event.register(null, new StationRenderer());
+                    }
+                    static final class StationRenderer implements IMapDecorationRenderer {
+                        public boolean render(Object decoration) { return true; }
+                    }
                 }
                 """.trimIndent()
             )
-            writeStationSource(
-                "src/main/java/com/simibubi/create/foundation/map/StationMapDecorationEvents.java",
-                """
-                final class StationMapDecorationEvents {
-                    RegisterMapDecorationRenderersEvent event;
-                    Object renderer = new StationMapDecorationRenderer();
-                }
-                """.trimIndent()
-            )
-            val texture = output.resolve(
-                "src/main/resources/assets/create/textures/map/decorations/station.png"
-            )
-            texture.parent.createDirectories()
-            texture.writeBytes(byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47))
         }
 
         private fun writeStationSource(relative: String, source: String) {

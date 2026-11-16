@@ -12,6 +12,11 @@ import kotlin.io.path.writeText
 import kotlin.streams.toList
 
 internal class CopperDataMapMigration {
+    companion object {
+        /** The change that generates the oxidizable/waxable data map provider (the data generation evidence keys on it). */
+        const val PROVIDER_RULE_ID = "build-copper-datamap-provider"
+    }
+
     private data class Candidate(
         val file: Path,
         val packageName: String,
@@ -59,7 +64,7 @@ internal class CopperDataMapMigration {
                     before = "no data map provider for source-declared copper transitions",
                     after = "$providerPackage.$providerName",
                     confidence = Confidence.HIGH,
-                    ruleId = "build-copper-datamap-provider"
+                    ruleId = PROVIDER_RULE_ID
                 )
                 if (!dryRun) {
                     providerFile.parent.createDirectories()
